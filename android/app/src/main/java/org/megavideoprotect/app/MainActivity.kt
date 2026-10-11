@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -27,6 +28,8 @@ class MainActivity : ComponentActivity() {
     private var screen by mutableStateOf<Screen>(Screen.Login)
     /** Files handed over from another app's Share / Send menu. Held until the vault is open. */
     private var pendingShare by mutableStateOf<List<Uri>>(emptyList())
+    /** The lock screen is up, but the vault stays open so a swap can keep going. */
+    private var shareHoldsVault = false
 
     private fun show(next: Screen) {
         screen = next
@@ -49,8 +52,15 @@ class MainActivity : ComponentActivity() {
                     .setAction(MusicPlaybackService.ACTION_STOP),
             )
         }
-        if (RemoteVault.connected()) RemoteVault.disconnect()
-        else runCatching { CoreBridge.nativeLock() }
+        // A swap outlives the lock screen. It ends when someone disconnects
+        // or the PC stops sharing, and the vault locks then.
+        if (PeerLink.linked()) {
+            shareHoldsVault = true
+        } else {
+            shareHoldsVault = false
+            if (RemoteVault.connected()) RemoteVault.disconnect()
+            else runCatching { CoreBridge.nativeLock() }
+        }
         GalleryCache.clear()
         show(Screen.Login)
     }
@@ -74,10 +84,7 @@ class MainActivity : ComponentActivity() {
         val vaultExists = runCatching { CoreBridge.nativeVaultExists(vaultRoot) }.getOrDefault(false)
         val open = unlocked()
         if (open && awayTooLong()) {
-            if (RemoteVault.connected()) RemoteVault.disconnect()
-            else runCatching { CoreBridge.nativeLock() }
-            GalleryCache.clear()
-            show(Screen.Login)
+            lockNow()
         } else if (open && AppSession.screen !is Screen.Login && AppSession.screen !is Screen.Setup) {
             show(AppSession.screen)
         } else if (vaultExists) {
@@ -94,11 +101,17 @@ class MainActivity : ComponentActivity() {
                 // the login screen it leaves the app without locking.
                 BackHandler(enabled = screen !is Screen.Setup) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Peer -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
 
+                LaunchedEffect(PeerLink.pcName) {
+                    if (shareHoldsVault && PeerLink.pcName == null && screen is Screen.Login) {
+                        shareHoldsVault = false
+                        runCatching { CoreBridge.nativeLock() }
+                    }
+                }
                 Box(Modifier.fillMaxSize()) {
                     when (val current = screen) {
                         is Screen.Setup -> SetupScreen(
@@ -110,12 +123,16 @@ class MainActivity : ComponentActivity() {
                         is Screen.Login -> LoginScreen(
                             vaultLocation = vaultRoot,
                             locationOptions = locationOptions,
-                            onUnlocked = { show(Screen.Vault) },
+                            onUnlocked = {
+                                shareHoldsVault = false
+                                show(Screen.Vault)
+                            },
                             onBack = { show(Screen.Setup) },
                         )
                         is Screen.Vault -> VaultScreen(
                             vaultLocation = RemoteVault.label() ?: vaultRoot,
                             onLock = { lockNow() },
+                            onOpenPeer = { show(Screen.Peer) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
                             onOpenMusic = {
@@ -147,6 +164,7 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                         )
+                        is Screen.Peer -> PeerScreen(onClose = { show(Screen.Vault) })
                         is Screen.Player -> PlayerScreen(
                             videoId = current.videoId,
                             name = current.name,
@@ -184,14 +202,14 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Music
+            || screen is Screen.Image || screen is Screen.Music || screen is Screen.Peer
         if (inside && unlocked()) show(Screen.Vault)
     }
 
     override fun onStart() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Music
+            || screen is Screen.Image || screen is Screen.Music || screen is Screen.Peer
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }

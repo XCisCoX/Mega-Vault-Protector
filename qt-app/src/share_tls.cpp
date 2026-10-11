@@ -32,6 +32,9 @@ namespace {
 
 constexpr int kHandshakeMs = 8000;
 constexpr int kMaxHandshakeBytes = 64 * 1024;
+// Undecrypted bytes taken from the socket in one go. A swapped phone uploads
+// read chunks, so this has to hold more than one chunk.
+constexpr int kMaxPendingBytes = 8 * 1024 * 1024;
 
 #if defined(_WIN32)
 
@@ -358,7 +361,7 @@ struct TlsChannel::Impl {
                 const int left = timeoutMs - static_cast<int>(timer.elapsed());
                 if (left <= 0 || !socket.waitForReadyRead(left)) return false;
                 pending += socket.readAll();
-                if (pending.size() > kMaxHandshakeBytes * 4) return false;
+                if (pending.size() > kMaxPendingBytes) return false;
                 if (pending.isEmpty()) return false;
             }
             SecBuffer buffers[4] = {};

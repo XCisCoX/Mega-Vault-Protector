@@ -13,6 +13,9 @@ class Vault;
 
 namespace videovault::app {
 
+class PeerLink;
+struct PeerCopyPlan;
+
 // Runs batch operations (multi-file import, multi-video restore) off the UI
 // thread with up to four files processed in parallel, and reports progress to
 // the UI thread via queued signals — the UI event loop is never blocked.
@@ -40,6 +43,13 @@ public slots:
 
     void removeVideos(
         std::shared_ptr<std::vector<std::int64_t>> ids,
+        std::shared_ptr<videovault::core::Vault> vault);
+
+    // Copies folders and files out of a swapped phone's library, one file at
+    // a time, recreating the folder structure under plan->destination.
+    void copyFromPeer(
+        std::shared_ptr<PeerCopyPlan> plan,
+        std::shared_ptr<PeerLink> peer,
         std::shared_ptr<videovault::core::Vault> vault);
 
 signals:

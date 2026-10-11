@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -56,7 +57,9 @@ struct TagEditorData {
 
 class BatchWorker;
 class FrostedBar;
+class PeerBrowser;
 class ShareServer;
+struct PeerCopyPlan;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -99,6 +102,8 @@ private:
     void beginRemoveFolder(std::int64_t folder_id);
     void beginRenameVideo(std::int64_t video_id);
     void beginMoveSelection(std::int64_t moving_folder_id);
+    bool chooseFolder(const QString& title, const std::vector<std::int64_t>& blocked,
+        std::int64_t* chosen);
     int selectedGalleryKind() const;
     void activateCurrentItem();
     void beginRemoveSelected(bool ask = true);
@@ -127,6 +132,12 @@ private:
     void showLogin(const std::filesystem::path& path);
     void showUnlocked();
     void openShare();
+    void ensureShareServer();
+    void approvePeer(const QString& phone, std::function<void(bool)> answer);
+    void peerChanged();
+    bool peerLinked() const;
+    void openPeerBrowser();
+    void beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan);
     void lockVault();
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
@@ -206,6 +217,8 @@ private:
     std::shared_ptr<core::Vault> vault_;
     // Declared after the vault so sharing stops before the vault is destroyed.
     std::unique_ptr<ShareServer> shareServer_;
+    // The swapped phone's library, while it is open. Deletes itself on close.
+    PeerBrowser* peerBrowser_{nullptr};
 };
 
 } // namespace videovault::app

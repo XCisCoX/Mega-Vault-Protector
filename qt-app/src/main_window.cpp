@@ -2,6 +2,8 @@
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/music_window.hpp"
+#include "videovault/app/peer_browser.hpp"
+#include "videovault/app/peer_link.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/share_server.hpp"
@@ -88,6 +90,8 @@ namespace {
 constexpr int kSetupPage = 0;
 constexpr int kLoginPage = 1;
 constexpr int kUnlockedPage = 2;
+// Gallery item kinds (Qt::UserRole + 12).
+constexpr int kKindPhone = 3;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
 // default, matching the previous fixed timer.
 int autoLockMilliseconds() {
@@ -197,6 +201,22 @@ const QPixmap& folderPixmap() {
     return pix;
 }
 
+// A folder with a phone on it: the swapped phone's library.
+const QPixmap& phoneFolderPixmap() {
+    static const QPixmap pix = [] {
+        QPixmap image = folderPixmap().copy();
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(255, 255, 255, 235));
+        painter.drawRoundedRect(QRectF(50, 46, 28, 52), 6, 6);
+        painter.setBrush(QColor(64, 140, 230));
+        painter.drawRoundedRect(QRectF(54, 52, 20, 36), 2, 2);
+        return image;
+    }();
+    return pix;
+}
+
 void updateIconItemText(QListWidgetItem* item);
 
 QString vaultErrorText(const core::VaultError& error) {
@@ -212,22 +232,23 @@ void addLibraryEntry(
     const qlonglong role_id,
     const int kind,
     const QString& name,
-    const QString& meta) {
+    const QString& meta,
+    const QPixmap& pixmap = folderPixmap()) {
     auto* iconItem = new QListWidgetItem(list);
     iconItem->setData(Qt::UserRole, role_id);
     iconItem->setData(Qt::UserRole + 1, name);
     iconItem->setData(Qt::UserRole + 3, name);
     iconItem->setData(Qt::UserRole + 5, meta);
     iconItem->setData(Qt::UserRole + 12, kind);
-    iconItem->setData(Qt::UserRole + 4, folderPixmap());
-    iconItem->setIcon(QIcon(folderPixmap()));
+    iconItem->setData(Qt::UserRole + 4, pixmap);
+    iconItem->setIcon(QIcon(pixmap));
     iconItem->setToolTip(name);
     updateIconItemText(iconItem);
 
     auto* treeItem = new QTreeWidgetItem(tree);
     treeItem->setText(0, name);
     treeItem->setText(1, meta);
-    treeItem->setIcon(0, QIcon(folderPixmap()));
+    treeItem->setIcon(0, QIcon(pixmap));
     treeItem->setData(0, Qt::UserRole, role_id);
     treeItem->setData(0, Qt::UserRole + 12, kind);
     treeItem->setToolTip(0, name);
@@ -614,6 +635,9 @@ void placePopup(QDialog* popup, const QPoint& globalPosition) {
 
 struct VaultOperationResult {
     bool succeeded{false};
+    // The vault was already open for a swap. The password checked out, so the
+    // same vault stays in place instead of being opened a second time.
+    bool resumed{false};
     std::unique_ptr<core::Vault> vault;
     core::VaultError error;
 };
@@ -737,7 +761,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             }
             if (inGallery) {
                 const int kind = selectedGalleryKind();
-                if (kind == 1 || kind == 2) {
+                if (kind == 1 || kind == 2 || kind == kKindPhone) {
                     activateCurrentItem();
                     return true;
                 }
@@ -1352,6 +1376,8 @@ QWidget* MainWindow::buildUnlockedPage() {
                 openFolder(-id);
             } else if (kind == 2) {
                 openFolder(id);
+            } else if (kind == kKindPhone) {
+                openPeerBrowser();
             } else {
                 beginPlayback(id);
             }
@@ -1364,6 +1390,8 @@ QWidget* MainWindow::buildUnlockedPage() {
                 openFolder(-id);
             } else if (kind == 2) {
                 openFolder(id);
+            } else if (kind == kKindPhone) {
+                openPeerBrowser();
             } else {
                 beginPlayback(id);
             }
@@ -1518,7 +1546,7 @@ void MainWindow::sortGalleryItems() {
     std::stable_sort(items.begin(), items.end(), [key, ascending](QListWidgetItem* left, QListWidgetItem* right) {
         auto rank = [](QListWidgetItem* item) {
             const int kind = item->data(Qt::UserRole + 12).toInt();
-            if (kind == 2) {
+            if (kind == 2 || kind == kKindPhone) {
                 return 0;
             }
             return kind == 1 ? 1 : 2;
@@ -1861,6 +1889,24 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     }
 
     CommandPopup menu(this);
+    if (on_item && kind == kKindPhone) {
+        menu.addCommand(QStringLiteral("Open"), 1);
+        menu.addCommand(QStringLiteral("Disconnect phone"), 2, true);
+        placePopup(&menu, global_position);
+        switch (menu.exec()) {
+        case 1:
+            openPeerBrowser();
+            break;
+        case 2:
+            if (shareServer_) {
+                shareServer_->unlinkPeer();
+            }
+            break;
+        default:
+            break;
+        }
+        return;
+    }
     if (!on_item || kind == 2) {
         menu.addCommand(QStringLiteral("New folder"), 1);
         placePopup(&menu, global_position);
@@ -2015,11 +2061,31 @@ void MainWindow::beginOpen() {
     }
 
     auto password = std::make_shared<std::string>(passwordText.toUtf8().constData());
+    // A swap keeps the vault open behind the lock screen. Check the password
+    // and come back to that same vault; opening a second one would drop the share.
+    const bool resumeShare = vault_ && vault_->is_unlocked();
+    if (resumeShare && root != vault_->root_path()) {
+        setError(loginError_, QStringLiteral("Stop sharing before opening another vault."));
+        return;
+    }
     setBusy(true);
     watcher_ = new QFutureWatcher<std::shared_ptr<VaultOperationResult>>(this);
     connect(watcher_, &QFutureWatcherBase::finished, this, [this] { finishOperation(); });
-    watcher_->setFuture(QtConcurrent::run([root, password] {
+    watcher_->setFuture(QtConcurrent::run([root, password, resumeShare] {
         auto outcome = std::make_shared<VaultOperationResult>();
+        if (resumeShare) {
+            auto checked = core::Vault::validate_password(root, *password);
+            clearSecret(*password);
+            if (!checked) {
+                outcome->error = checked.error();
+            } else if (!checked.value()) {
+                outcome->error = core::VaultError{core::VaultErrorCode::WrongPassword, {}};
+            } else {
+                outcome->succeeded = true;
+                outcome->resumed = true;
+            }
+            return outcome;
+        }
         auto result = core::Vault::open(root, *password);
         clearSecret(*password);
         if (result) {
@@ -2051,7 +2117,12 @@ void MainWindow::finishOperation() {
         return;
     }
 
-    vault_ = std::shared_ptr<core::Vault>(std::move(outcome->vault));
+    if (!outcome->resumed) {
+        vault_ = std::shared_ptr<core::Vault>(std::move(outcome->vault));
+        if (shareServer_) {
+            shareServer_->setLocalVault(vault_);
+        }
+    }
     QSettings settings;
     settings.setValue(QStringLiteral("vault/location"), textFromPath(vault_->root_path()));
     showUnlocked();
@@ -2397,6 +2468,17 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         return false;
     }
 
+    const auto rejectPhoneDrop = [this, event, drop] {
+        highlightDropFolder(0, false);
+        drop->ignore();
+        if (event->type() == QEvent::Drop) {
+            setError(galleryStatus_, QStringLiteral(
+                "The phone's library is read-only. Open it to copy from it."));
+            galleryStatus_->setVisible(true);
+        }
+        return true;
+    };
+
     std::int64_t destination = currentFolderId_;
     bool on_folder = false;
     if (on_crumb) {
@@ -2411,6 +2493,9 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         if (item != nullptr) {
             const int kind = item->data(0, Qt::UserRole + 12).toInt();
             const auto role = item->data(0, Qt::UserRole).toLongLong();
+            if (kind == kKindPhone) {
+                return rejectPhoneDrop();
+            }
             if (kind == 1) {
                 destination = -role;
                 on_folder = true;
@@ -2428,6 +2513,9 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         if (item != nullptr) {
             const int kind = item->data(Qt::UserRole + 12).toInt();
             const auto role = item->data(Qt::UserRole).toLongLong();
+            if (kind == kKindPhone) {
+                return rejectPhoneDrop();
+            }
             if (kind == 1) {
                 destination = -role;
                 on_folder = true;
@@ -2704,6 +2792,35 @@ void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
             }
         }
     }
+    std::int64_t destination = 0;
+    if (!chooseFolder(QStringLiteral("Move to"), blocked, &destination)) {
+        return;
+    }
+    if (moving_folder_id > 0) {
+        auto moved = vault_->move_folder(moving_folder_id, destination);
+        if (!moved) {
+            setError(galleryStatus_, vaultErrorText(moved.error()));
+            galleryStatus_->setVisible(true);
+            return;
+        }
+    } else {
+        const auto ids = selectedVideoIds();
+        for (const auto id : ids) {
+            auto moved = vault_->move_video(id, destination);
+            if (!moved) {
+                setError(galleryStatus_, vaultErrorText(moved.error()));
+                galleryStatus_->setVisible(true);
+                refreshGallery();
+                return;
+            }
+        }
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64_t>& blocked,
+    std::int64_t* chosen) {
     auto blockedHas = [&blocked](const std::int64_t id) {
         for (const auto id_value : blocked) {
             if (id_value == id) {
@@ -2733,7 +2850,7 @@ void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
     };
 
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Move to"));
+    dialog.setWindowTitle(title);
     dialog.setMinimumWidth(360);
     auto* layout = new QVBoxLayout(&dialog);
     auto* list = new QListWidget(&dialog);
@@ -2755,9 +2872,15 @@ void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
     if (list->count() == 0) {
         setError(galleryStatus_, QStringLiteral("There is nowhere else to move this."));
         galleryStatus_->setVisible(true);
-        return;
+        return false;
     }
     list->setCurrentRow(0);
+    for (int row = 0; row < list->count(); ++row) {
+        if (list->item(row)->data(Qt::UserRole).toLongLong() == *chosen) {
+            list->setCurrentRow(row);
+            break;
+        }
+    }
     layout->addWidget(list);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addWidget(buttons);
@@ -2765,30 +2888,10 @@ void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
     if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
-        return;
+        return false;
     }
-    const auto destination = list->currentItem()->data(Qt::UserRole).toLongLong();
-    if (moving_folder_id > 0) {
-        auto moved = vault_->move_folder(moving_folder_id, destination);
-        if (!moved) {
-            setError(galleryStatus_, vaultErrorText(moved.error()));
-            galleryStatus_->setVisible(true);
-            return;
-        }
-    } else {
-        const auto ids = selectedVideoIds();
-        for (const auto id : ids) {
-            auto moved = vault_->move_video(id, destination);
-            if (!moved) {
-                setError(galleryStatus_, vaultErrorText(moved.error()));
-                galleryStatus_->setVisible(true);
-                refreshGallery();
-                return;
-            }
-        }
-    }
-    setError(galleryStatus_, {});
-    refreshGallery();
+    *chosen = list->currentItem()->data(Qt::UserRole).toLongLong();
+    return true;
 }
 
 int MainWindow::selectedGalleryKind() const {
@@ -2812,6 +2915,8 @@ void MainWindow::activateCurrentItem() {
             openFolder(-id);
         } else if (kind == 2) {
             openFolder(id);
+        } else if (kind == kKindPhone) {
+            openPeerBrowser();
         } else if (id > 0) {
             beginPlayback(id);
         }
@@ -2827,6 +2932,8 @@ void MainWindow::activateCurrentItem() {
         openFolder(-id);
     } else if (kind == 2) {
         openFolder(id);
+    } else if (kind == kKindPhone) {
+        openPeerBrowser();
     } else if (id > 0) {
         beginPlayback(id);
     }
@@ -2888,6 +2995,13 @@ void MainWindow::refreshGallery() {
             addLibraryEntry(iconList_, detailsTree_, parentOfOpen, 2,
                 QStringLiteral(".."), QStringLiteral("Up"));
             ++folderCount;
+        } else if (peerLinked()) {
+            const QString phone = shareServer_->peer()->name();
+            if (searchText_.isEmpty() || phone.contains(searchText_, Qt::CaseInsensitive)) {
+                addLibraryEntry(iconList_, detailsTree_, 0, kKindPhone, phone,
+                    QStringLiteral("Phone · shared with you"), phoneFolderPixmap());
+                ++folderCount;
+            }
         }
         for (const auto& child : childFolders) {
             if (!searchText_.isEmpty()
@@ -3496,18 +3610,157 @@ void MainWindow::showUnlocked() {
     refreshGallery();
 }
 
+void MainWindow::ensureShareServer() {
+    if (shareServer_) {
+        return;
+    }
+    shareServer_ = std::make_unique<ShareServer>();
+    shareServer_->setOnRunning([this](bool sharing) {
+        if (shareButton_ != nullptr) {
+            shareButton_->setText(sharing ? QStringLiteral("Sharing…") : QStringLiteral("Share"));
+        }
+    });
+    shareServer_->setLinkApprover(this, [this](const QString& phone, std::function<void(bool)> answer) {
+        approvePeer(phone, std::move(answer));
+    });
+    shareServer_->setOnPeerChanged([this] { peerChanged(); });
+}
+
+void MainWindow::approvePeer(const QString& phone, std::function<void(bool)> answer) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        answer(false);
+        return;
+    }
+    auto* box = new QMessageBox(QMessageBox::Question, QStringLiteral("Swap libraries"),
+        QStringLiteral("\"%1\" wants to swap libraries with this PC.").arg(phone),
+        QMessageBox::NoButton, this);
+    box->setInformativeText(QStringLiteral(
+        "The phone will see your library and can copy anything from it. Its library shows up "
+        "here as a folder you can copy from. Nobody can change or remove the other's files."));
+    auto* allow = box->addButton(QStringLiteral("Allow"), QMessageBox::AcceptRole);
+    box->addButton(QStringLiteral("Decline"), QMessageBox::RejectRole);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    auto reply = std::make_shared<std::function<void(bool)>>(std::move(answer));
+    connect(box, &QMessageBox::finished, this, [box, allow, reply](int) {
+        if (*reply) {
+            (*reply)(box->clickedButton() == allow);
+            *reply = nullptr;
+        }
+    });
+    // The phone gives up after a minute; an answer after that would be lost.
+    QTimer::singleShot(55000, box, [box] { box->reject(); });
+    box->open();
+    QApplication::alert(this);
+}
+
+bool MainWindow::peerLinked() const {
+    return shareServer_ && shareServer_->peer()->linked();
+}
+
+void MainWindow::peerChanged() {
+    const bool linked = peerLinked();
+    if (!linked && peerBrowser_ != nullptr) {
+        auto* closing = peerBrowser_;
+        peerBrowser_ = nullptr;
+        closing->close();
+    }
+    // The lock screen was only hiding the library. With the swap gone, lock for real.
+    if (!linked && pages_ != nullptr && pages_->currentIndex() == kLoginPage
+        && vault_ && vault_->is_unlocked()) {
+        if (shareServer_) {
+            shareServer_->setLocalVault(nullptr);
+        }
+        vault_->lock();
+        vault_.reset();
+        return;
+    }
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    if (currentFolderId_ == 0) {
+        refreshGallery();
+    }
+    if (!batchBusy_) {
+        setError(galleryStatus_, linked
+            ? QStringLiteral("Swapped libraries with %1. Its library is the phone folder in Library.")
+                  .arg(shareServer_->peer()->name())
+            : QStringLiteral("The phone's library is no longer shared."));
+        galleryStatus_->setVisible(true);
+    }
+}
+
+void MainWindow::openPeerBrowser() {
+    if (!peerLinked()) {
+        setError(galleryStatus_, QStringLiteral("The phone is no longer connected."));
+        galleryStatus_->setVisible(true);
+        refreshGallery();
+        return;
+    }
+    if (peerBrowser_ != nullptr) {
+        peerBrowser_->raise();
+        peerBrowser_->activateWindow();
+        return;
+    }
+    peerBrowser_ = new PeerBrowser(shareServer_->peer(), this);
+    peerBrowser_->setOnCopy([this](std::shared_ptr<PeerCopyPlan> plan) {
+        beginCopyFromPeer(std::move(plan));
+    });
+    peerBrowser_->setOnUnlink([this] {
+        if (shareServer_) {
+            shareServer_->unlinkPeer();
+        }
+    });
+    auto* opened = peerBrowser_;
+    connect(opened, &QObject::destroyed, this, [this, opened] {
+        if (peerBrowser_ == opened) {
+            peerBrowser_ = nullptr;
+        }
+    });
+    peerBrowser_->show();
+}
+
+void MainWindow::beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan) {
+    if (!vault_ || !vault_->is_unlocked() || !peerLinked()) {
+        return;
+    }
+    if (batchBusy_) {
+        QMessageBox::information(this, QStringLiteral("Copy to my library"),
+            QStringLiteral("Wait for the current task to finish, then copy again."));
+        return;
+    }
+    if (auto listed = vault_->list_folders(); listed) {
+        folders_ = std::move(listed.value());
+    }
+    std::int64_t destination = currentFolderId_;
+    if (!chooseFolder(QStringLiteral("Copy into"), {}, &destination)) {
+        return;
+    }
+    plan->destination = destination;
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Copying");
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    galleryStatus_->setText(QStringLiteral("Copying from %1…").arg(plan->phone));
+    galleryStatus_->setVisible(true);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    const auto vault = vault_;
+    const auto peer = shareServer_->peer();
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, plan = std::move(plan), peer, vault] {
+            worker->copyFromPeer(plan, peer, vault);
+        },
+        Qt::QueuedConnection);
+}
+
 void MainWindow::openShare() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
-    if (!shareServer_) {
-        shareServer_ = std::make_unique<ShareServer>();
-        shareServer_->setOnRunning([this](bool sharing) {
-            if (shareButton_ != nullptr) {
-                shareButton_->setText(sharing ? QStringLiteral("Sharing…") : QStringLiteral("Share"));
-            }
-        });
-    }
+    ensureShareServer();
+    shareServer_->setLocalVault(vault_);
     if (!shareServer_->running()) {
         QString error;
         if (!shareServer_->start(vault_->root_path(), &error)) {
@@ -3520,7 +3773,13 @@ void MainWindow::openShare() {
 
 void MainWindow::lockVault() {
     autoLockTimer_->stop();
-    // Sharing stays up. The phone keeps its own unlocked vault until Stop sharing.
+    // Sharing stays up until Stop sharing, including a swap. The lock screen
+    // only hides this library; the other side can still look and copy.
+    if (peerBrowser_ != nullptr) {
+        auto* closing = peerBrowser_;
+        peerBrowser_ = nullptr;
+        closing->close();
+    }
     std::filesystem::path root;
     if (playerWindow_ != nullptr) {
         auto* dying = playerWindow_;
@@ -3534,6 +3793,23 @@ void MainWindow::lockVault() {
     }
     if (vault_) {
         root = vault_->root_path();
+        if (peerLinked()) {
+            importButton_->setEnabled(true);
+            importFolderButton_->setEnabled(true);
+            settingsButton_->setEnabled(true);
+            detailsTree_->clear();
+            iconList_->clear();
+            tagFilterId_ = -1;
+            tagFilterName_.clear();
+            searchText_.clear();
+            currentFolderId_ = 0;
+            folders_.clear();
+            showLogin(root);
+            return;
+        }
+        if (shareServer_) {
+            shareServer_->setLocalVault(nullptr);
+        }
         vault_->lock();
         vault_.reset();
     }

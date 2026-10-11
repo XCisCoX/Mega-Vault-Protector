@@ -1,6 +1,7 @@
 #include "videovault/app/share_server.hpp"
 #include "videovault/app/share_tls.hpp"
 #include "videovault/app/glass.hpp"
+#include "videovault/app/peer_link.hpp"
 
 #include "qrcodegen.hpp"
 #include "videovault/core/vault.hpp"
@@ -14,15 +15,19 @@
 #include <QHBoxLayout>
 #include <QHostAddress>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QPainter>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
 #include <QRandomGenerator>
 #include <QSemaphore>
+#include <QSysInfo>
 #include <QTcpServer>
 #include <QThread>
 #include <QRunnable>
@@ -32,6 +37,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 
@@ -39,6 +46,11 @@ namespace videovault::app {
 namespace {
 
 constexpr int kMaxReadBytes = 1 << 20;
+constexpr int kMaxBodyBytes = 2048;
+// A swapped phone answers with up to one read chunk plus a thumbnail.
+constexpr int kMaxReplyBytes = 4 << 20;
+constexpr int kPollWaitMs = 20000;
+constexpr int kApprovalWaitMs = 60000;
 
 QString jsonEscape(const QString& text) {
     QString out;
@@ -139,7 +151,9 @@ bool writeRaw(TlsChannel* socket, const char* data, int size) {
     return true;
 }
 
-bool readRequest(TlsChannel* socket, Request* request) {
+// `bodyLimit` sees the parsed headers and returns the largest body allowed.
+bool readRequest(TlsChannel* socket, Request* request,
+    const std::function<int(const Request&)>& bodyLimit) {
     QByteArray raw;
     while (!raw.contains("\r\n\r\n")) {
         if (!socket->waitForReadyRead(8000)) return false;
@@ -174,12 +188,14 @@ bool readRequest(TlsChannel* socket, Request* request) {
         }
     }
     QByteArray body = raw.mid(end + 4);
-    if (contentLength > 2048) return false;
+    const int limit = bodyLimit ? bodyLimit(*request) : kMaxBodyBytes;
+    if (contentLength > limit) return false;
     if (contentLength > 0) {
+        body.reserve(contentLength);
         while (body.size() < contentLength) {
             if (!socket->waitForReadyRead(8000)) return false;
             body += socket->readAll();
-            if (body.size() > 4096) return false;
+            if (body.size() > limit + 4096) return false;
         }
         body.truncate(contentLength);
     } else {
@@ -189,17 +205,27 @@ bool readRequest(TlsChannel* socket, Request* request) {
     return true;
 }
 
+bool sameSecret(const QByteArray& got, const QByteArray& expected) {
+    if (expected.isEmpty() || got.size() != expected.size()) return false;
+    unsigned char diff = 0;
+    for (int i = 0; i < got.size(); ++i) {
+        diff |= static_cast<unsigned char>(got.at(i) ^ expected.at(i));
+    }
+    return diff == 0;
+}
+
 bool authorized(const Request& request, const QByteArray& tokenHex) {
     if (tokenHex.isEmpty()) return false;
     const QByteArray prefix = "Bearer ";
     if (!request.authorization.startsWith(prefix)) return false;
-    const QByteArray got = request.authorization.mid(prefix.size()).trimmed().toLower();
-    if (got.size() != tokenHex.size()) return false;
-    unsigned char diff = 0;
-    for (int i = 0; i < got.size(); ++i) {
-        diff |= static_cast<unsigned char>(got.at(i) ^ tokenHex.at(i));
-    }
-    return diff == 0;
+    return sameSecret(request.authorization.mid(prefix.size()).trimmed().toLower(), tokenHex);
+}
+
+QByteArray randomHex() {
+    quint32 words[8] = {};
+    QRandomGenerator::system()->fillRange(words);
+    const QByteArray raw(reinterpret_cast<const char*>(words), static_cast<int>(sizeof(words)));
+    return raw.toHex();
 }
 
 qlonglong queryId(const Request& request) {
@@ -274,12 +300,38 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
 
 } // namespace
 
+struct ShareServer::Hooks {
+    std::mutex mutex;
+    std::shared_ptr<core::Vault> localVault;
+    QPointer<QObject> context;
+    Approver approver;
+    std::function<void()> onPeerChanged;
+
+    // Queued on the context thread; dropped if the context is gone.
+    void peerChanged() {
+        std::function<void()> callback;
+        QPointer<QObject> target;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            callback = onPeerChanged;
+            target = context;
+        }
+        if (!callback || target.isNull()) return;
+        QMetaObject::invokeMethod(target.data(), [callback] { callback(); }, Qt::QueuedConnection);
+    }
+};
+
 struct ShareServer::State {
     std::filesystem::path root;
     std::shared_ptr<ShareTlsIdentity> tls;
     std::mutex gate;
     std::shared_ptr<core::Vault> vault;
     QByteArray tokenHex;
+    // Swap: the key printed in the QR code and the token of the linked phone.
+    QByteArray linkKeyHex;
+    QByteArray linkTokenHex;
+    std::shared_ptr<Hooks> hooks;
+    std::shared_ptr<PeerLink> peer;
     std::atomic<bool> accepting{true};
 };
 
@@ -362,6 +414,16 @@ struct SessionView {
 SessionView sessionOf(const std::shared_ptr<ShareServer::State>& state) {
     std::lock_guard<std::mutex> lock(state->gate);
     return SessionView{state->vault, state->tokenHex};
+}
+
+QByteArray linkTokenOf(const std::shared_ptr<ShareServer::State>& state) {
+    std::lock_guard<std::mutex> lock(state->gate);
+    return state->linkTokenHex;
+}
+
+std::shared_ptr<core::Vault> localVaultOf(const std::shared_ptr<ShareServer::State>& state) {
+    std::lock_guard<std::mutex> lock(state->hooks->mutex);
+    return state->hooks->localVault;
 }
 
 enum class RangeKind { None, Ok, Bad };
@@ -520,9 +582,140 @@ void handleLogin(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& 
         QByteArray("{\"ok\":true,\"token\":\"") + hex + "\"}");
 }
 
+// The phone scanned the code from "Swap with PC". The key proves it saw the
+// code; the person at the PC still has to accept before anything is shared.
+void handleLink(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state, const Request& request) {
+    const QByteArray key = request.query.queryItemValue(QStringLiteral("k")).toLatin1().trimmed().toLower();
+    QByteArray expectedKey;
+    {
+        std::lock_guard<std::mutex> lock(state->gate);
+        expectedKey = state->linkKeyHex;
+    }
+    if (!sameSecret(key, expectedKey)) {
+        ReplyWriter::send(socket, 401, "Unauthorized", "text/plain", "wrong code");
+        return;
+    }
+    QString phone = request.query.queryItemValue(QStringLiteral("name"), QUrl::FullyDecoded)
+        .simplified().left(48);
+    if (phone.isEmpty()) phone = QStringLiteral("Phone");
+
+    const auto local = localVaultOf(state);
+    if (!local || !local->is_unlocked()) {
+        ReplyWriter::send(socket, 409, "Conflict", "text/plain", "unlock the PC first");
+        return;
+    }
+
+    struct Decision {
+        std::mutex mutex;
+        std::condition_variable changed;
+        int value{-1};
+    };
+    const auto decision = std::make_shared<Decision>();
+    ShareServer::Approver approver;
+    QPointer<QObject> context;
+    {
+        std::lock_guard<std::mutex> lock(state->hooks->mutex);
+        approver = state->hooks->approver;
+        context = state->hooks->context;
+    }
+    if (!approver || context.isNull()) {
+        ReplyWriter::send(socket, 403, "Forbidden", "text/plain", "declined");
+        return;
+    }
+    QMetaObject::invokeMethod(context.data(), [approver, phone, decision] {
+        approver(phone, [decision](const bool allowed) {
+            std::lock_guard<std::mutex> lock(decision->mutex);
+            if (decision->value < 0) decision->value = allowed ? 1 : 0;
+            decision->changed.notify_all();
+        });
+    }, Qt::QueuedConnection);
+
+    bool allowed = false;
+    {
+        std::unique_lock<std::mutex> lock(decision->mutex);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kApprovalWaitMs);
+        while (decision->value < 0 && state->accepting.load()
+               && std::chrono::steady_clock::now() < deadline) {
+            decision->changed.wait_for(lock, std::chrono::milliseconds(250));
+        }
+        if (decision->value < 0) decision->value = 0;
+        allowed = decision->value == 1;
+    }
+    if (!allowed || !state->accepting.load()) {
+        ReplyWriter::send(socket, 403, "Forbidden", "text/plain", "declined");
+        return;
+    }
+    // The vault can lock while the Allow dialog is still open.
+    const auto stillOpen = localVaultOf(state);
+    if (!stillOpen || !stillOpen->is_unlocked()) {
+        ReplyWriter::send(socket, 409, "Conflict", "text/plain", "unlock the PC first");
+        return;
+    }
+
+    const QByteArray token = randomHex();
+    {
+        std::lock_guard<std::mutex> lock(state->gate);
+        state->linkTokenHex = token;
+    }
+    state->peer->open(phone);
+    state->hooks->peerChanged();
+
+    QJsonObject reply;
+    reply.insert(QStringLiteral("ok"), true);
+    reply.insert(QStringLiteral("token"), QString::fromLatin1(token));
+    reply.insert(QStringLiteral("name"), QSysInfo::machineHostName());
+    ReplyWriter::send(socket, 200, "OK", "application/json",
+        QJsonDocument(reply).toJson(QJsonDocument::Compact));
+}
+
+// Requests only a swapped phone makes: wait for work, answer it, or leave.
+bool handlePeer(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state, Request& request) {
+    if (request.method == "GET" && request.path == QStringLiteral("/v1/link/next")) {
+        auto job = state->peer->next(kPollWaitMs);
+        if (!job) {
+            ReplyWriter::send(socket, 204, "No Content", "text/plain", {});
+        } else {
+            ReplyWriter::send(socket, 200, "OK", "application/json", job->request);
+        }
+        return true;
+    }
+    if (request.method == "POST" && request.path == QStringLiteral("/v1/link/reply")) {
+        bool idOk = false;
+        bool statusOk = false;
+        const quint64 id = request.query.queryItemValue(QStringLiteral("req")).toULongLong(&idOk);
+        const int status = request.query.queryItemValue(QStringLiteral("status")).toInt(&statusOk);
+        if (!idOk || !statusOk) {
+            ReplyWriter::send(socket, 400, "Bad Request", "text/plain", "bad reply");
+            return true;
+        }
+        state->peer->answer(id, status, std::move(request.body));
+        request.body.clear();
+        ReplyWriter::send(socket, 200, "OK", "application/json", "{\"ok\":true}");
+        return true;
+    }
+    if (request.method == "POST" && request.path == QStringLiteral("/v1/link/end")) {
+        {
+            std::lock_guard<std::mutex> lock(state->gate);
+            wipe(&state->linkTokenHex);
+        }
+        state->peer->close();
+        state->hooks->peerChanged();
+        ReplyWriter::send(socket, 200, "OK", "application/json", "{\"ok\":true}");
+        return true;
+    }
+    return false;
+}
+
 void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state) {
     Request request;
-    if (!readRequest(socket, &request)) {
+    const auto bodyLimit = [&state](const Request& head) {
+        if (head.method == "POST" && head.path == QStringLiteral("/v1/link/reply")
+            && authorized(head, linkTokenOf(state))) {
+            return kMaxReplyBytes;
+        }
+        return kMaxBodyBytes;
+    };
+    if (!readRequest(socket, &request, bodyLimit)) {
         ReplyWriter::send(socket, 400, "Bad Request", "text/plain", "bad request");
         return;
     }
@@ -539,23 +732,43 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
         handleLogin(socket, state, request);
         return;
     }
+    if (request.method == "POST" && request.path == QStringLiteral("/v1/link")) {
+        handleLink(socket, state, request);
+        return;
+    }
     if (request.method == "GET" && request.path == QStringLiteral("/v1/ping")) {
         ReplyWriter::send(socket, 200, "OK", "application/json", "{\"ok\":true}");
+        return;
+    }
+
+    // A swapped phone reads this PC's own open library; a password session
+    // reads the vault it opened.
+    const bool swapped = authorized(request, linkTokenOf(state));
+    if (swapped && handlePeer(socket, state, request)) {
         return;
     }
     if (request.method != "GET") {
         ReplyWriter::send(socket, 405, "Method Not Allowed", "text/plain", "method");
         return;
     }
-    const SessionView session = sessionOf(state);
-    if (!authorized(request, session.tokenHex)) {
-        ReplyWriter::send(socket, 401, "Unauthorized", "text/plain", "unauthorized");
-        return;
-    }
-    auto vault = session.vault;
-    if (!vault || !vault->is_unlocked()) {
-        ReplyWriter::send(socket, 403, "Forbidden", "text/plain", "sign in with the vault password");
-        return;
+    std::shared_ptr<core::Vault> vault;
+    if (swapped) {
+        vault = localVaultOf(state);
+        if (!vault || !vault->is_unlocked()) {
+            ReplyWriter::send(socket, 403, "Forbidden", "text/plain", "the PC is locked");
+            return;
+        }
+    } else {
+        const SessionView session = sessionOf(state);
+        if (!authorized(request, session.tokenHex)) {
+            ReplyWriter::send(socket, 401, "Unauthorized", "text/plain", "unauthorized");
+            return;
+        }
+        vault = session.vault;
+        if (!vault || !vault->is_unlocked()) {
+            ReplyWriter::send(socket, 403, "Forbidden", "text/plain", "sign in with the vault password");
+            return;
+        }
     }
 
     if (request.path == QStringLiteral("/v1/videos")) {
@@ -784,10 +997,42 @@ private:
     QImage backdrop_;
 };
 
-ShareServer::ShareServer() = default;
+ShareServer::ShareServer()
+    : hooks_(std::make_shared<Hooks>()),
+      peer_(std::make_shared<PeerLink>()) {}
 
 ShareServer::~ShareServer() {
     stop();
+}
+
+void ShareServer::setLocalVault(std::shared_ptr<core::Vault> vault) {
+    std::lock_guard<std::mutex> lock(hooks_->mutex);
+    hooks_->localVault = std::move(vault);
+}
+
+void ShareServer::setLinkApprover(QObject* context, Approver approver) {
+    std::lock_guard<std::mutex> lock(hooks_->mutex);
+    hooks_->context = context;
+    hooks_->approver = std::move(approver);
+}
+
+void ShareServer::setOnPeerChanged(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(hooks_->mutex);
+    hooks_->onPeerChanged = std::move(callback);
+}
+
+void ShareServer::unlinkPeer() {
+    const bool was = peer_->linked();
+    if (state_) {
+        std::lock_guard<std::mutex> lock(state_->gate);
+        wipe(&state_->linkTokenHex);
+    }
+    peer_->close();
+    if (was) hooks_->peerChanged();
+}
+
+std::shared_ptr<PeerLink> ShareServer::peer() const {
+    return peer_;
 }
 
 bool ShareServer::start(const std::filesystem::path& root, QString* error) {
@@ -808,10 +1053,15 @@ bool ShareServer::start(const std::filesystem::path& root, QString* error) {
     state_ = std::make_shared<State>();
     state_->root = root;
     state_->tls = std::move(tls);
+    state_->linkKeyHex = randomHex();
+    state_->hooks = hooks_;
+    state_->peer = peer_;
     state_->accepting.store(true);
+    linkKey_ = QString::fromLatin1(state_->linkKeyHex);
 
+    // A swapped phone keeps two requests waiting for work at all times.
     auto* pool = new QThreadPool();
-    pool->setMaxThreadCount(4);
+    pool->setMaxThreadCount(8);
     thread_ = new ListenThread(state_, pool);
     // The pool outlives the listen thread's tasks. Parent it to nothing and
     // keep it alive in the thread object via a property... store on the thread.
@@ -834,7 +1084,9 @@ bool ShareServer::start(const std::filesystem::path& root, QString* error) {
 
 void ShareServer::stop() {
     const bool was = running();
+    const bool linked = peer_->linked();
     if (state_) state_->accepting.store(false);
+    peer_->close();
     if (thread_ != nullptr) {
         thread_->quit();
         thread_->wait(3000);
@@ -851,16 +1103,20 @@ void ShareServer::stop() {
             std::lock_guard<std::mutex> lock(state_->gate);
             vault = std::move(state_->vault);
             wipe(&state_->tokenHex);
+            wipe(&state_->linkTokenHex);
+            wipe(&state_->linkKeyHex);
         }
         if (vault) vault->lock();
     }
     state_.reset();
     port_ = 0;
     fingerprint_.clear();
+    linkKey_.clear();
     if (dialog_ != nullptr) {
         dialog_->close();
         dialog_ = nullptr;
     }
+    if (linked) hooks_->peerChanged();
     if (was && onRunning_) onRunning_(false);
 }
 
@@ -873,7 +1129,7 @@ quint16 ShareServer::port() const { return port_; }
 QStringList ShareServer::hosts() const { return lanHosts(); }
 
 QString ShareServer::linkFor(const QString& host) const {
-    return QStringLiteral("mvpvault://%1:%2?fp=%3").arg(host).arg(port_).arg(fingerprint_);
+    return QStringLiteral("mvpvault://%1:%2?fp=%3&k=%4").arg(host).arg(port_).arg(fingerprint_, linkKey_);
 }
 
 void ShareServer::setOnRunning(std::function<void(bool)> callback) {
@@ -938,7 +1194,10 @@ void ShareServer::showDialog(QWidget* parent) {
 
     auto* intro = new QLabel(QStringLiteral(
         "Scan with Mega Vault Protect on your phone, then enter the vault password. "
-        "Use the same Wi-Fi. Locking this PC does not stop sharing."), sheet);
+        "Or, on the phone, tap + and Swap with PC to trade libraries: you accept here, "
+        "then each side sees the other's library as a read-only folder. "
+        "Use the same Wi-Fi. Locking this PC or the phone does not stop sharing. "
+        "Stop sharing is what ends it."), sheet);
     intro->setWordWrap(true);
     QFont bodyFont(QStringLiteral("Segoe UI"));
     bodyFont.setPointSize(10);

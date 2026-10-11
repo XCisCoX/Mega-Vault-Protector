@@ -68,9 +68,11 @@ jobs:
       - name: Cache Android SDK packages
         uses: actions/cache@v4
         with:
+          # v2: the previous cache archive failed to unpack (tar exit 2) and
+          # left an NDK directory sdkmanager still treated as installed.
           path: ${{ env.ANDROID_SDK_ROOT }}
-          key: android-sdk-${{ runner.os }}-${{ env.NDK_VERSION }}
-          restore-keys: android-sdk-${{ runner.os }}-
+          key: android-sdk-v2-${{ runner.os }}-${{ env.NDK_VERSION }}
+          restore-keys: android-sdk-v2-${{ runner.os }}-
 
       - name: Install SDK packages + host tools
         run: |
@@ -82,6 +84,16 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;${NDK_VERSION}" \
             "cmake;3.22.1" >/dev/null
+          # A failed cache unpack can leave package.xml in place while the
+          # toolchain file is missing. sdkmanager then skips the package.
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          TOOLCHAIN="$SDK/ndk/${NDK_VERSION}/build/cmake/android.toolchain.cmake"
+          if [ ! -f "$TOOLCHAIN" ]; then
+            echo "NDK toolchain missing after install; clearing the package and retrying"
+            rm -rf "$SDK/ndk/${NDK_VERSION}"
+            sdkmanager --install "ndk;${NDK_VERSION}"
+          fi
+          test -f "$TOOLCHAIN"
           sudo apt-get update -qq
           # make/ninja drive the core's CMake build, qemu-user runs its aarch64
           # test suites (the script skips them without it), tcl is optional.

@@ -1,4 +1,6 @@
 #include "videovault/app/batch_worker.hpp"
+#include "videovault/app/peer_browser.hpp"
+#include "videovault/app/peer_link.hpp"
 
 #include "videovault/core/vault.hpp"
 
@@ -9,6 +11,10 @@
 #include <thread>
 #include <unordered_map>
 #include <QApplication>
+#include <QDir>
+#include <QFile>
+#include <QJsonObject>
+#include <QTemporaryDir>
 
 namespace videovault::app {
 namespace {
@@ -24,6 +30,36 @@ struct BatchState {
 };
 
 constexpr int kMaxParallelFiles = 4;
+
+// Bytes asked from the phone per request. The answer travels as one HTTP body.
+constexpr int kPeerChunkBytes = 512 * 1024;
+
+// A phone name may hold characters Windows does not allow in a file name.
+QString safeFileName(const QString& name) {
+    QString out;
+    out.reserve(name.size());
+    for (const QChar ch : name) {
+        const bool bad = ch.unicode() < 0x20 || QStringLiteral("\\/:*?\"<>|").contains(ch);
+        out += bad ? QLatin1Char('_') : ch;
+    }
+    out = out.trimmed();
+    while (out.endsWith(QLatin1Char('.'))) out.chop(1);
+    return out.isEmpty() ? QStringLiteral("file") : out;
+}
+
+// Reuses a folder of the same name so a second copy merges into the first.
+videovault::core::Result<std::int64_t> folderIn(
+    videovault::core::Vault& vault, const std::int64_t parent, const QString& name) {
+    if (auto listed = vault.list_folders(); listed) {
+        for (const auto& folder : listed.value()) {
+            if (folder.parent_id == parent
+                && QString::fromStdString(folder.name).compare(name, Qt::CaseInsensitive) == 0) {
+                return folder.id;
+            }
+        }
+    }
+    return vault.create_folder(parent, name.toStdString());
+}
 
 int workerCount() {
     const auto cores = std::thread::hardware_concurrency();
@@ -208,6 +244,110 @@ void BatchWorker::removeVideos(
             QStringLiteral("Removed %1 video(s).").arg(removed.load()), removed.load());
     } else {
         emit finished(false, state->first_error, removed.load());
+    }
+}
+
+void BatchWorker::copyFromPeer(
+    std::shared_ptr<PeerCopyPlan> plan,
+    std::shared_ptr<PeerLink> peer,
+    std::shared_ptr<videovault::core::Vault> vault) {
+    // Each byte is counted twice: once arriving from the phone, once sealed.
+    const auto total = std::max<qlonglong>(1, static_cast<qlonglong>(plan->total_bytes) * 2);
+    qlonglong done = 0;
+    const int fileCount = static_cast<int>(plan->files.size());
+
+    std::unordered_map<std::int64_t, std::int64_t> made;
+    const auto localFolder = [&made, &plan](const std::int64_t phoneFolder) {
+        const auto found = made.find(phoneFolder);
+        return found == made.end() ? plan->destination : found->second;
+    };
+    for (const auto& folder : plan->folders) {
+        auto local = folderIn(*vault, localFolder(folder.parent_id), folder.name);
+        if (!local) {
+            emit finished(false, QStringLiteral("Could not create the folder \"%1\": %2")
+                .arg(folder.name, QString::fromUtf8(
+                    videovault::core::user_message(local.error().code).data())), 0);
+            return;
+        }
+        made[folder.id] = local.value();
+    }
+
+    QTemporaryDir staging;
+    if (!staging.isValid()) {
+        emit finished(false, QStringLiteral("Could not create a temporary folder for the copy."), 0);
+        return;
+    }
+
+    int copied = 0;
+    QString failure;
+    for (int index = 0; index < fileCount && failure.isEmpty(); ++index) {
+        const PeerFile& file = plan->files[static_cast<std::size_t>(index)];
+        // The vault names the item after the imported file, so keep the name.
+        const QString dir = staging.filePath(QString::number(index));
+        QDir().mkpath(dir);
+        const QString path = QDir(dir).filePath(safeFileName(file.name));
+        QFile out(path);
+        if (!out.open(QIODevice::WriteOnly)) {
+            failure = QStringLiteral("Could not write a temporary copy of \"%1\".").arg(file.name);
+            break;
+        }
+        std::uint64_t offset = 0U;
+        while (offset < file.size) {
+            const auto ask = static_cast<int>(std::min<std::uint64_t>(kPeerChunkBytes, file.size - offset));
+            QJsonObject request;
+            request.insert(QStringLiteral("op"), QStringLiteral("read"));
+            request.insert(QStringLiteral("id"), static_cast<double>(file.id));
+            request.insert(QStringLiteral("offset"), static_cast<double>(offset));
+            request.insert(QStringLiteral("size"), ask);
+            const auto reply = peer->call(request, 60000);
+            if (!reply || reply->status != 200 || reply->body.isEmpty()) {
+                failure = peer->linked()
+                    ? QStringLiteral("The phone stopped answering while copying \"%1\".").arg(file.name)
+                    : QStringLiteral("The phone disconnected while copying \"%1\".").arg(file.name);
+                break;
+            }
+            if (out.write(reply->body) != reply->body.size()) {
+                failure = QStringLiteral("Could not write a temporary copy of \"%1\".").arg(file.name);
+                break;
+            }
+            offset += static_cast<std::uint64_t>(reply->body.size());
+            done += reply->body.size();
+            emit progress(std::min(done, total), total);
+        }
+        out.close();
+        if (!failure.isEmpty()) {
+            QFile::remove(path);
+            break;
+        }
+
+        const auto reported = std::make_shared<qlonglong>(0);
+        const auto base = done;
+        auto imported = vault->import_file(
+            std::filesystem::path(path.toStdWString()),
+            [this, reported, base, total, size = file.size](const double fraction) {
+                const auto now = static_cast<qlonglong>(
+                    std::clamp(fraction, 0.0, 1.0) * static_cast<double>(size));
+                if (now <= *reported) return;
+                *reported = now;
+                emit progress(std::min(base + now, total), total);
+            },
+            localFolder(file.folder_id));
+        QFile::remove(path);
+        if (!imported) {
+            failure = QStringLiteral("\"%1\": %2").arg(file.name, QString::fromUtf8(
+                videovault::core::user_message(imported.error().code).data()));
+            break;
+        }
+        done = base + static_cast<qlonglong>(file.size);
+        ++copied;
+        emit fileFinished(copied, fileCount);
+    }
+
+    if (failure.isEmpty()) {
+        emit finished(true, QStringLiteral("Copied %1 file(s) and %2 folder(s) from %3.")
+            .arg(copied).arg(plan->folders.size()).arg(plan->phone), copied);
+    } else {
+        emit finished(false, failure, copied);
     }
 }
 

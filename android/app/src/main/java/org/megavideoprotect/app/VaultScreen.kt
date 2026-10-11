@@ -1,5 +1,6 @@
 package org.megavideoprotect.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.Context
@@ -268,17 +269,24 @@ private fun rememberMediaInfo(id: Long): MediaInfo? {
  *  Listing is database-only; duration / resolution / codec are probed by the
  *  visible rows on demand. Probing every row up front made a large vault take
  *  seconds to appear. */
+/** The swapped PC's library, shown as a folder at the top of the library root. */
+private const val PEER_FOLDER_ID = -1L
+
 @Composable
 fun VaultScreen(
     vaultLocation: String,
     onLock: () -> Unit,
     onPlay: (Long, String, List<VideoEntry>) -> Unit,
     onOpenMusic: () -> Unit = {},
+    onOpenPeer: () -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val pcName = PeerLink.pcName
+    var scanningPc by remember { mutableStateOf(false) }
+    var linkingPc by remember { mutableStateOf(false) }
     var videos by remember { mutableStateOf(GalleryCache.videos) }
     var tags by remember { mutableStateOf(GalleryCache.tags) }
     var folders by remember { mutableStateOf(GalleryCache.folders) }
@@ -393,6 +401,30 @@ fun VaultScreen(
         if (shareUris.isEmpty()) return@LaunchedEffect
         startImport(shareUris)
         onShareHandled()
+    }
+
+    LaunchedEffect(PeerLink.endedReason) {
+        val reason = PeerLink.endedReason ?: return@LaunchedEffect
+        error = reason
+        PeerLink.endedReason = null
+    }
+
+    val pcCamera = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) scanningPc = true else error = "Camera permission is needed to scan the PC."
+    }
+
+    fun startSwap(code: String) {
+        linkingPc = true
+        error = null
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                PeerLink.link(code, PeerLink.deviceName(context))
+            }
+            linkingPc = false
+            error = failure ?: "Swapped libraries. The PC's library is the first folder in Library."
+        }
     }
 
     // Removal is permanent: the core deletes the encrypted package, not just the
@@ -633,6 +665,11 @@ fun VaultScreen(
     )
 
     fun openFolder(id: Long) {
+        if (id == PEER_FOLDER_ID) {
+            selectedIds = emptySet()
+            if (PeerLink.linked()) onOpenPeer() else error = "The PC is no longer connected."
+            return
+        }
         currentFolderId = id
         GalleryCache.currentFolderId = id
         selectedIds = emptySet()
@@ -643,8 +680,12 @@ fun VaultScreen(
             error = "This vault is open on your PC. Move it on the PC."
             return
         }
+        if (destination == PEER_FOLDER_ID) {
+            error = "The PC's library is read-only. Open it to copy from it."
+            return
+        }
         val movingFolders = drag.folders.filter { id ->
-            (folders.firstOrNull { it.id == id }?.parentId ?: 0L) != destination
+            id > 0L && (folders.firstOrNull { it.id == id }?.parentId ?: 0L) != destination
         }
         val movingVideos = drag.videos.filter { id ->
             videos.firstOrNull { it.id == id }?.folderId != destination
@@ -674,6 +715,10 @@ fun VaultScreen(
     }
 
     fun handleDrop(event: DragAndDropEvent, destination: Long): Boolean {
+        if (destination == PEER_FOLDER_ID) {
+            error = "The PC's library is read-only. Open it to copy from it."
+            return true
+        }
         val dragEvent = event.toAndroidDragEvent()
         val local = dragEvent.localState as? VaultDrag
         if (local != null) {
@@ -705,6 +750,17 @@ fun VaultScreen(
         vaultDragData(VaultDrag(ids, emptyList()))
     }
     val dropHere: (DragAndDropEvent) -> Boolean = { handleDrop(it, currentFolderId) }
+
+    if (scanningPc) {
+        QrScanScreen(
+            onCode = { code ->
+                scanningPc = false
+                startSwap(code)
+            },
+            onClose = { scanningPc = false },
+        )
+        return
+    }
 
     Box(
         Modifier
@@ -789,9 +845,14 @@ fun VaultScreen(
         } else {
             folders.firstOrNull { it.id == currentFolderId }?.parentId ?: 0L
         }
-        val orderedFolders = remember(childFolders, sortKey, sortAscending) {
+        val orderedFolders = remember(childFolders, sortKey, sortAscending, pcName, currentFolderId, search) {
             val byName = childFolders.sortedBy { it.name.lowercase() }
-            if (sortKey == SortKey.Name && !sortAscending) byName.asReversed() else byName
+            val sorted = if (sortKey == SortKey.Name && !sortAscending) byName.asReversed() else byName
+            val pcFolder = pcName
+                ?.let { "PC · $it" }
+                ?.takeIf { currentFolderId == 0L && (search.isBlank() || it.contains(search, ignoreCase = true)) }
+                ?.let { FolderEntry(PEER_FOLDER_ID, 0L, it) }
+            if (pcFolder != null) listOf(pcFolder) + sorted else sorted
         }
         Box(Modifier.fillMaxSize().hazeSource(state = haze)) {
             when (viewMode) {
@@ -1070,7 +1131,25 @@ fun VaultScreen(
         }
     }
 
-    folderMenu?.let { folder ->
+    folderMenu?.takeIf { it.id == PEER_FOLDER_ID }?.let { folder ->
+        Dialog(onDismissRequest = { folderMenu = null }) {
+            MvpCard(Modifier.fillMaxWidth()) {
+                MvpTitle(folder.name)
+                MvpDescription(
+                    "The PC's library, shared with you. You can look and copy, but not change it. " +
+                        "The PC sees your library the same way."
+                )
+                MvpButton("Open", onClick = { folderMenu = null; openFolder(folder.id) }, primary = true, modifier = Modifier.fillMaxWidth())
+                MvpButton("Disconnect PC", onClick = {
+                    folderMenu = null
+                    PeerLink.unlink()
+                }, modifier = Modifier.fillMaxWidth())
+                MvpButton("Cancel", onClick = { folderMenu = null }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+
+    folderMenu?.takeIf { it.id != PEER_FOLDER_ID }?.let { folder ->
         Dialog(onDismissRequest = { folderMenu = null }) {
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(folder.name)
@@ -1131,7 +1210,34 @@ fun VaultScreen(
                     showAdd = false
                     namePrompt = NamePrompt.NewFolder(currentFolderId)
                 }, modifier = Modifier.fillMaxWidth())
+                MvpButton(if (pcName == null) "Swap with PC" else "Open PC · $pcName", onClick = {
+                    showAdd = false
+                    when {
+                        pcName != null -> onOpenPeer()
+                        RemoteVault.connected() -> error = "This vault is already open on your PC."
+                        else -> pcCamera.launch(Manifest.permission.CAMERA)
+                    }
+                }, modifier = Modifier.fillMaxWidth())
                 MvpButton("Cancel", onClick = { showAdd = false }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+
+    if (linkingPc) {
+        Dialog(onDismissRequest = {}) {
+            MvpCard(Modifier.fillMaxWidth()) {
+                MvpTitle("Swap with PC")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
+                    Text(
+                        "Waiting for the PC… Accept the swap on the PC.",
+                        color = Mvp.description,
+                        fontSize = 13.sp,
+                    )
+                }
             }
         }
     }

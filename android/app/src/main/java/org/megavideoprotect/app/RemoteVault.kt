@@ -203,7 +203,7 @@ object RemoteVault {
         }
     }
 
-    private fun pinnedFactory(fingerprint: String): SSLSocketFactory {
+    internal fun pinnedFactory(fingerprint: String): SSLSocketFactory {
         val trust = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
 

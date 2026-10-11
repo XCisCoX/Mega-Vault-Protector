@@ -26,6 +26,8 @@ set(MVP_APP_SOURCES
     src/batch_worker.cpp
     src/share_server.cpp
     src/share_tls.cpp
+    src/peer_link.cpp
+    src/peer_browser.cpp
     third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
@@ -35,6 +37,8 @@ set(MVP_APP_SOURCES
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
     include/videovault/app/share_tls.hpp
+    include/videovault/app/peer_link.hpp
+    include/videovault/app/peer_browser.hpp
     resources/resources.qrc
 )
 
