@@ -19,6 +19,26 @@
 #     ANDROID_NDK_ROOT=/path/to/ndk bash scripts/android/build-android-core.sh
 set -euo pipefail
 
+# GitHub Actions only publishes lines that start with ::error::. A bare exit 1
+# from this script otherwise shows up as "Process completed with exit code 1"
+# and nothing else. STEPLOG is filled in once the output directory exists.
+STEPLOG=""
+on_err() {
+    trap - ERR
+    local rc=$?
+    local cmd="${BASH_COMMAND//::/:}"
+    echo "::error::build-android-core.sh:${1}: exit ${rc}: ${cmd}"
+    if [ -n "${STEPLOG:-}" ] && [ -f "$STEPLOG" ]; then
+        echo "---- last build output ----"
+        tail -n 40 "$STEPLOG" || true
+        local msg
+        msg="$(tail -n 12 "$STEPLOG" | tr '\n' ' ' | sed 's/::/:/g' | head -c 1200)"
+        [ -n "$msg" ] && echo "::error::$msg"
+    fi
+    exit "$rc"
+}
+trap 'on_err $LINENO' ERR
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # On Windows hosts the NDK, CMake and the autotools/ffmpeg configure scripts are
 # all native programs: give them drive-letter paths (C:/...) instead of the
@@ -72,7 +92,18 @@ make_shim() { # <shim> <compiler>
 }
 make_shim "$GCCSHIM/aarch64-linux-android-gcc" "$TOOLCHAIN/bin/clang$EXE"
 make_shim "$GCCSHIM/aarch64-linux-android-g++" "$TOOLCHAIN/bin/clang++$EXE"
-export PATH="$(posix_path "$GCCSHIM"):$(posix_path "$TOOLCHAIN/bin"):$PATH"
+# NDK bin must come first. Ubuntu runners ship /usr/bin/clang, and OpenSSL's
+# android Configure aborts in the first second unless which("clang") is the
+# NDK binary (it has to match "$NDK/.../prebuilt/").
+export PATH="$(posix_path "$TOOLCHAIN/bin"):$(posix_path "$GCCSHIM"):$PATH"
+hash -r || true
+NDK_CLANG="$(command -v clang || true)"
+ndk_posix="$(posix_path "$NDK")"
+ndk_win="$(win_path "$NDK")"
+case "$NDK_CLANG" in
+    "$ndk_posix"/*|"$ndk_win"/*) echo "clang: $NDK_CLANG" ;;
+    *) echo "::error::NDK clang is not first on PATH (found '${NDK_CLANG:-none}')"; exit 1 ;;
+esac
 CC="$GCCSHIM/aarch64-linux-android-gcc"
 CXX="$GCCSHIM/aarch64-linux-android-g++"
 AR="$TOOLCHAIN/bin/llvm-ar$EXE"
@@ -84,11 +115,14 @@ TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
 CMAKE_BIN="${CMAKE_BIN:-$(command -v cmake || echo /opt/android-sdk-linux/cmake/3.31.6/bin/cmake)}"
 NINJA="${NINJA:-$(command -v ninja || echo /opt/android-sdk-linux/cmake/3.31.6/bin/ninja)}"
 [ -x "$CMAKE_BIN" ] || { echo "::error::cmake not found (looked for $CMAKE_BIN)"; exit 1; }
+[ -x "$NINJA" ] || { echo "::error::ninja not found (looked for $NINJA)"; exit 1; }
 # Windows hosts have no `make`; GNU make is usually installed as mingw32-make.
 MAKE="${MAKE:-$(command -v make || command -v mingw32-make || command -v gmake)}"
 [ -x "$MAKE" ] || { echo "::error::GNU make not found (install make / mingw32-make)"; exit 1; }
 
 mkdir -p "$SRC" "$PREFIX"
+STEPLOG="$OUT/step.log"
+: >"$STEPLOG"
 
 # The container usually runs as root; always hand the build outputs back to
 # the invoking user (HOST_UID), even when a later step fails.
@@ -108,8 +142,12 @@ for tool in gcc perl; do
 done
 if [ -n "$missing_tools" ]; then
     echo "== installing missing build tools:$missing_tools =="
+    SUDO=""
+    if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    fi
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null && apt-get install -y -qq make tcl gcc libc6-dev perl qemu-user >/dev/null
+        $SUDO apt-get update -qq >/dev/null && $SUDO apt-get install -y -qq make tcl gcc libc6-dev perl qemu-user >/dev/null
     elif command -v apk >/dev/null 2>&1; then
         apk add --no-cache make tcl gcc perl qemu-user >/dev/null
     else
@@ -133,7 +171,12 @@ fetch() { # <url> <name>
     [ -n "$EXE" ] && tls_flags="--ssl-no-revoke"
     if [ ! -f "$archive" ]; then
         echo "== fetching $name =="
-        curl -sL $tls_flags --max-time 300 -A "Mozilla/5.0" -o "$archive" "$url"
+        # -f so an HTTP error page is not saved and then handed to tar.
+        if ! curl -fL --retry 3 --retry-delay 2 $tls_flags --max-time 300 -A "Mozilla/5.0" -o "$archive" "$url"; then
+            echo "::error::download failed: $url"
+            rm -f "$archive"
+            exit 1
+        fi
     fi
     if [ ! -f "$SRC/$name/.extracted" ]; then
         rm -rf "$SRC/$name"
@@ -141,7 +184,12 @@ fetch() { # <url> <name>
         # -f auto-detects gzip/xz, so one code path covers all tarballs.
         # GNU tar on Windows reads a "C:/..." argument as a remote host:path
         # (and dies with "Cannot connect to C:"), so hand it POSIX paths.
-        tar -xf "$(posix_path "$archive")" -C "$(posix_path "$SRC/$name")" --strip-components=1
+        if ! tar -xf "$(posix_path "$archive")" -C "$(posix_path "$SRC/$name")" --strip-components=1; then
+            echo "::error::could not unpack $name (file is not a tarball): $archive"
+            rm -rf "$SRC/$name"
+            rm -f "$archive"
+            exit 1
+        fi
         touch "$SRC/$name/.extracted"
     fi
 }
@@ -167,9 +215,9 @@ if [ ! -f "$PREFIX/lib/libcrypto.a" ]; then
     # and the MSYS perl returns POSIX paths, so a C:/ form never matches.
     ANDROID_NDK_ROOT="$(posix_path "$NDK")" ./Configure android-arm64 -D__ANDROID_API__=$API \
         --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
-        no-shared no-tests >/dev/null
-    "$MAKE" -j"$JOBS" >/dev/null
-    "$MAKE" install_sw >/dev/null
+        no-shared no-tests >>"$STEPLOG" 2>&1
+    "$MAKE" -j"$JOBS" >>"$STEPLOG" 2>&1
+    "$MAKE" install_sw >>"$STEPLOG" 2>&1
     popd >/dev/null
 fi
 
@@ -196,9 +244,9 @@ if [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     echo "== building libsodium (autotools, static) =="
     ./configure --host=aarch64-linux-android \
         --prefix="$PREFIX" --enable-static --disable-shared \
-        CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" >/dev/null
-    "$MAKE" -j"$JOBS" >/dev/null
-    "$MAKE" install >/dev/null
+        CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" >>"$STEPLOG" 2>&1
+    "$MAKE" -j"$JOBS" >>"$STEPLOG" 2>&1
+    "$MAKE" install >>"$STEPLOG" 2>&1
     popd >/dev/null
 fi
 # NOTE: libsodium's bundled argon2 exports the SAME phc argon2* API, so the
@@ -230,7 +278,7 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
         --with-crypto-lib=openssl \
         CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" \
         CFLAGS="-I$PREFIX/include -O2 -fPIC -DSQLITE_HAS_CODEC" \
-        LDFLAGS="-L$PREFIX/lib" >/dev/null
+        LDFLAGS="-L$PREFIX/lib" >>"$STEPLOG" 2>&1
     # Generate the parser/opcode headers SERIALLY first: parallel make races
     # them against the amalgamation compile (sqlite3.c does not declare
     # opcodes.h/keywordhash.h as prerequisites), and stale 0-byte outputs
@@ -241,11 +289,11 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
     # path instead.
     MAKE_TOP="TOP=$(win_path "$SRC/sqlcipher")"
     rm -f opcodes.h opcodes.c keywordhash.h
-    "$MAKE" "$MAKE_TOP" -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
+    "$MAKE" "$MAKE_TOP" -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >>"$STEPLOG" 2>&1
     # Build ONLY the static library, not the `sqlcipher` shell binary: the
     # shell links the codec against Android's logcat logging and would need
     # -llog plus a working tclsh at runtime, and nothing uses it here.
-    "$MAKE" "$MAKE_TOP" -j"$JOBS" libsqlcipher.la >/dev/null
+    "$MAKE" "$MAKE_TOP" -j"$JOBS" libsqlcipher.la >>"$STEPLOG" 2>&1
     cp .libs/libsqlcipher.a "$PREFIX/lib/"
     cp sqlite3.h "$PREFIX/include/"
     # The core includes <sqlcipher/sqlite3.h> — install the public headers
@@ -266,9 +314,9 @@ if [ ! -f "$PREFIX/lib/libz.a" ]; then
     # refuses non-PIC relocations in a shared object (z_errmsg, zError).
     CHOST=aarch64-linux-android CC="$CC" AR="$AR" RANLIB="$RANLIB" \
         CFLAGS="-O3 -fPIC" \
-        ./configure --static --prefix="$PREFIX" >/dev/null
-    "$MAKE" -j"$JOBS" >/dev/null
-    "$MAKE" install >/dev/null
+        ./configure --static --prefix="$PREFIX" >>"$STEPLOG" 2>&1
+    "$MAKE" -j"$JOBS" >>"$STEPLOG" 2>&1
+    "$MAKE" install >>"$STEPLOG" 2>&1
     popd >/dev/null
 fi
 
@@ -311,14 +359,17 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
         --enable-small --disable-bzlib --disable-lzma --disable-iconv \
         --enable-zlib \
         --disable-asm \
-        --prefix="$PREFIX" >/dev/null
-    "$MAKE" -j"$JOBS" >/dev/null
-    "$MAKE" install >/dev/null
+        --prefix="$PREFIX" >>"$STEPLOG" 2>&1
+    "$MAKE" -j"$JOBS" >>"$STEPLOG" 2>&1
+    "$MAKE" install >>"$STEPLOG" 2>&1
     popd >/dev/null
 fi
 
 # --- core + tests ----------------------------------------------------------
 echo "== configuring core + tests (android-arm64) =="
+# A restored dependency cache can include a CMake build tree from another
+# runner. Reconfigure the core from scratch; the installed prefix is reused.
+rm -rf "$OUT/build"
 "$CMAKE_BIN" -S "$REPO" -B "$OUT/build" -G Ninja \
     -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
