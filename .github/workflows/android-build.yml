@@ -95,9 +95,13 @@ jobs:
           fi
           test -f "$TOOLCHAIN"
           sudo apt-get update -qq
-          # make/ninja drive the core's CMake build, qemu-user runs its aarch64
-          # test suites (the script skips them without it), tcl is optional.
-          sudo apt-get install -y -qq make ninja-build tcl qemu-user
+          # cmake is not on the runner image. The core script exits immediately
+          # without it, before it compiles anything. ninja and make drive that
+          # build; qemu-user runs the aarch64 tests; tcl is optional.
+          sudo apt-get install -y -qq cmake make ninja-build tcl qemu-user
+          command -v cmake
+          command -v ninja
+          command -v make
 
       - name: Cache cross-built deps + core
         uses: actions/cache@v4

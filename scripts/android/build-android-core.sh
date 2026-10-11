@@ -42,7 +42,7 @@ for d in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" \
         NDK="$d"; break
     fi
 done
-[ -n "$NDK" ] || { echo "ERROR: NDK not found (set ANDROID_NDK_ROOT or run inside the NDK container)"; exit 1; }
+[ -n "$NDK" ] || { echo "::error::NDK not found (set ANDROID_NDK_ROOT or run inside the NDK container)"; exit 1; }
 echo "NDK: $NDK"
 # OpenSSL's android-arm64 Configure target resolves the NDK through this env var.
 export ANDROID_NDK_ROOT="$NDK"
@@ -54,7 +54,7 @@ for host_dir in linux-x86_64 windows-x86_64 darwin-x86_64; do
         break
     fi
 done
-[ -n "$TOOLCHAIN" ] || { echo "ERROR: no NDK host toolchain under $NDK/toolchains/llvm/prebuilt"; exit 1; }
+[ -n "$TOOLCHAIN" ] || { echo "::error::no NDK host toolchain under $NDK/toolchains/llvm/prebuilt"; exit 1; }
 # Host executables carry .exe on Windows.
 EXE=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe";; esac
@@ -83,10 +83,10 @@ TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
 # The NDK container ships CMake/ninja inside the SDK; fall back to PATH.
 CMAKE_BIN="${CMAKE_BIN:-$(command -v cmake || echo /opt/android-sdk-linux/cmake/3.31.6/bin/cmake)}"
 NINJA="${NINJA:-$(command -v ninja || echo /opt/android-sdk-linux/cmake/3.31.6/bin/ninja)}"
-[ -x "$CMAKE_BIN" ] || { echo "cmake not found"; exit 1; }
+[ -x "$CMAKE_BIN" ] || { echo "::error::cmake not found (looked for $CMAKE_BIN)"; exit 1; }
 # Windows hosts have no `make`; GNU make is usually installed as mingw32-make.
 MAKE="${MAKE:-$(command -v make || command -v mingw32-make || command -v gmake)}"
-[ -x "$MAKE" ] || { echo "ERROR: GNU make not found (install make / mingw32-make)"; exit 1; }
+[ -x "$MAKE" ] || { echo "::error::GNU make not found (install make / mingw32-make)"; exit 1; }
 
 mkdir -p "$SRC" "$PREFIX"
 
