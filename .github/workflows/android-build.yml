@@ -107,13 +107,23 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/android-arm64
+          # No restore-keys: a partial or older tree still counts as a hit and
+          # the core script then exits in the first second.
           key: core-arm64-${{ runner.os }}-${{ hashFiles('scripts/android/build-android-core.sh', 'core/**', 'CMakeLists.txt') }}
-          restore-keys: core-arm64-${{ runner.os }}-
 
       - name: Build Android core (deps + static libs + aarch64 tests)
-        env:
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
-        run: bash scripts/android/build-android-core.sh
+        run: |
+          set +e
+          set +o pipefail
+          # Use the SDK path written by the setup step, not the job-level default.
+          export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          bash scripts/android/build-android-core.sh 2>&1 | tee "$RUNNER_TEMP/android-core.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            msg="$(tail -n 20 "$RUNNER_TEMP/android-core.log" | tr '\n' ' ' | sed 's/::/:/g' | head -c 1800)"
+            echo "::error title=Android core build failed::${msg}"
+            exit "$rc"
+          fi
 
       - name: Cache Gradle
         uses: actions/cache@v4
