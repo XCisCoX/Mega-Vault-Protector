@@ -44,13 +44,14 @@ Import accepts any file, one at a time or a whole folder. Dropping files on the 
 | Picture | Opens it in the viewer. Drag moves the picture. The wheel or a pinch zooms toward the pointer. |
 | Music | Opens the music player. On Android it keeps playing from the notification. |
 | PDF | Opens the page viewer. Pinch or the wheel zooms. Double-tap switches between fit and a closer view. |
+| Text | `.txt`, `.json`, notes, and other plain-text files open in a reader in the same window. |
 | Anything else | Stays in the library. The tile shows a stable color for that type, a label such as `[ Rar ]`, and the size. Opening it shows **this format currently not supported**. The file is not deleted and is not sent to another app. |
 
 Video, pictures, and music are decrypted in memory for viewing. On Android, the PDF viewer writes the open document into the app cache because the system PDF renderer needs a file. That cache file is the open document, not the vault copy.
 
 ## Library
 
-Folders are names inside the vault. The encrypted packages stay where the vault put them. Removing a folder moves its items up. It does not delete them.
+Folders are names inside the vault. The encrypted packages stay where the vault put them. Removing a folder deletes the files and folders inside it, after a confirmation when anything is there.
 
 The library has three views: large icons, a list, and a details table. Search matches the file name or a tag. Tags are edited in Settings. The vault locks after 5 minutes without use. Changing the password re-wraps keys and re-encrypts thumbnails. It does not re-encrypt the packages. Removing an item deletes its package.
 

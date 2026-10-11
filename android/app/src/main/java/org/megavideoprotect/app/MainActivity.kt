@@ -13,6 +13,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -28,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -122,7 +127,7 @@ class MainActivity : ComponentActivity() {
                 // Login leaves on one press. Setup has nowhere to go back to.
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Peer -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -143,7 +148,25 @@ class MainActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize()) {
                     AnimatedContent(
                         targetState = screen,
-                        transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
+                        modifier = Modifier.fillMaxSize().clipToBounds(),
+                        transitionSpec = {
+                            val opening = targetState.depth() > initialState.depth()
+                            when {
+                                opening && targetState is Screen.Peer ->
+                                    (slideInHorizontally(tween(280)) { it / 3 } + fadeIn(tween(200))) togetherWith
+                                        (slideOutHorizontally(tween(220)) { -it / 10 } + fadeOut(tween(160)))
+                                !opening && initialState is Screen.Peer ->
+                                    (slideInHorizontally(tween(240)) { -it / 10 } + fadeIn(tween(200))) togetherWith
+                                        (slideOutHorizontally(tween(260)) { it / 3 } + fadeOut(tween(180)))
+                                opening && targetState.depth() >= 3 ->
+                                    (slideInVertically(tween(300)) { it / 4 } + fadeIn(tween(200))) togetherWith
+                                        fadeOut(tween(160))
+                                !opening && initialState.depth() >= 3 ->
+                                    fadeIn(tween(160)) togetherWith
+                                        (slideOutVertically(tween(260)) { it / 4 } + fadeOut(tween(180)))
+                                else -> fadeIn(tween(220)) togetherWith fadeOut(tween(160))
+                            }
+                        },
                         label = "screen",
                     ) { current ->
                     when (current) {
@@ -186,6 +209,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     val next = when {
                                         FileKinds.isImage(kind) -> Screen.Image(id, name)
+                                        kind.route == 4 -> Screen.Text(id, name)
                                         kind.route == 3 -> Screen.Pdf(id, name)
                                         kind.route == 2 -> {
                                             val songs = withContext(Dispatchers.IO) {
@@ -221,6 +245,11 @@ class MainActivity : ComponentActivity() {
                             onBack = { show(Screen.Vault) },
                         )
                         is Screen.Pdf -> PdfScreen(
+                            videoId = current.videoId,
+                            name = current.name,
+                            onBack = { show(Screen.Vault) },
+                        )
+                        is Screen.Text -> TextScreen(
                             videoId = current.videoId,
                             name = current.name,
                             onBack = { show(Screen.Vault) },
@@ -268,7 +297,8 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
+            || screen is Screen.Music || screen is Screen.Peer
         if (inside && unlocked()) show(Screen.Vault)
     }
 
@@ -284,6 +314,14 @@ class MainActivity : ComponentActivity() {
         AppSession.leftAt = SystemClock.elapsedRealtime()
         super.onStop()
     }
+}
+
+/** Library sits under a side-sliding peer browser and under viewers that rise from the bottom. */
+private fun Screen.depth(): Int = when (this) {
+    Screen.Setup, Screen.Login -> 0
+    Screen.Vault -> 1
+    Screen.Peer -> 2
+    else -> 3
 }
 
 /** Content URIs attached to ACTION_SEND or ACTION_SEND_MULTIPLE. */

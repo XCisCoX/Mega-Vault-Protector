@@ -9,9 +9,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -335,19 +332,9 @@ class MusicPlaybackService : Service() {
 
     private fun noteCover(): Bitmap {
         noteBitmap?.let { return it }
-        val side = 256
-        val bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(Color.rgb(28, 28, 30))
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(51, 144, 236) }
-        val s = side.toFloat()
-        canvas.drawOval(s * 0.25f, s * 0.60f, s * 0.51f, s * 0.80f, paint)
-        canvas.drawOval(s * 0.55f, s * 0.52f, s * 0.81f, s * 0.72f, paint)
-        canvas.drawRect(s * 0.46f, s * 0.22f, s * 0.53f, s * 0.70f, paint)
-        canvas.drawRect(s * 0.76f, s * 0.16f, s * 0.83f, s * 0.62f, paint)
-        canvas.drawRect(s * 0.46f, s * 0.20f, s * 0.83f, s * 0.28f, paint)
-        noteBitmap = bitmap
-        return bitmap
+        val decoded = BitmapFactory.decodeResource(resources, R.drawable.nocover)
+        noteBitmap = decoded ?: Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        return noteBitmap!!
     }
 
     private fun action(action: String, icon: Int, title: String, request: Int): Notification.Action {

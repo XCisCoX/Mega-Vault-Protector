@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -13,6 +14,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QTemporaryDir>
 
@@ -152,6 +154,14 @@ void BatchWorker::importFiles(
                 ++skipped;
             } else {
                 ++imported;
+                const auto when = static_cast<qlonglong>(std::chrono::duration_cast<
+                    std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                emit videoArrived(
+                    static_cast<qlonglong>(outcome.value()),
+                    QFileInfo(QString::fromStdWString((*sources)[index].wstring())).fileName(),
+                    sizes[index],
+                    static_cast<qlonglong>(folder_id),
+                    when);
             }
         });
 
@@ -285,6 +295,10 @@ void BatchWorker::copyFromPeer(
             return;
         }
         made[folder.id] = local.value();
+        emit folderArrived(
+            static_cast<qlonglong>(local.value()),
+            static_cast<qlonglong>(localFolder(folder.parent_id)),
+            folder.name);
     }
 
     QTemporaryDir staging;
@@ -361,6 +375,14 @@ void BatchWorker::copyFromPeer(
         done = base + static_cast<qlonglong>(file.size);
         if (!duplicate) {
             ++copied;
+            const auto when = static_cast<qlonglong>(std::chrono::duration_cast<
+                std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+            emit videoArrived(
+                static_cast<qlonglong>(imported.value()),
+                file.name,
+                static_cast<qlonglong>(file.size),
+                static_cast<qlonglong>(localFolder(file.folder_id)),
+                when);
         }
         emit fileFinished(copied, fileCount);
     }

@@ -1,5 +1,8 @@
 <RCC>
     <qresource prefix="/icons">
         <file>app.png</file>
+        <file>files_folder.png</file>
+        <file>media_doc_blue.png</file>
+        <file>nocover.png</file>
     </qresource>
 </RCC>

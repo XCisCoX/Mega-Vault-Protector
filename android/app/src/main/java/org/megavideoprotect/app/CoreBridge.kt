@@ -44,7 +44,13 @@ object CoreBridge {
     external fun nativeLoopClip(id: Long, maxDimension: Int): ByteArray?
     external fun nativeClose()
 
-    class Result(val ok: Boolean, val error: String, val detail: String) {
+    class Result(
+        val ok: Boolean,
+        val error: String,
+        val detail: String,
+        val id: Long = -1L,
+        val duplicate: Boolean = false,
+    ) {
         companion object {
             fun parse(raw: String): Result {
                 val o = JSONObject(raw)
@@ -52,6 +58,8 @@ object CoreBridge {
                     ok = o.optBoolean("ok", false),
                     error = o.optString("error", ""),
                     detail = o.optString("detail", ""),
+                    id = o.optLong("id", -1L),
+                    duplicate = o.optBoolean("duplicate", false),
                 )
             }
         }

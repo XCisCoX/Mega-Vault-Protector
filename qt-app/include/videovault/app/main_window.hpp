@@ -14,6 +14,7 @@ class QButtonGroup;
 class QDialog;
 class QComboBox;
 class QDragEnterEvent;
+class QResizeEvent;
 class QShowEvent;
 class QDropEvent;
 class QHBoxLayout;
@@ -75,6 +76,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void changeEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
@@ -98,6 +100,13 @@ private:
     void beginRestoreSelected();
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
+    void revealVideo(qlonglong id, const QString& name, qlonglong size,
+        qlonglong folderId, qlonglong importedAt);
+    void revealFolder(qlonglong id, qlonglong parentId, const QString& name);
+    void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
+    void placeFolderRow(qlonglong id, const QString& name);
+    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void recountLibrary();
     void openFolder(std::int64_t folder_id);
     void rebuildBreadcrumb();
     void beginNewFolder();
@@ -117,6 +126,9 @@ private:
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
     void closePdf();
+    void beginText(std::int64_t video_id, const QString& title);
+    void closeText();
+    void placeTransferPanel();
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
@@ -203,6 +215,7 @@ private:
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
     PdfWindow* pdfWindow_{nullptr};
+    QWidget* textPage_{nullptr};
     // Pixmaps and probed metadata for the open vault. Moving a file only
     // updates a row; painting the folder again must not reopen every package.
     struct GalleryCache;
@@ -222,6 +235,24 @@ private:
     // the tag filter and the gallery don't invalidate each other when they
     // run as part of the same refresh cycle.
     std::uint64_t galleryGeneration_{0};
+    // True while refreshGallery is rebuilding the rows. Arrivals during that
+    // window are kept and merged into the snapshot, so a late list cannot
+    // wipe a file that landed after the list was read.
+    bool galleryListing_{false};
+    struct ArrivedVideo {
+        qlonglong id{0};
+        QString name;
+        qlonglong size{0};
+        qlonglong folderId{0};
+        qlonglong importedAt{0};
+    };
+    struct ArrivedFolder {
+        qlonglong id{0};
+        qlonglong parentId{0};
+        QString name;
+    };
+    std::vector<ArrivedVideo> pendingVideos_;
+    std::vector<ArrivedFolder> pendingFolders_;
     std::uint64_t tagGeneration_{0};
     QTimer* autoLockTimer_{nullptr};
     QTimer* searchTimer_{nullptr};
@@ -241,7 +272,7 @@ private:
     };
     std::vector<PeerTransfer> transfers_;
     quint64 transferSerial_{1};
-    QDialog* transferDialog_{nullptr};
+    QWidget* transferPanel_{nullptr};
     QWidget* transferHost_{nullptr};
     QPushButton* transfersButton_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};

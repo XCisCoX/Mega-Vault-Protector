@@ -61,9 +61,6 @@ private class TransferWork(
 object TransferHub {
     var items by mutableStateOf<List<TransferItem>>(emptyList())
         private set
-    /** Bumps when a copy lands in the library, so the gallery can refresh. */
-    var landed by mutableStateOf(0)
-        private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val inbox = Channel<TransferWork>(Channel.UNLIMITED)
@@ -125,7 +122,6 @@ object TransferHub {
                     when {
                         canceled -> it.copy(state = TransferState.Canceled, label = "Canceled", note = outcome)
                         outcome.startsWith("Copied") -> {
-                            landed += 1
                             it.copy(state = TransferState.Done, progress = 1f, label = "Done", note = outcome)
                         }
                         else -> it.copy(state = TransferState.Failed, label = "Stopped", note = outcome)
@@ -155,6 +151,57 @@ object TransferHub {
         withContext(Dispatchers.Main) {
             items = items.map { if (it.id == id) change(it) else it }
         }
+    }
+}
+
+data class ArrivedFile(
+    val id: Long,
+    val name: String,
+    val size: Long,
+    val folderId: Long,
+    val importedAt: Long,
+)
+
+data class ArrivedFolder(val id: Long, val parentId: Long, val name: String)
+
+/**
+ * Files and folders that have landed, one at a time. The library inserts each
+ * one; it does not rebuild the whole list when a batch finishes.
+ */
+object LibraryArrivals {
+    var stamp by mutableStateOf(0)
+        private set
+    private val files = ArrayList<ArrivedFile>()
+    private val folders = ArrayList<ArrivedFolder>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    fun addFile(id: Long, name: String, size: Long, folderId: Long) {
+        if (id <= 0L) return
+        val whenSec = System.currentTimeMillis() / 1000L
+        scope.launch {
+            if (files.none { it.id == id }) {
+                files.add(ArrivedFile(id, name, size, folderId, whenSec))
+                stamp += 1
+            }
+        }
+    }
+
+    fun addFolder(id: Long, parentId: Long, name: String) {
+        if (id <= 0L) return
+        scope.launch {
+            if (folders.none { it.id == id }) {
+                folders.add(ArrivedFolder(id, parentId, name))
+                stamp += 1
+            }
+        }
+    }
+
+    fun take(): Pair<List<ArrivedFile>, List<ArrivedFolder>> {
+        val outFiles = files.toList()
+        val outFolders = folders.toList()
+        files.clear()
+        folders.clear()
+        return outFiles to outFolders
     }
 }
 

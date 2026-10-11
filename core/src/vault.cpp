@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -52,6 +54,32 @@ bool is_audio_display_name(const std::string& name) {
         }
     }
     return false;
+}
+
+bool header_is_audio(internal::PackageReader& reader) {
+    unsigned char head[12] = {};
+    const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
+    if (count < 4U) {
+        return false;
+    }
+    const auto sought = reader.seek(0U);
+    if (!sought) {
+        return false;
+    }
+    const auto read = reader.read(std::span<unsigned char>(head, static_cast<std::size_t>(count)));
+    if (!read || read.value() < 4U) {
+        return false;
+    }
+    if (std::memcmp(head, "ID3", 3) == 0 || std::memcmp(head, "fLaC", 4) == 0
+        || std::memcmp(head, "OggS", 4) == 0) {
+        return true;
+    }
+    if (read.value() >= 12U && std::memcmp(head, "RIFF", 4) == 0
+        && std::memcmp(head + 8, "WAVE", 4) == 0) {
+        return true;
+    }
+    return read.value() >= 12U && std::memcmp(head + 4, "ftyp", 4) == 0
+        && (std::memcmp(head + 8, "M4A ", 4) == 0 || std::memcmp(head + 8, "M4B ", 4) == 0);
 }
 
 std::string audio_open_hint(const std::string& name) {
@@ -244,7 +272,10 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     }
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
-    const bool audio = is_audio_display_name(row.value().display_name);
+    bool audio = is_audio_display_name(row.value().display_name);
+    if (!audio) {
+        audio = header_is_audio(reader.value());
+    }
     const auto hint = audio_open_hint(row.value().display_name);
     int art_kind = 1;
     auto jpeg = audio
@@ -254,14 +285,15 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     if (!jpeg) {
         return jpeg.error();
     }
-    // A failed read must not replace a thumbnail we already kept. The next
-    // open tries the cover again. A confirmed "no art" is stored as the note
-    // so the gallery does not probe that song on every visit.
+    // A failed read must not replace a thumbnail we already kept. A confirmed
+    // "no art" is stored once. An older note is replaced, so a cover that the
+    // first pass missed is picked up the next time the library opens.
     if (audio && art_kind <= 0) {
         auto existing = database.query_thumbnail(video_id);
-        if (existing && (art_kind < 0
-                || existing.value().mime == "image/x-mvp-note"
-                || existing.value().mime == "image/cover")) {
+        const bool keep = existing && (art_kind < 0
+            || existing.value().mime == "image/cover"
+            || (art_kind == 0 && existing.value().mime == "image/x-mvp-empty"));
+        if (keep) {
             auto thumbnail_key = internal::derive_subkey(
                 master_key, kThumbnailSubkeyId, kThumbnailContext);
             if (!thumbnail_key) {
@@ -291,6 +323,8 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     const auto ad = thumbnail_ad(video_id, row.value());
     internal::ThumbnailRow stored;
     if (audio && art_kind == 0) {
+        stored.mime = "image/x-mvp-empty";
+    } else if (audio && art_kind < 0) {
         stored.mime = "image/x-mvp-note";
     } else if (audio && art_kind > 0) {
         stored.mime = "image/cover";
@@ -720,7 +754,7 @@ Result<std::int64_t> Vault::import_file(
     const std::function<void(double)>& progress,
     const std::int64_t folder_id,
     bool* already_present) {
-    std::lock_guard<std::mutex> guard(*mutex_);
+    std::unique_lock<std::mutex> guard(*mutex_);
     if (already_present != nullptr) {
         *already_present = false;
     }
@@ -728,6 +762,9 @@ Result<std::int64_t> Vault::import_file(
         return locked_error();
     }
     auto& impl = *impl_;
+    // Playback reads the same mutex. The long hash and encrypt run without
+    // it, then this pointer is checked so a lock in between aborts the import.
+    const void* pinned = impl_.get();
     if (folder_id > 0) {
         auto folder = impl.database_.query_folder(folder_id);
         if (!folder) {
@@ -756,9 +793,14 @@ Result<std::int64_t> Vault::import_file(
             progress(std::clamp(fraction, 0.0, 1.0) * 0.15);
         }
     };
+    guard.unlock();
     auto content_hash = hash_source_file(source_path, source_size, hash_progress);
+    guard.lock();
     if (!content_hash) {
         return content_hash.error();
+    }
+    if (impl_.get() != pinned) {
+        return locked_error();
     }
     auto known = impl.database_.query_video_id_by_content_sha256(content_hash.value());
     if (!known) {
@@ -824,13 +866,20 @@ Result<std::int64_t> Vault::import_file(
             progress(0.15 + std::clamp(fraction, 0.0, 1.0) * 0.85);
         }
     };
+    guard.unlock();
     auto written = internal::write_package_file(
         staging_package, file_key, internal::kDefaultPackageChunkSize, source,
         source_size, package_progress);
+    guard.lock();
     if (!written) {
         std::error_code ignored;
         std::filesystem::remove(staging_package, ignored);
         return written.error();
+    }
+    if (impl_.get() != pinned) {
+        std::error_code ignored;
+        std::filesystem::remove(staging_package, ignored);
+        return locked_error();
     }
 
     const auto hex_hash = to_hex_lower(written.value().sha256);
@@ -908,18 +957,31 @@ Result<std::int64_t> Vault::import_file(
     }
     std::copy(wrapped.value().begin(), wrapped.value().end(), key.wrapped.begin());
 
+    auto again = impl.database_.query_video_id_by_content_sha256(content_hash.value());
+    if (!again) {
+        std::error_code ignored;
+        std::filesystem::remove(final_package, ignored);
+        return again.error();
+    }
+    if (again.value()) {
+        std::error_code ignored;
+        std::filesystem::remove(final_package, ignored);
+        note_existing(already_present, progress);
+        return again.value().value();
+    }
+
     auto inserted = impl.database_.insert_video(row, key);
     if (!inserted) {
         std::error_code ignored;
         std::filesystem::remove(final_package, ignored);
         return inserted.error();
     }
-    // Best-effort thumbnail at import time so the gallery shows media without
-    // a manual step. Non-video imports and undecodable formats fail quietly.
-    (void)generate_thumbnail_locked(
-        root_, impl.database_, impl.master_key_, inserted.value(),
-        kImportThumbnailDimension);
-    return inserted.value();
+    const auto inserted_id = inserted.value();
+    // The thumbnail decoder takes the lock itself, so a player can read
+    // between the encrypt and the picture.
+    guard.unlock();
+    (void)generate_thumbnail(inserted_id, kImportThumbnailDimension);
+    return inserted_id;
 }
 
 Result<std::vector<VideoInfo>> Vault::list_videos() const {
@@ -1109,7 +1171,7 @@ Result<ThumbnailInfo> Vault::display_thumbnail(
     auto stored = impl.database_.query_thumbnail(video_id);
     const bool audio = is_audio_display_name(video_row.value().display_name);
     const bool settled = stored && (stored.value().mime == "image/cover"
-        || stored.value().mime == "image/x-mvp-note");
+        || stored.value().mime == "image/x-mvp-empty");
     if (stored && (!audio || settled)) {
         auto thumbnail_key = internal::derive_subkey(
             impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
@@ -1460,7 +1522,26 @@ Result<bool> Vault::remove_folder(const std::int64_t folder_id) {
     if (!impl_) {
         return locked_error();
     }
-    return impl_->database_.remove_folder_row(folder_id);
+    auto paths = impl_->database_.remove_folder_row(folder_id);
+    if (!paths) {
+        return paths.error();
+    }
+    std::error_code error;
+    VaultError failure{};
+    bool failed = false;
+    for (const auto& relative : paths.value()) {
+        const auto package = root_ / L"vault-data" / relative;
+        std::filesystem::remove(package, error);
+        if (error && !failed) {
+            failed = true;
+            failure = filesystem_error(error, "remove package file");
+        }
+        error.clear();
+    }
+    if (failed) {
+        return failure;
+    }
+    return true;
 }
 
 Result<bool> Vault::move_folder(

@@ -81,6 +81,8 @@ private:
     quint16 port_{0};
     QString fingerprint_;
     QString linkKey_;
+    // The address the user last picked. Reopening Share keeps that adapter.
+    QString chosenHost_;
     std::function<void(bool)> onRunning_;
     QWidget* dialog_{nullptr};
 };

@@ -87,7 +87,7 @@ struct VideoInfo {
 };
 
 // A virtual folder. parent_id 0 is the library root. Removing a folder
-// moves its videos up one level; the encrypted packages stay where they are.
+// deletes the files and folders inside it.
 struct FolderInfo {
     std::int64_t id{0};
     std::int64_t parent_id{0};
@@ -207,7 +207,7 @@ public:
         std::int64_t folder_id,
         std::string_view name);
 
-    // Videos inside move to the parent folder. Nothing is decrypted or deleted.
+    // Deletes the folder, nested folders, and the encrypted packages inside.
     [[nodiscard]] Result<bool> remove_folder(std::int64_t folder_id);
 
     [[nodiscard]] Result<bool> move_folder(

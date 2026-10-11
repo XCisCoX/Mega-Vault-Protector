@@ -5,7 +5,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * What a vault file is. The header wins. The filename is used only when the
  * header is not recognized. route: 0 cannot be opened, 1 video or picture,
- * 2 audio, 3 PDF.
+ * 2 audio, 3 PDF, 4 plain text.
  */
 data class FileKind(val label: String, val route: Int)
 
@@ -52,6 +52,7 @@ private fun fromName(name: String): FileKind {
     val suffix = name.substringAfterLast('.', "").lowercase()
     if (suffix.isEmpty() || suffix == name.lowercase()) return FileKind("File", 0)
     if (suffix == "pdf") return FileKind("Pdf", 3)
+    if (suffix in TEXT_SUFFIXES) return FileKind(titled(suffix), 4)
     if (isAudioName("$suffix.$suffix") || isAudioName("x.$suffix")) return FileKind(titled(suffix), 2)
     val playable = setOf(
         "mp4", "m4v", "mkv", "avi", "mov", "wmv", "webm", "ts", "mts", "m2ts",
@@ -103,5 +104,23 @@ private fun sniff(data: ByteArray): FileKind {
     if (data.size >= 2 && data[0] == 0x1F.toByte() && data[1] == 0x8B.toByte()) return named("Gz", 0)
     if (starts(data, "BZh")) return named("Bz2", 0)
     if (starts(data, "ustar", 257)) return named("Tar", 0)
+    if (looksLikeText(data)) return named("Text", 4)
     return named("File", 0)
+}
+
+private val TEXT_SUFFIXES = setOf(
+    "txt", "text", "log", "json", "jsonl", "md", "markdown", "csv", "tsv",
+    "xml", "html", "htm", "css", "js", "mjs", "yaml", "yml", "ini", "cfg",
+    "conf", "toml", "svg", "sh", "bat", "cmd", "ps1", "py", "srt", "vtt",
+)
+
+private fun looksLikeText(data: ByteArray): Boolean {
+    if (data.size < 4) return false
+    var controls = 0
+    for (byte in data) {
+        val value = byte.toInt() and 0xFF
+        if (value == 0) return false
+        if (value < 32 && value != 9 && value != 10 && value != 13) controls++
+    }
+    return controls * 20 < data.size
 }

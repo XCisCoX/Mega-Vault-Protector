@@ -24,7 +24,9 @@
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShowEvent>
+#include <QEvent>
 #include <QRandomGenerator>
 #include <QSemaphore>
 #include <QSysInfo>
@@ -851,7 +853,9 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
         if (!ok) maxDimension = 320;
         maxDimension = qBound(64, maxDimension, 720);
         auto thumb = vault->display_thumbnail(id, static_cast<std::uint32_t>(maxDimension));
-        if (!thumb || thumb.value().bytes.empty()) {
+        const bool placeholder = thumb && (thumb.value().mime == "image/x-mvp-note"
+            || thumb.value().mime == "image/x-mvp-empty");
+        if (!thumb || placeholder || thumb.value().bytes.empty()) {
             ReplyWriter::send(socket, 404, "Not Found", "text/plain", "no thumbnail");
             return;
         }
@@ -917,9 +921,9 @@ QImage qrImage(const QString& text) {
 // the address row underneath it.
 class QrCard final : public QWidget {
 public:
-    explicit QrCard(QWidget* parent = nullptr)
+    explicit QrCard(const int side, QWidget* parent = nullptr)
         : QWidget(parent) {
-        setFixedSize(320, 320);
+        setFixedSize(side, side);
     }
 
     void setCode(const QImage& image) {
@@ -954,16 +958,47 @@ private:
 
 // Same sheet as Settings: the library stays blurred behind it. Closing the
 // sheet leaves sharing running. Stop sharing is the only thing that ends it.
-class ShareSheet final : public QDialog {
+class ShareSheet final : public QWidget {
 public:
     explicit ShareSheet(QWidget* parent = nullptr)
-        : QDialog(parent) {
-        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-        setAttribute(Qt::WA_TranslucentBackground);
-        setModal(false);
+        : QWidget(parent) {
+        setAttribute(Qt::WA_DeleteOnClose);
+        if (parent != nullptr) {
+            parent->installEventFilter(this);
+            setGeometry(parent->rect());
+        }
     }
 
+    ~ShareSheet() override {
+        if (QWidget* host = parentWidget()) {
+            host->removeEventFilter(this);
+        }
+    }
+
+    void setBackdrop(const QImage& image) {
+        backdrop_ = image;
+        update();
+    }
+
+    void watchSheet(QWidget* sheet) { sheet_ = sheet; }
+
 protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == parentWidget() && event->type() == QEvent::Resize && parentWidget() != nullptr) {
+            setGeometry(parentWidget()->rect());
+            raise();
+        }
+        if (event->type() == QEvent::MouseButtonPress && sheet_ != nullptr) {
+            const auto* mouse = static_cast<const QMouseEvent*>(event);
+            const auto* source = qobject_cast<QWidget*>(watched);
+            if (source != nullptr && !sheet_->rect().contains(sheet_->mapFrom(source, mouse->pos()))) {
+                close();
+                return true;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -975,26 +1010,17 @@ protected:
         painter.fillRect(rect(), QColor(0, 0, 0, 120));
     }
 
-    void showEvent(QShowEvent* event) override {
-        QDialog::showEvent(event);
-        if (QWidget* host = parentWidget()) {
-            const QPoint origin = host->mapToGlobal(QPoint(0, 0));
-            setGeometry(QRect(origin, host->size()));
-            backdrop_ = frost(host->grab().toImage());
-            update();
-        }
-    }
-
     void mousePressEvent(QMouseEvent* event) override {
-        if (childAt(event->pos()) == nullptr) {
+        if (sheet_ == nullptr || !sheet_->rect().contains(sheet_->mapFrom(this, event->pos()))) {
             close();
             return;
         }
-        QDialog::mousePressEvent(event);
+        QWidget::mousePressEvent(event);
     }
 
 private:
     QImage backdrop_;
+    QWidget* sheet_{nullptr};
 };
 
 ShareServer::ShareServer()
@@ -1139,20 +1165,35 @@ void ShareServer::setOnRunning(std::function<void(bool)> callback) {
 void ShareServer::showDialog(QWidget* parent) {
     if (dialog_ != nullptr) {
         dialog_->raise();
-        dialog_->activateWindow();
         return;
     }
+    QImage backdrop;
+    if (parent != nullptr) {
+        backdrop = frost(parent->grab().toImage());
+    }
     auto* dialog = new ShareSheet(parent);
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(QStringLiteral("Share"));
+    dialog->setBackdrop(backdrop);
     dialog_ = dialog;
-    QObject::connect(dialog, &QDialog::destroyed, parent, [this] {
+    QObject::connect(dialog, &QObject::destroyed, parent, [this] {
         dialog_ = nullptr;
     });
 
-    auto* outer = new QVBoxLayout(dialog);
+    auto* scroll = new QScrollArea(dialog);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(QStringLiteral(
+        "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }"));
+    auto* outerHost = new QWidget();
+    outerHost->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* outer = new QVBoxLayout(outerHost);
     outer->setContentsMargins(48, 48, 48, 48);
     outer->addStretch(1);
+    scroll->setWidget(outerHost);
+    scroll->viewport()->installEventFilter(dialog);
+    auto* root = new QVBoxLayout(dialog);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->addWidget(scroll);
 
     auto* sheet = new QFrame(dialog);
     sheet->setObjectName(QStringLiteral("shareSheet"));
@@ -1205,7 +1246,8 @@ void ShareServer::showDialog(QWidget* parent) {
     intro->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
     layout->addWidget(intro);
 
-    auto* code = new QrCard(sheet);
+    const int qrSide = qBound(180, parent != nullptr ? parent->height() / 3 : 220, 240);
+    auto* code = new QrCard(qrSide, sheet);
     layout->addWidget(code, 0, Qt::AlignHCenter);
 
     auto* addressBar = new QFrame(sheet);
@@ -1240,7 +1282,12 @@ void ShareServer::showDialog(QWidget* parent) {
         intro->setText(QStringLiteral(
             "This PC has no network address. Connect it to Wi-Fi, then open Share again."));
     } else {
+        hostBox->blockSignals(true);
         hostBox->addItems(available);
+        const int remembered = available.indexOf(chosenHost_);
+        hostBox->setCurrentIndex(remembered >= 0 ? remembered : 0);
+        hostBox->blockSignals(false);
+        chosenHost_ = hostBox->currentText();
         hostBox->setVisible(available.size() > 1);
     }
     layout->addWidget(hostBox);
@@ -1248,6 +1295,9 @@ void ShareServer::showDialog(QWidget* parent) {
     auto currentLink = std::make_shared<QString>();
     const auto refresh = [this, code, address, hostBox, currentLink] {
         const QString host = hostBox->currentText();
+        if (!host.isEmpty()) {
+            chosenHost_ = host;
+        }
         if (!running() || host.isEmpty()) {
             code->setCode(QImage());
             address->clear();
@@ -1268,7 +1318,7 @@ void ShareServer::showDialog(QWidget* parent) {
         QGuiApplication::clipboard()->setText(*currentLink);
         copy->setText(QStringLiteral("Copied"));
     });
-    QObject::connect(done, &QPushButton::clicked, dialog, &QDialog::close);
+    QObject::connect(done, &QPushButton::clicked, dialog, &QWidget::close);
 
     auto* stop = new QPushButton(QStringLiteral("Stop sharing"), sheet);
     stop->setObjectName(QStringLiteral("shareStop"));
@@ -1280,9 +1330,9 @@ void ShareServer::showDialog(QWidget* parent) {
 
     outer->addWidget(sheet, 0, Qt::AlignHCenter);
     outer->addStretch(1);
+    dialog->watchSheet(sheet);
     dialog->show();
     dialog->raise();
-    dialog->activateWindow();
 }
 
 } // namespace videovault::app

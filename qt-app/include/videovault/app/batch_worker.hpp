@@ -60,6 +60,11 @@ signals:
     // One more file/video finished.
     void fileFinished(int done_files, int total_files);
 
+    // One new vault file or folder. Delivered as it lands, not at the end of
+    // the batch. Duplicates are not announced.
+    void videoArrived(qlonglong id, QString name, qlonglong size, qlonglong folderId, qlonglong importedAt);
+    void folderArrived(qlonglong id, qlonglong parentId, QString name);
+
     // Emitted once at the end: ok=true with the success count and a summary,
     // or ok=false with the first error message and the partial count.
     void finished(bool ok, QString message, int count);

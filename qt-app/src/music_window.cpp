@@ -1007,22 +1007,13 @@ SongTags songFromFileName(const QString& fileName) {
 }
 
 QPixmap paintNotePlate(const int side) {
-    // Same role as Telegram's song button when a file has no album art:
-    // a blue tile and a white play mark. Drawn here, not copied from tdesktop.
-    QPixmap plate(std::max(1, side), std::max(1, side));
-    plate.fill(Qt::transparent);
-    QPainter painter(&plate);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(kAccent);
-    const double s = plate.width();
-    painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22);
-    QPolygonF play;
-    play << QPointF(s * 0.40, s * 0.30)
-         << QPointF(s * 0.72, s * 0.50)
-         << QPointF(s * 0.40, s * 0.70);
-    painter.setBrush(Qt::white);
-    painter.drawPolygon(play);
+    const int s = std::max(1, side);
+    const QPixmap cover(QStringLiteral(":/icons/nocover.png"));
+    if (!cover.isNull()) {
+        return cover.scaled(s, s, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    QPixmap plate(s, s);
+    plate.fill(QColor(0x1C, 0x1C, 0x1E));
     return plate;
 }
 
@@ -1559,7 +1550,8 @@ void MusicWindow::startWorker() {
             // contexts are not live together, and so a real cover replaces
             // a previously stored note.
             auto stored = vault->display_thumbnail(id, 256U);
-            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            const bool note = stored && (stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty");
             bool retry = !note || !stored;
             if (note && noteProbe_) {
                 std::lock_guard<std::mutex> guard(noteProbe_->mutex);
@@ -1572,6 +1564,7 @@ void MusicWindow::startWorker() {
                 }
             }
             if (stored && stored.value().mime != "image/x-mvp-note"
+                && stored.value().mime != "image/x-mvp-empty"
                 && !stored.value().bytes.empty()) {
                 cover.loadFromData(
                     reinterpret_cast<const uchar*>(stored.value().bytes.data()),
@@ -1864,7 +1857,8 @@ void MusicWindow::requestCovers() {
                 return;
             }
             auto stored = vault->display_thumbnail(id, 128U);
-            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            const bool note = stored && (stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty");
             bool retry = !stored || stored.value().bytes.empty();
             if (note) {
                 std::lock_guard<std::mutex> guard(probe->mutex);
@@ -1877,7 +1871,8 @@ void MusicWindow::requestCovers() {
                 }
             }
             if (self.isNull() || !stored || stored.value().bytes.empty()
-                || stored.value().mime == "image/x-mvp-note") {
+                || stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty") {
                 continue;
             }
             QImage image;
