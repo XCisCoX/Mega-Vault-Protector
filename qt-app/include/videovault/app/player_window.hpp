@@ -264,6 +264,9 @@ public:
         QWidget* parent = nullptr);
     ~PlayerWindow() override;
     void playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
+    // A still picture. Decrypts the package in chunks, like the video stream,
+    // then shows it in the image viewer instead of the playback clock.
+    void playStill(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
     void presentClip(const QString& title, int index, int count, bool hasPrevious, bool hasNext);
     std::int64_t videoId() const { return video_id_; }
     // Plays inside the main window until the viewer is popped into its own window.
@@ -310,6 +313,7 @@ private:
     void enterImageMode();
     void zoomImage(double factor, const QPointF& cursor_pos);
     void resetImageFit();
+    void clampImageOffset();
     void setImageZoom100();
     void updateZoomLabel();
     void tick();
@@ -411,8 +415,10 @@ private:
     std::atomic<bool> imageModeFlag_{false};
     bool panning_{false};
     QPoint panStartPos_;
+    QPoint panAnchor_;
     QPointF panStartOffset_;
     double imageZoom_{0.0};
+    int stillEpoch_{0};
     QPointF imageOffset_;
     QString title_;
     int volumePercent_{100};

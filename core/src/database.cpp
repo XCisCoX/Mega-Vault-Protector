@@ -504,6 +504,67 @@ Result<bool> migrate_to_version_5(sqlite3* database) {
     return true;
 }
 
+Result<bool> migrate_to_version_6(sqlite3* database) {
+    auto transaction = run(database, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read current schema version", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    const int version = sqlite3_column_int(current.get(), 0);
+    if (version >= 6) {
+        auto committed = run(database, "COMMIT;");
+        if (!committed) {
+            rollback();
+            return committed.error();
+        }
+        return true;
+    }
+
+    // Plaintext SHA-256. NULL on items imported before this column existed.
+    // Not unique: a vault may already contain two copies, and both can record
+    // the same hash. New imports refuse to add another.
+    auto added = run(database,
+        "ALTER TABLE videos ADD COLUMN content_sha256 BLOB;");
+    if (!added) {
+        rollback();
+        return added.error();
+    }
+    auto indexed = run(database,
+        "CREATE INDEX videos_content_sha256 ON videos(content_sha256);");
+    if (!indexed) {
+        rollback();
+        return indexed.error();
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database,
+        "INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?1);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseFailure,
+            "insert schema migration 6", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
 VideoRow row_from_statement(sqlite3_stmt* statement) {
     VideoRow row;
     row.id = sqlite3_column_int64(statement, 0);
@@ -533,13 +594,18 @@ VideoRow row_from_statement(sqlite3_stmt* statement) {
     row.folder_id = sqlite3_column_type(statement, 11) == SQLITE_NULL
         ? 0
         : sqlite3_column_int64(statement, 11);
+    const auto content = column_blob(statement, 12);
+    if (content.size() == row.content_sha256.size()) {
+        std::copy(content.begin(), content.end(), row.content_sha256.begin());
+        row.has_content_sha256 = true;
+    }
     return row;
 }
 
 constexpr const char* kVideoColumns =
     "id, display_name, original_size, package_relative_path, package_size,"
     " package_sha256, format_version, algorithm_id, chunk_size, package_id,"
-    " imported_at, folder_id";
+    " imported_at, folder_id, content_sha256";
 
 } // namespace
 
@@ -596,6 +662,10 @@ Result<Database> Database::create(
     if (!migrated_v5) {
         return migrated_v5.error();
     }
+    auto migrated_v6 = migrate_to_version_6(database.value().database_);
+    if (!migrated_v6) {
+        return migrated_v6.error();
+    }
     return std::move(database.value());
 }
 
@@ -627,6 +697,10 @@ Result<Database> Database::open(
     auto migrated_v5 = migrate_to_version_5(database.value().database_);
     if (!migrated_v5) {
         return migrated_v5.error();
+    }
+    auto migrated_v6 = migrate_to_version_6(database.value().database_);
+    if (!migrated_v6) {
+        return migrated_v6.error();
     }
     return std::move(database.value());
 }
@@ -678,8 +752,8 @@ Result<std::int64_t> Database::insert_video(
     Statement insert(database_,
         "INSERT INTO videos(display_name, original_size, package_relative_path,"
         " package_size, package_sha256, format_version, algorithm_id, chunk_size,"
-        " package_id, imported_at, folder_id)"
-        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);");
+        " package_id, imported_at, folder_id, content_sha256)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);");
     if (insert.status() != SQLITE_OK
         || sqlite3_bind_text(insert.get(), 1, row.display_name.c_str(),
                static_cast<int>(row.display_name.size()), SQLITE_TRANSIENT) != SQLITE_OK
@@ -710,7 +784,21 @@ Result<std::int64_t> Database::insert_video(
                static_cast<sqlite3_int64>(row.imported_at)) != SQLITE_OK
         || (row.folder_id > 0
             ? sqlite3_bind_int64(insert.get(), 11, row.folder_id)
-            : sqlite3_bind_null(insert.get(), 11)) != SQLITE_OK
+            : sqlite3_bind_null(insert.get(), 11)) != SQLITE_OK) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "bind video insert", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    if (row.has_content_sha256) {
+        const auto bound_content = bind_blob(insert, 12, row.content_sha256);
+        if (!bound_content || sqlite3_step(insert.get()) != SQLITE_DONE) {
+            const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+                "execute video insert", sqlite3_extended_errcode(database_));
+            rollback();
+            return error;
+        }
+    } else if (sqlite3_bind_null(insert.get(), 12) != SQLITE_OK
         || sqlite3_step(insert.get()) != SQLITE_DONE) {
         const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
             "execute video insert", sqlite3_extended_errcode(database_));
@@ -816,6 +904,69 @@ Result<std::optional<VideoRow>> Database::query_video_by_sha256(
         return std::optional<VideoRow>{};
     }
     return std::optional<VideoRow>{row_from_statement(query.get())};
+}
+
+Result<std::optional<std::int64_t>> Database::query_video_id_by_content_sha256(
+    const Sha256Digest& content_sha256) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT id FROM videos WHERE content_sha256 = ?1 LIMIT 1;");
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare content hash query", sqlite3_extended_errcode(database_));
+    }
+    const auto bound = bind_blob(query, 1, content_sha256);
+    if (!bound) {
+        return bound.error();
+    }
+    if (sqlite3_step(query.get()) != SQLITE_ROW) {
+        return std::optional<std::int64_t>{};
+    }
+    return std::optional<std::int64_t>{sqlite3_column_int64(query.get(), 0)};
+}
+
+Result<std::vector<std::int64_t>> Database::list_videos_missing_content_hash(
+    const std::uint64_t original_size) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT id FROM videos WHERE original_size = ?1 AND content_sha256 IS NULL;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1,
+               static_cast<sqlite3_int64>(original_size)) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare missing content hash query", sqlite3_extended_errcode(database_));
+    }
+    std::vector<std::int64_t> ids;
+    while (sqlite3_step(query.get()) == SQLITE_ROW) {
+        ids.push_back(sqlite3_column_int64(query.get(), 0));
+    }
+    return ids;
+}
+
+Result<bool> Database::set_content_sha256(
+    const std::int64_t video_id,
+    const Sha256Digest& content_sha256) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement update(database_,
+        "UPDATE videos SET content_sha256 = ?1 WHERE id = ?2 AND content_sha256 IS NULL;");
+    if (update.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare content hash update", sqlite3_extended_errcode(database_));
+    }
+    const auto bound = bind_blob(update, 1, content_sha256);
+    if (!bound
+        || sqlite3_bind_int64(update.get(), 2, video_id) != SQLITE_OK
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "store content hash", sqlite3_extended_errcode(database_));
+    }
+    return true;
 }
 
 Result<WrappedVideoKey> Database::query_video_key(const std::int64_t video_id) const {

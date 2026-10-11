@@ -912,10 +912,13 @@ JNI_METHOD(nativeImportFile)(JNIEnv* env, jobject, jstring path) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
     const std::string p = jstring_to_string(env, path);
-    auto result = g_vault->import_file(p);
+    bool duplicate = false;
+    auto result = g_vault->import_file(p, {}, 0, &duplicate);
     if (!result) return to_jstring(env, err_json(result.error()));
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "\"id\":%lld", static_cast<long long>(result.value()));
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "\"id\":%lld%s",
+        static_cast<long long>(result.value()),
+        duplicate ? ",\"duplicate\":true" : "");
     return to_jstring(env, ok_json(buf));
 }
 
@@ -1141,10 +1144,14 @@ JNI_METHOD(nativeImportInto)(JNIEnv* env, jobject, jstring path, jlong folder_id
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
     const std::string p = jstring_to_string(env, path);
-    auto result = g_vault->import_file(p, {}, static_cast<std::int64_t>(folder_id));
+    bool duplicate = false;
+    auto result = g_vault->import_file(
+        p, {}, static_cast<std::int64_t>(folder_id), &duplicate);
     if (!result) return to_jstring(env, err_json(result.error()));
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "\"id\":%lld", static_cast<long long>(result.value()));
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "\"id\":%lld%s",
+        static_cast<long long>(result.value()),
+        duplicate ? ",\"duplicate\":true" : "");
     return to_jstring(env, ok_json(buf));
 }
 

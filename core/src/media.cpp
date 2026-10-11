@@ -314,25 +314,57 @@ AVStream* find_audio_stream(AVFormatContext* format) {
     return nullptr;
 }
 
-// Decodes the embedded album picture (ID3 APIC and friends). The packet lives
-// on the stream, so it must not be unreferenced.
+// Decodes the embedded album picture. ID3 APIC is a disposed attached
+// picture; some files instead carry one still-image video packet.
 Result<AvFramePtr> decode_attached_cover(AVFormatContext* format) {
+    auto is_still = [](const AVCodecID id) {
+        return id == AV_CODEC_ID_MJPEG || id == AV_CODEC_ID_PNG
+            || id == AV_CODEC_ID_WEBP || id == AV_CODEC_ID_BMP
+            || id == AV_CODEC_ID_GIF || id == AV_CODEC_ID_TIFF;
+    };
     AVStream* cover = nullptr;
     for (unsigned int index = 0U; index < format->nb_streams; ++index) {
         AVStream* candidate = format->streams[index];
         if (candidate == nullptr || candidate->codecpar == nullptr) {
             continue;
         }
-        if (candidate->codecpar->codec_type == AVMEDIA_TYPE_VIDEO
-            && (candidate->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) {
+        if (candidate->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) {
+            continue;
+        }
+        const bool attached = (candidate->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0;
+        if (attached || is_still(candidate->codecpar->codec_id)) {
             cover = candidate;
-            break;
+            if (attached) {
+                break;
+            }
         }
     }
-    if (cover == nullptr || cover->attached_pic.data == nullptr
-        || cover->attached_pic.size <= 0) {
+    if (cover == nullptr) {
         return VaultError{VaultErrorCode::UnsupportedVideoFormat,
             "the audio file has no embedded cover"};
+    }
+    AVPacket packet = cover->attached_pic;
+    AvPacketPtr owned;
+    const bool borrowed = packet.data != nullptr && packet.size > 0;
+    if (!borrowed) {
+        owned.reset(av_packet_alloc());
+        if (!owned) {
+            return VaultError{VaultErrorCode::CryptoFailure,
+                "unable to allocate FFmpeg packet"};
+        }
+        bool found = false;
+        while (av_read_frame(format, owned.get()) >= 0) {
+            if (owned->stream_index == cover->index && owned->size > 0) {
+                found = true;
+                break;
+            }
+            av_packet_unref(owned.get());
+        }
+        if (!found) {
+            return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+                "the audio file has no embedded cover"};
+        }
+        packet = *owned;
     }
     const AVCodec* decoder = avcodec_find_decoder(cover->codecpar->codec_id);
     if (decoder == nullptr) {
@@ -348,7 +380,7 @@ Result<AvFramePtr> decode_attached_cover(AVFormatContext* format) {
     if (status < 0 || avcodec_open2(codec.get(), decoder, nullptr) < 0) {
         return media_error("open cover decoder", status);
     }
-    status = avcodec_send_packet(codec.get(), &cover->attached_pic);
+    status = avcodec_send_packet(codec.get(), &packet);
     if (status < 0) {
         return media_error("send cover packet", status);
     }
@@ -435,6 +467,17 @@ Result<AvFramePtr> decode_representative_frame(
     int status = avcodec_parameters_to_context(codec.get(), stream->codecpar);
     if (status < 0) {
         return media_error("apply codec parameters", status);
+    }
+    // A photo is one frame. Ask the decoder for a smaller picture (JPEG
+    // lowres) instead of expanding a multi-megapixel bitmap and scaling it
+    // afterwards. The gallery only ever shows this thumbnail.
+    if (single_frame && decoder->max_lowres > 0 && stream->codecpar->width > 480) {
+        int lowres = 0;
+        const int source_width = stream->codecpar->width;
+        while (lowres < decoder->max_lowres && (source_width >> (lowres + 1)) >= 160) {
+            ++lowres;
+        }
+        codec->lowres = lowres;
     }
     status = avcodec_open2(codec.get(), decoder, nullptr);
     if (status < 0) {
@@ -819,24 +862,6 @@ void fill_rect(AVFrame* frame, const int x0, const int y0, const int x1, const i
     }
 }
 
-void fill_ellipse(AVFrame* frame, const int cx, const int cy, const int rx, const int ry,
-    const unsigned char r, const unsigned char g, const unsigned char b) {
-    if (rx <= 0 || ry <= 0) {
-        return;
-    }
-    const int rx2 = rx * rx;
-    const int ry2 = ry * ry;
-    for (int y = cy - ry; y <= cy + ry; ++y) {
-        for (int x = cx - rx; x <= cx + rx; ++x) {
-            const int dx = x - cx;
-            const int dy = y - cy;
-            if (dx * dx * ry2 + dy * dy * rx2 <= rx2 * ry2) {
-                paint_rgb(frame, x, y, r, g, b);
-            }
-        }
-    }
-}
-
 // Square cover used when a song has no embedded album art.
 Result<std::vector<unsigned char>> music_note_jpeg(
     const std::uint32_t max_dimension,
@@ -861,18 +886,40 @@ Result<std::vector<unsigned char>> music_note_jpeg(
         return media_error("allocate music thumbnail", status);
     }
     const int s = static_cast<int>(side);
-    fill_rect(frame.get(), 0, 0, s, s, 28, 28, 30);
+    fill_rect(frame.get(), 0, 0, s, s, 0x33, 0x90, 0xEC);
     const auto px = [s](const double fraction) {
         return static_cast<int>(fraction * static_cast<double>(s));
     };
-    const unsigned char br = 51;
-    const unsigned char bg = 144;
-    const unsigned char bb = 236;
-    fill_ellipse(frame.get(), px(0.38), px(0.70), std::max(1, px(0.13)), std::max(1, px(0.09)), br, bg, bb);
-    fill_ellipse(frame.get(), px(0.68), px(0.62), std::max(1, px(0.13)), std::max(1, px(0.09)), br, bg, bb);
-    fill_rect(frame.get(), px(0.48), px(0.22), px(0.53), px(0.70), br, bg, bb);
-    fill_rect(frame.get(), px(0.78), px(0.16), px(0.83), px(0.62), br, bg, bb);
-    fill_rect(frame.get(), px(0.48), px(0.20), px(0.83), px(0.28), br, bg, bb);
+    const int x0 = px(0.40);
+    const int y0 = px(0.30);
+    const int x1 = px(0.72);
+    const int y1 = px(0.50);
+    const int x2 = px(0.40);
+    const int y2 = px(0.70);
+    const auto edge = [](const int ax, const int ay, const int bx, const int by,
+        const int px, const int py) {
+        return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+    };
+    const int area = edge(x0, y0, x1, y1, x2, y2);
+    if (area != 0) {
+        const int min_y = std::max(0, std::min({y0, y1, y2}));
+        const int max_y = std::min(s - 1, std::max({y0, y1, y2}));
+        const int min_x = std::max(0, std::min({x0, x1, x2}));
+        const int max_x = std::min(s - 1, std::max({x0, x1, x2}));
+        for (int y = min_y; y <= max_y; ++y) {
+            for (int x = min_x; x <= max_x; ++x) {
+                const int w0 = edge(x1, y1, x2, y2, x, y);
+                const int w1 = edge(x2, y2, x0, y0, x, y);
+                const int w2 = edge(x0, y0, x1, y1, x, y);
+                const bool inside = area > 0
+                    ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                    : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+                if (inside) {
+                    paint_rgb(frame.get(), x, y, 255, 255, 255);
+                }
+            }
+        }
+    }
     auto jpeg = encode_jpeg(frame.get(), side, side);
     if (!jpeg) {
         return jpeg.error();

@@ -271,7 +271,12 @@ fun MusicScreen(
             ) {
                 val art = cover
                 if (art == null) {
-                    Text("♪", color = Mvp.accent, fontSize = 18.sp)
+                    Icon(
+                        painterResource(R.drawable.files_music),
+                        contentDescription = null,
+                        tint = Mvp.accent,
+                        modifier = Modifier.size(22.dp),
+                    )
                 } else {
                     Image(
                         bitmap = art.asImageBitmap(),
@@ -364,7 +369,14 @@ fun MusicScreen(
         ) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(R.drawable.ic_tg_repeat),
+                    painterResource(
+                        when {
+                            shuffle -> R.drawable.player_new_shuffle
+                            repeat == 2 -> R.drawable.player_new_repeatone
+                            repeat == 1 -> R.drawable.player_new_repeatall
+                            else -> R.drawable.player_new_repeat_off
+                        },
+                    ),
                     contentDescription = "Repeat",
                     tint = icon,
                     modifier = Modifier
@@ -429,19 +441,10 @@ fun MusicScreen(
                         },
                     )
                 }
-                if (repeat == 2) {
-                    Text(
-                        "1",
-                        color = Mvp.accent,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 14.dp),
-                    )
-                }
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(R.drawable.ic_tg_prev),
+                    painterResource(R.drawable.ic_action_previous),
                     contentDescription = "Previous",
                     tint = Color.White,
                     modifier = Modifier
@@ -459,7 +462,7 @@ fun MusicScreen(
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(if (playing) R.drawable.ic_tg_pause else R.drawable.ic_tg_play),
+                    painterResource(if (playing) R.drawable.ic_action_pause else R.drawable.ic_action_play),
                     contentDescription = "Play",
                     tint = Color.White,
                     modifier = Modifier
@@ -473,7 +476,7 @@ fun MusicScreen(
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(R.drawable.ic_tg_next),
+                    painterResource(R.drawable.ic_action_next),
                     contentDescription = "Next",
                     tint = Color.White,
                     modifier = Modifier
@@ -488,7 +491,7 @@ fun MusicScreen(
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(R.drawable.ic_tg_more),
+                    painterResource(R.drawable.msg_close),
                     contentDescription = "Close",
                     tint = Color.White,
                     modifier = Modifier
@@ -671,7 +674,12 @@ private fun SongThumb(id: Long, modifier: Modifier) {
     Box(modifier.background(Color(0xFF2C2C2E)), contentAlignment = Alignment.Center) {
         val art = bmp
         if (art == null) {
-            Text("♪", color = Mvp.accent, fontSize = 14.sp)
+            Icon(
+                painterResource(R.drawable.files_music),
+                contentDescription = null,
+                tint = Mvp.accent,
+                modifier = Modifier.size(16.dp),
+            )
         } else {
             Image(
                 bitmap = art.asImageBitmap(),
@@ -738,7 +746,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    painterResource(if (playing) R.drawable.ic_tg_pause else R.drawable.ic_tg_play),
+                    painterResource(if (playing) R.drawable.ic_action_pause else R.drawable.ic_action_play),
                     contentDescription = "Play",
                     tint = Color.White,
                     modifier = Modifier.size(18.dp),
@@ -775,7 +783,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    painterResource(R.drawable.ic_tg_close),
+                    painterResource(R.drawable.msg_close),
                     contentDescription = "Close",
                     tint = Color(0xFF8B9BA8),
                     modifier = Modifier.size(16.dp),

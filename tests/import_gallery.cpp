@@ -187,16 +187,22 @@ int main() {
         }
     }
 
-    // Each import draws a fresh random file key, so re-importing identical
-    // source content produces a distinct package and a new gallery entry.
+    // The same bytes are one gallery item, including a copy saved under
+    // another file name.
     {
         const auto duplicate_id = reopened.value().import_file(source_path);
-        if (!duplicate_id || duplicate_id.value() == video_id) {
-            return fail("Re-importing must create a fresh package with its own id.");
+        if (!duplicate_id || duplicate_id.value() != video_id) {
+            return fail("Re-importing the same bytes must keep the existing item.");
         }
-        const auto listed_three = reopened.value().list_videos();
-        if (!listed_three || listed_three.value().size() != 3U) {
-            return fail("Each import must add exactly one gallery row.");
+        const auto alias_path = temp.path() / L"sample-copy.bin";
+        writeBinaryFile(alias_path, source);
+        const auto alias_id = reopened.value().import_file(alias_path);
+        if (!alias_id || alias_id.value() != video_id) {
+            return fail("A renamed copy of the same bytes must not be stored again.");
+        }
+        const auto listed_same = reopened.value().list_videos();
+        if (!listed_same || listed_same.value().size() != 2U) {
+            return fail("Duplicate bytes must not add a gallery row.");
         }
     }
 

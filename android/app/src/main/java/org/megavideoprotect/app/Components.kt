@@ -281,7 +281,7 @@ fun BoxScope.ScanCorner(enabled: Boolean, onClick: () -> Unit) {
             .padding(end = 4.dp),
     ) {
         Icon(
-            painter = painterResource(R.drawable.ic_scan_qr),
+            painter = painterResource(R.drawable.profile_qr_scan_24),
             contentDescription = "Scan",
             tint = Mvp.title,
             modifier = Modifier.size(26.dp),

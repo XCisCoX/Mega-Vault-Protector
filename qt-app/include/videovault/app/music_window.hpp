@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class QAudioOutput;
@@ -65,6 +66,12 @@ public:
         const std::shared_ptr<videovault::core::Vault>& vault,
         const std::vector<MusicTrack>& tracks,
         int index);
+    // Leave the bar up and the position where it is. A video should not
+    // tear the player down.
+    void pauseForVideo();
+    // The now-playing card is a top-level window, so minimizing the library
+    // does not hide it or stop the audio device.
+    void showWhileMinimized();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -119,6 +126,7 @@ private:
     std::int64_t positionMs() const;
     QString formatTime(std::int64_t ms) const;
     void seekBy(std::int64_t deltaMs);
+    void requestCovers();
 
     std::shared_ptr<videovault::core::Vault> vault_;
     std::vector<MusicTrack> tracks_;
@@ -128,6 +136,7 @@ private:
     int lastSpeedMilli_{1500};
     int rememberedVolume_{100};
     bool scrubbing_{false};
+    int pendingSeek_{-1};
     bool barOver_{false};
     std::vector<int> history_;
     std::vector<int> bag_;
@@ -187,6 +196,14 @@ private:
     QRect nameRect_;
     QImage cover_;
     std::int64_t coverId_{0};
+    std::unordered_map<std::int64_t, QImage> art_;
+    struct NoteProbe {
+        std::mutex mutex;
+        std::unordered_set<std::int64_t> tried;
+        std::atomic<int> inflight{0};
+    };
+    std::shared_ptr<NoteProbe> noteProbe_{std::make_shared<NoteProbe>()};
+    std::atomic<int> coverSerial_{0};
     std::unordered_map<std::int64_t, SongTags> tags_;
 };
 

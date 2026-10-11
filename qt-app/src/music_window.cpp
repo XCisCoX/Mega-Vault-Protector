@@ -24,8 +24,9 @@
 #include <QComboBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QLinearGradient>
 #include <QPainterPath>
-#include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
@@ -34,6 +35,8 @@
 #include <QSettings>
 #include <QShowEvent>
 #include <QSlider>
+#include <QStyle>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QSystemTrayIcon>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -50,8 +53,8 @@ namespace videovault::app {
 
 namespace {
 
-constexpr int kBarHeight = 36;
-constexpr int kControlHeight = 30;
+constexpr int kBarHeight = 48;
+constexpr int kControlHeight = 32;
 const QColor kAccent(0x33, 0x90, 0xEC);
 const QColor kIcon(0x8D, 0x98, 0xA3);
 const QColor kIconDisabled(0x4A, 0x4A, 0x4C);
@@ -64,29 +67,34 @@ QString speedLabel(const int milli) {
 
 void paintSpeaker(QPainter& painter, const QRect& box, const int waves) {
     const QRectF r(box);
+    const qreal cy = r.center().y();
+    const qreal left = r.left() + 2.0;
+    const QColor ink = painter.brush().color().alpha() > 0
+        ? painter.brush().color()
+        : painter.pen().color();
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(ink);
     QPainterPath body;
-    body.moveTo(r.left() + 4, r.center().y() - 3);
-    body.lineTo(r.left() + 8, r.center().y() - 3);
-    body.lineTo(r.left() + 12, r.center().y() - 6);
-    body.lineTo(r.left() + 12, r.center().y() + 6);
-    body.lineTo(r.left() + 8, r.center().y() + 3);
-    body.lineTo(r.left() + 4, r.center().y() + 3);
+    body.moveTo(left, cy - 3.0);
+    body.lineTo(left + 4.0, cy - 3.0);
+    body.lineTo(left + 9.0, cy - 7.0);
+    body.lineTo(left + 9.0, cy + 7.0);
+    body.lineTo(left + 4.0, cy + 3.0);
+    body.lineTo(left, cy + 3.0);
     body.closeSubpath();
     painter.drawPath(body);
+    QPen pen(ink, 1.7, Qt::SolidLine, Qt::RoundCap);
     painter.setBrush(Qt::NoBrush);
-    QPen pen = painter.pen();
-    pen.setWidthF(1.5);
-    pen.setCapStyle(Qt::RoundCap);
     painter.setPen(pen);
     if (waves >= 1) {
-        painter.drawArc(QRectF(r.center().x() - 2, r.center().y() - 4, 8, 8), -50 * 16, 100 * 16);
+        painter.drawArc(QRectF(left + 10.0, cy - 3.5, 6.5, 7.0), -70 * 16, 140 * 16);
     }
     if (waves >= 2) {
-        painter.drawArc(QRectF(r.center().x() - 1, r.center().y() - 7, 12, 14), -50 * 16, 100 * 16);
+        painter.drawArc(QRectF(left + 10.0, cy - 6.5, 10.5, 13.0), -60 * 16, 120 * 16);
     }
     if (waves <= 0) {
-        painter.drawLine(QPointF(r.right() - 6, r.center().y() - 4), QPointF(r.right() - 2, r.center().y() + 4));
-        painter.drawLine(QPointF(r.right() - 6, r.center().y() + 4), QPointF(r.right() - 2, r.center().y() - 4));
+        painter.drawLine(QPointF(left + 12.0, cy - 3.5), QPointF(left + 17.0, cy + 3.5));
+        painter.drawLine(QPointF(left + 17.0, cy - 3.5), QPointF(left + 12.0, cy + 3.5));
     }
 }
 
@@ -108,6 +116,8 @@ void paintArrowHead(QPainter& painter, const QPointF& tip, const QPointF& direct
 }
 
 } // namespace
+
+QPixmap paintNotePlate(int side);
 
 // Overlap-add stretch so 0.5x–2.5x keeps the original pitch. Playback at
 // 1x bypasses this and writes the decoded samples unchanged.
@@ -417,48 +427,66 @@ private:
 
     void paintRepeat(QPainter& painter, const QRect& box, const bool one) const {
         painter.save();
-        QPen pen(ink(), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        const QRectF r(box.adjusted(4, 5, -4, -5));
+        const QPen pen(ink(), 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
-        const QRectF arc = QRectF(box).adjusted(4.2, 5.2, -4.2, -5.2);
-        painter.drawArc(arc, 40 * 16, 290 * 16);
-        const double angle = 40.0 * 3.14159265 / 180.0;
-        const QPointF center = arc.center();
-        const QPointF tip(center.x() + arc.width() * 0.5 * std::cos(angle),
-            center.y() - arc.height() * 0.5 * std::sin(angle));
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(ink());
-        QPolygonF head;
-        head << tip + QPointF(1.5, -4.0) << tip + QPointF(5.0, 1.5) << tip + QPointF(-2.0, 1.0);
-        painter.drawPolygon(head);
+        const qreal x0 = r.left();
+        const qreal x1 = r.right();
+        const qreal y0 = r.top() + 1.0;
+        const qreal y1 = r.bottom() - 1.0;
+        painter.drawLine(QPointF(x0 + 1.0, y0 + 4.0), QPointF(x0 + 1.0, y0));
+        painter.drawLine(QPointF(x0 + 1.0, y0), QPointF(x1 - 6.0, y0));
+        paintArrowHead(painter, QPointF(x1 - 1.0, y0), QPointF(1, 0));
+        painter.setPen(pen);
+        painter.drawLine(QPointF(x1 - 1.0, y1 - 4.0), QPointF(x1 - 1.0, y1));
+        painter.drawLine(QPointF(x1 - 1.0, y1), QPointF(x0 + 6.0, y1));
+        paintArrowHead(painter, QPointF(x0 + 1.0, y1), QPointF(-1, 0));
         if (one) {
             painter.setPen(ink());
             QFont font(QStringLiteral("Segoe UI"));
             font.setPixelSize(9);
             font.setBold(true);
             painter.setFont(font);
-            painter.drawText(box.adjusted(0, 1, 0, 0), Qt::AlignCenter, QStringLiteral("1"));
+            painter.drawText(box, Qt::AlignCenter, QStringLiteral("1"));
         }
         painter.restore();
     }
 
     void paintOpposed(QPainter& painter, const QRect& box, const bool crossed) const {
         painter.save();
-        QPen pen(ink(), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        const QPen pen(ink(), 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
         painter.setPen(pen);
-        const QRectF r(box.adjusted(3, 4, -3, -4));
+        const QRectF r(box.adjusted(4, 4, -4, -4));
         if (!crossed) {
-            painter.drawLine(QPointF(r.right(), r.top() + 2), QPointF(r.left() + 4, r.top() + 2));
-            paintArrowHead(painter, QPointF(r.left() + 2, r.top() + 2), QPointF(-1, 0));
+            const qreal downX = r.left() + 3.0;
+            const qreal upX = r.right() - 3.0;
+            painter.drawLine(QPointF(downX, r.top() + 1.0), QPointF(downX, r.bottom() - 6.0));
+            paintArrowHead(painter, QPointF(downX, r.bottom() - 1.0), QPointF(0, 1));
             painter.setPen(pen);
-            painter.drawLine(QPointF(r.left(), r.bottom() - 2), QPointF(r.right() - 4, r.bottom() - 2));
-            paintArrowHead(painter, QPointF(r.right() - 2, r.bottom() - 2), QPointF(1, 0));
+            painter.drawLine(QPointF(upX, r.bottom() - 1.0), QPointF(upX, r.top() + 6.0));
+            paintArrowHead(painter, QPointF(upX, r.top() + 1.0), QPointF(0, -1));
         } else {
-            painter.drawLine(QPointF(r.left(), r.bottom() - 1), QPointF(r.right() - 4, r.top() + 2));
-            paintArrowHead(painter, QPointF(r.right() - 2, r.top() + 1), QPointF(1, -0.6));
+            const auto split = [](const QPointF& from, const QPointF& to, const qreal t) {
+                return from + (to - from) * t;
+            };
+            const QPointF lowStart(r.left(), r.bottom() - 2.0);
+            const QPointF lowBend(r.left() + 5.0, r.bottom() - 2.0);
+            const QPointF lowEnd(r.right() - 5.0, r.top() + 2.0);
+            painter.drawLine(lowStart, lowBend);
+            painter.drawLine(lowBend + QPointF(1.2, -1.0), split(lowBend, lowEnd, 0.36));
+            painter.drawLine(split(lowBend, lowEnd, 0.64), lowEnd);
+            painter.drawLine(lowEnd, QPointF(r.right() - 4.0, r.top() + 2.0));
+            paintArrowHead(painter, QPointF(r.right() - 1.0, r.top() + 2.0), QPointF(1, -0.15));
             painter.setPen(pen);
-            painter.drawLine(QPointF(r.left(), r.top() + 1), QPointF(r.right() - 4, r.bottom() - 2));
-            paintArrowHead(painter, QPointF(r.right() - 2, r.bottom() - 1), QPointF(1, 0.6));
+            const QPointF highStart(r.left(), r.top() + 2.0);
+            const QPointF highBend(r.left() + 5.0, r.top() + 2.0);
+            const QPointF highEnd(r.right() - 5.0, r.bottom() - 2.0);
+            painter.drawLine(highStart, highBend);
+            painter.drawLine(highBend + QPointF(1.2, 1.0), split(highBend, highEnd, 0.36));
+            painter.drawLine(split(highBend, highEnd, 0.64), highEnd);
+            painter.drawLine(highEnd, QPointF(r.right() - 4.0, r.bottom() - 2.0));
+            paintArrowHead(painter, QPointF(r.right() - 1.0, r.bottom() - 2.0), QPointF(1, 0.15));
         }
         painter.restore();
     }
@@ -509,7 +537,11 @@ protected:
             return;
         }
         dragging_ = true;
+        grabMouse();
         apply(event->pos().x());
+        if (released) {
+            released(value_);
+        }
     }
     void mouseMoveEvent(QMouseEvent* event) override {
         if (dragging_) {
@@ -521,6 +553,7 @@ protected:
         if (!dragging_) {
             return;
         }
+        releaseMouse();
         apply(event->pos().x());
         dragging_ = false;
         if (released) {
@@ -628,7 +661,7 @@ public:
         setFocusPolicy(Qt::NoFocus);
         setAutoFillBackground(false);
         setAttribute(Qt::WA_NoSystemBackground, true);
-        setFixedHeight(52);
+        setFixedHeight(58);
     }
 
     void setCurrent(const bool current) {
@@ -638,6 +671,10 @@ public:
     void setCaption(const QString& title, const QString& detail) {
         title_ = title;
         detail_ = detail;
+        update();
+    }
+    void setArt(const QPixmap& art) {
+        art_ = art;
         update();
     }
 
@@ -650,25 +687,29 @@ protected:
             painter.setBrush(QColor(255, 255, 255, 16));
             painter.drawRoundedRect(rect().adjusted(6, 2, -6, -2), 8, 8);
         }
-        const QRect icon(12, 6, 40, 40);
+        const QRect icon(12, 9, 40, 40);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(current_ ? kAccent : QColor(0x3A, 0x3A, 0x3C));
-        painter.drawRoundedRect(icon, 8, 8);
-        painter.setBrush(Qt::white);
-        const QRectF note(icon);
-        painter.drawEllipse(QPointF(note.left() + 15, note.top() + 26), 5, 4);
-        painter.drawRoundedRect(QRectF(note.left() + 19, note.top() + 10, 2, 16), 1, 1);
+        if (!art_.isNull()) {
+            QPainterPath clip;
+            clip.addRoundedRect(QRectF(icon), 8, 8);
+            painter.save();
+            painter.setClipPath(clip);
+            painter.drawPixmap(icon, art_);
+            painter.restore();
+        } else {
+            painter.drawPixmap(icon, paintNotePlate(icon.width()));
+        }
         painter.setPen(current_ ? kAccent : Qt::white);
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
         const int textLeft = 64;
         const QString elided = QFontMetrics(font).elidedText(title_, Qt::ElideRight, width() - textLeft - 16);
-        painter.drawText(QRect(textLeft, 8, width() - textLeft - 16, 18), Qt::AlignLeft | Qt::AlignVCenter, elided);
+        painter.drawText(QRect(textLeft, 12, width() - textLeft - 16, 18), Qt::AlignLeft | Qt::AlignVCenter, elided);
         painter.setPen(QColor(0x8E, 0x8E, 0x93));
         font.setPixelSize(11);
         painter.setFont(font);
-        painter.drawText(QRect(textLeft, 28, width() - textLeft - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, detail_);
+        painter.drawText(QRect(textLeft, 32, width() - textLeft - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, detail_);
     }
     void enterEvent(QEvent* event) override {
         QAbstractButton::enterEvent(event);
@@ -682,6 +723,7 @@ protected:
 private:
     QString title_;
     QString detail_;
+    QPixmap art_;
     bool current_{false};
 };
 
@@ -750,6 +792,14 @@ public:
         setFixedHeight(scroll_->height() + 12);
         if (index >= 0 && index < static_cast<int>(rowWidgets_.size())) {
             scroll_->ensureWidgetVisible(rowWidgets_[static_cast<std::size_t>(index)], 0, 24);
+        }
+    }
+
+    void setArt(const std::int64_t id, const QPixmap& art) {
+        for (std::size_t i = 0; i < ids_.size() && i < rowWidgets_.size(); ++i) {
+            if (ids_[i] == id) {
+                rowWidgets_[i]->setArt(art);
+            }
         }
     }
 
@@ -957,17 +1007,22 @@ SongTags songFromFileName(const QString& fileName) {
 }
 
 QPixmap paintNotePlate(const int side) {
-    QPixmap plate(side, side);
+    // Same role as Telegram's song button when a file has no album art:
+    // a blue tile and a white play mark. Drawn here, not copied from tdesktop.
+    QPixmap plate(std::max(1, side), std::max(1, side));
     plate.fill(Qt::transparent);
     QPainter painter(&plate);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(Qt::NoPen);
     painter.setBrush(kAccent);
-    painter.drawRoundedRect(QRectF(0, 0, side, side), side * 0.18, side * 0.18);
+    const double s = plate.width();
+    painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22);
+    QPolygonF play;
+    play << QPointF(s * 0.40, s * 0.30)
+         << QPointF(s * 0.72, s * 0.50)
+         << QPointF(s * 0.40, s * 0.70);
     painter.setBrush(Qt::white);
-    const double s = side;
-    painter.drawEllipse(QPointF(s * 0.38, s * 0.66), s * 0.12, s * 0.09);
-    painter.drawRoundedRect(QRectF(s * 0.48, s * 0.28, s * 0.045, s * 0.40), 1, 1);
+    painter.drawPolygon(play);
     return plate;
 }
 
@@ -994,10 +1049,59 @@ QPixmap roundedCover(const QImage& image, const int side) {
     return plate;
 }
 
+class ClickSlider final : public QSlider {
+public:
+    explicit ClickSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    std::function<void()> began;
+    std::function<void(int)> jumped;
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || width() <= 0) {
+            QSlider::mousePressEvent(event);
+            return;
+        }
+        setSliderDown(true);
+        jump(event->pos().x());
+        if (began) {
+            began();
+        }
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!isSliderDown() || width() <= 0) {
+            QSlider::mouseMoveEvent(event);
+            return;
+        }
+        jump(event->pos().x());
+        event->accept();
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (!isSliderDown() || width() <= 0) {
+            QSlider::mouseReleaseEvent(event);
+            return;
+        }
+        jump(event->pos().x());
+        setSliderDown(false);
+        if (jumped) {
+            jumped(value());
+        }
+        event->accept();
+    }
+
+private:
+    void jump(const int x) {
+        setValue(QStyle::sliderValueFromPosition(minimum(), maximum(), x, width()));
+    }
+};
+
 class NowPlayingCard final : public QWidget {
 public:
-    explicit NowPlayingCard(QWidget* owner)
-        : QWidget(owner, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::NoDropShadowWindowHint) {
+    explicit NowPlayingCard(QWidget*)
+        : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::NoDropShadowWindowHint) {
         setAttribute(Qt::WA_TranslucentBackground);
         setFixedWidth(340);
         auto* root = new QHBoxLayout(this);
@@ -1034,7 +1138,7 @@ public:
         column->addWidget(album_);
         album_->setVisible(false);
 
-        timeline_ = new QSlider(Qt::Horizontal, this);
+        timeline_ = new ClickSlider(this);
         timeline_->setRange(0, 1000);
         timeline_->setFocusPolicy(Qt::NoFocus);
         timeline_->setFixedHeight(16);
@@ -1083,6 +1187,14 @@ public:
             }
         });
         connect(timeline_, &QSlider::sliderPressed, this, [this] { timelineScrub_ = true; });
+        auto* clickTimeline = static_cast<ClickSlider*>(timeline_);
+        clickTimeline->began = [this] { timelineScrub_ = true; };
+        clickTimeline->jumped = [this](const int value) {
+            timelineScrub_ = false;
+            if (onSeek) {
+                onSeek(value);
+            }
+        };
         connect(timeline_, &QSlider::sliderReleased, this, [this] {
             timelineScrub_ = false;
             if (onSeek) {
@@ -1305,9 +1417,11 @@ MusicWindow::MusicWindow(QWidget* parent)
     };
     progress_->released = [this](const int value) {
         scrubbing_ = false;
+        pendingSeek_ = value;
         const auto duration = durationMs_.load();
         if (duration > 0) {
             seekTo(duration * value / 1000);
+            pendingSeek_ = -1;
         }
     };
 
@@ -1370,6 +1484,15 @@ MusicWindow::MusicWindow(QWidget* parent)
 MusicWindow::~MusicWindow() {
     qApp->removeEventFilter(this);
     hidePopups();
+    coverSerial_.fetch_add(1);
+    if (trayCard_ != nullptr) {
+        trayCard_->hide();
+        delete trayCard_;
+        trayCard_ = nullptr;
+    }
+    while (noteProbe_ && noteProbe_->inflight.load() > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     stopWorker();
 }
 
@@ -1435,15 +1558,28 @@ void MusicWindow::startWorker() {
             // Read the cover before the decoder opens so the two FFmpeg
             // contexts are not live together, and so a real cover replaces
             // a previously stored note.
-            const auto stored = vault->display_thumbnail(id, 480U);
-            if (stored && !stored.value().bytes.empty()) {
+            auto stored = vault->display_thumbnail(id, 256U);
+            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            bool retry = !note || !stored;
+            if (note && noteProbe_) {
+                std::lock_guard<std::mutex> guard(noteProbe_->mutex);
+                retry = noteProbe_->tried.insert(id).second;
+            }
+            if (retry && (!stored || note || stored.value().bytes.empty())) {
+                auto refreshed = vault->generate_thumbnail(id, 256U);
+                if (refreshed) {
+                    stored = std::move(refreshed);
+                }
+            }
+            if (stored && stored.value().mime != "image/x-mvp-note"
+                && !stored.value().bytes.empty()) {
                 cover.loadFromData(
                     reinterpret_cast<const uchar*>(stored.value().bytes.data()),
                     static_cast<int>(stored.value().bytes.size()));
             }
         }
         QString opened;
-        decoder_->set_stream_cache_bytes(1U << 20);
+        decoder_->set_stream_cache_bytes(256U << 10);
         decoder_->prepare_for_audio();
         if (!decoder_->open(vault, id, &opened) || !decoder_->has_audio()) {
             std::lock_guard<std::mutex> guard(errorMutex_);
@@ -1460,8 +1596,8 @@ void MusicWindow::startWorker() {
         if (cover.isNull()) {
             cover = decoder_->attached_cover();
         }
-        if (cover.width() > 480 || cover.height() > 480) {
-            cover = cover.scaled(480, 480, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        if (cover.width() > 256 || cover.height() > 256) {
+            cover = cover.scaled(256, 256, Qt::KeepAspectRatio, Qt::FastTransformation);
         }
         QMetaObject::invokeMethod(this, [this, id, tags, cover] {
             publishTrackInfo(id, tags.title, tags.artist, tags.album, cover);
@@ -1644,6 +1780,23 @@ void MusicWindow::playIndex(const int index) {
     startWorker();
 }
 
+void MusicWindow::pauseForVideo() {
+    if (tracks_.empty() || paused_.load()) {
+        return;
+    }
+    togglePlay();
+}
+
+void MusicWindow::showWhileMinimized() {
+    if (tracks_.empty()) {
+        return;
+    }
+    showTrayCard();
+    if (output_ != nullptr && !paused_.load() && output_->state() == QAudio::SuspendedState) {
+        output_->resume();
+    }
+}
+
 void MusicWindow::togglePlay() {
     if (tracks_.empty()) {
         return;
@@ -1678,6 +1831,74 @@ void MusicWindow::seekTo(const std::int64_t ms) {
             output_->resume();
         }
     }
+}
+
+void MusicWindow::requestCovers() {
+    if (!vault_ || tracks_.empty() || !noteProbe_) {
+        return;
+    }
+    const int serial = coverSerial_.fetch_add(1) + 1;
+    const auto vault = vault_;
+    const auto probe = noteProbe_;
+    std::vector<std::int64_t> ids;
+    for (const auto& track : tracks_) {
+        if (art_.find(track.id) == art_.end()) {
+            ids.push_back(track.id);
+        }
+    }
+    if (ids.empty()) {
+        return;
+    }
+    probe->inflight.fetch_add(1);
+    QPointer<MusicWindow> self(this);
+    QtConcurrent::run([self, serial, vault, probe, ids] {
+        struct Leave {
+            std::atomic<int>* inflight;
+            ~Leave() { inflight->fetch_sub(1); }
+        } leave{&probe->inflight};
+        for (const auto id : ids) {
+            if (!probe || probe->inflight.load() < 0) {
+                return;
+            }
+            if (self.isNull()) {
+                return;
+            }
+            auto stored = vault->display_thumbnail(id, 128U);
+            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            bool retry = !stored || stored.value().bytes.empty();
+            if (note) {
+                std::lock_guard<std::mutex> guard(probe->mutex);
+                retry = probe->tried.insert(id).second;
+            }
+            if (retry && (!stored || note || stored.value().bytes.empty())) {
+                auto refreshed = vault->generate_thumbnail(id, 128U);
+                if (refreshed) {
+                    stored = std::move(refreshed);
+                }
+            }
+            if (self.isNull() || !stored || stored.value().bytes.empty()
+                || stored.value().mime == "image/x-mvp-note") {
+                continue;
+            }
+            QImage image;
+            image.loadFromData(
+                reinterpret_cast<const uchar*>(stored.value().bytes.data()),
+                static_cast<int>(stored.value().bytes.size()));
+            if (image.isNull() || self.isNull()) {
+                continue;
+            }
+            image = image.scaled(80, 80, Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
+            QMetaObject::invokeMethod(self.data(), [self, serial, id, image] {
+                if (self.isNull() || self->coverSerial_.load() != serial) {
+                    return;
+                }
+                self->art_[id] = image;
+                if (self->playlist_ != nullptr) {
+                    self->playlist_->setArt(id, QPixmap::fromImage(image));
+                }
+            }, Qt::QueuedConnection);
+        }
+    });
 }
 
 void MusicWindow::seekBy(const std::int64_t deltaMs) {
@@ -1775,6 +1996,21 @@ std::int64_t MusicWindow::positionMs() const {
 void MusicWindow::refreshClock() {
     ensureOutput();
     applySeekClear();
+    if (output_ != nullptr && !paused_.load() && sink_ != nullptr
+        && sink_->buffered_samples() > 0U) {
+        const auto state = output_->state();
+        // Windows leaves the device idle after a short underrun and never
+        // pulls again. Pause and resume restarts that pull; do it here.
+        if (state == QAudio::IdleState || state == QAudio::StoppedState) {
+            output_->stop();
+            output_->start(sink_);
+        }
+    }
+    if (pendingSeek_ >= 0 && durationMs_.load() > 0) {
+        const int value = pendingSeek_;
+        pendingSeek_ = -1;
+        seekTo(durationMs_.load() * value / 1000);
+    }
     if (workerFinished_.load()) {
         std::string error;
         {
@@ -1879,7 +2115,8 @@ void MusicWindow::layoutControls() {
     const int nameWidth = std::max(0, right - timeWidth - 8 - nameLeft);
     nameLabel_->setGeometry(nameLeft, 0, nameWidth, kControlHeight);
     nameRect_ = nameLabel_->geometry();
-    progress_->setGeometry(0, kControlHeight, width(), kBarHeight - kControlHeight);
+    progress_->setGeometry(0, kBarHeight - 16, width(), 16);
+    progress_->raise();
     applyName();
 }
 
@@ -1902,22 +2139,31 @@ void MusicWindow::syncTransport() {
     case 1:
         repeatButton_->setGlyph(Glyph::RepeatOne);
         repeatButton_->setActive(true);
+        repeatButton_->setToolTip(QStringLiteral("Repeat this song"));
         break;
     case 2:
         repeatButton_->setGlyph(Glyph::Repeat);
         repeatButton_->setActive(true);
+        repeatButton_->setToolTip(QStringLiteral("Repeat playlist"));
         break;
     default:
         repeatButton_->setGlyph(Glyph::Repeat);
         repeatButton_->setActive(false);
+        repeatButton_->setToolTip(QStringLiteral("Repeat"));
         break;
     }
     if (order_ == 2) {
         orderButton_->setGlyph(Glyph::Shuffle);
         orderButton_->setActive(true);
+        orderButton_->setToolTip(QStringLiteral("Shuffle"));
+    } else if (order_ == 1) {
+        orderButton_->setGlyph(Glyph::Reverse);
+        orderButton_->setActive(true);
+        orderButton_->setToolTip(QStringLiteral("Reverse order"));
     } else {
         orderButton_->setGlyph(Glyph::Reverse);
-        orderButton_->setActive(order_ == 1);
+        orderButton_->setActive(false);
+        orderButton_->setToolTip(QStringLiteral("Playback order"));
     }
     const int volume = muted_.load() ? 0 : volumePercent_.load();
     volumeButton_->setGlyph(volume <= 0 ? Glyph::VolumeOff : volume < 50 ? Glyph::VolumeLow : Glyph::VolumeFull);
@@ -2207,7 +2453,11 @@ void MusicWindow::applySong() {
     applyName();
     if (playlist_ != nullptr) {
         playlist_->sync(tracks_, index_);
+        for (const auto& entry : art_) {
+            playlist_->setArt(entry.first, QPixmap::fromImage(entry.second));
+        }
     }
+    requestCovers();
     updateTray();
 }
 
@@ -2230,6 +2480,11 @@ void MusicWindow::publishTrackInfo(
     if (!cover.isNull()) {
         cover_ = cover;
         coverId_ = id;
+        const QImage plate = cover.scaled(80, 80, Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
+        art_[id] = plate;
+        if (playlist_ != nullptr) {
+            playlist_->setArt(id, QPixmap::fromImage(plate));
+        }
     }
     applySong();
 }

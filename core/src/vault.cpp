@@ -6,6 +6,7 @@
 #include "internal/metadata.hpp"
 #include "internal/package.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -256,9 +257,11 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     // A failed read must not replace a thumbnail we already kept. The next
     // open tries the cover again. A confirmed "no art" is stored as the note
     // so the gallery does not probe that song on every visit.
-    if (audio && art_kind < 0) {
+    if (audio && art_kind <= 0) {
         auto existing = database.query_thumbnail(video_id);
-        if (existing) {
+        if (existing && (art_kind < 0
+                || existing.value().mime == "image/x-mvp-note"
+                || existing.value().mime == "image/cover")) {
             auto thumbnail_key = internal::derive_subkey(
                 master_key, kThumbnailSubkeyId, kThumbnailContext);
             if (!thumbnail_key) {
@@ -649,11 +652,78 @@ Argon2Parameters Vault::kdf_parameters() const noexcept {
     return impl_ != nullptr ? impl_->parameters_ : Argon2Parameters{};
 }
 
+Result<internal::Sha256Digest> hash_source_file(
+    const std::filesystem::path& source_path,
+    const std::uint64_t source_size,
+    const std::function<void(double)>& progress) {
+    internal::Sha256Accumulator accumulator;
+    if (source_size == 0U) {
+        if (progress) {
+            progress(1.0);
+        }
+        return accumulator.digest();
+    }
+    std::ifstream input(source_path, std::ios::binary);
+    if (!input) {
+        return VaultError{VaultErrorCode::PermissionDenied,
+            "unable to open the source file"};
+    }
+    std::vector<unsigned char> block(1024U * 1024U);
+    std::uint64_t hashed = 0U;
+    while (hashed < source_size) {
+        const auto want = std::min<std::uint64_t>(block.size(), source_size - hashed);
+        input.read(reinterpret_cast<char*>(block.data()), static_cast<std::streamsize>(want));
+        if (input.gcount() != static_cast<std::streamsize>(want)) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "source ended before the declared plaintext size"};
+        }
+        accumulator.update(std::span<const unsigned char>(block.data(), static_cast<std::size_t>(want)));
+        hashed += want;
+        if (progress) {
+            progress(static_cast<double>(hashed) / static_cast<double>(source_size));
+        }
+    }
+    return accumulator.digest();
+}
+
+Result<internal::Sha256Digest> hash_plaintext(internal::PackageReader& reader) {
+    auto rewound = reader.seek(0U);
+    if (!rewound) {
+        return rewound.error();
+    }
+    internal::Sha256Accumulator accumulator;
+    std::vector<unsigned char> block(64U * 1024U);
+    for (;;) {
+        auto read = reader.read(block);
+        if (!read) {
+            return read.error();
+        }
+        if (read.value() == 0U) {
+            break;
+        }
+        accumulator.update(std::span<const unsigned char>(block.data(), read.value()));
+    }
+    return accumulator.digest();
+}
+
+void note_existing(bool* already_present, const std::function<void(double)>& progress) {
+    if (already_present != nullptr) {
+        *already_present = true;
+    }
+    if (progress) {
+        progress(1.0);
+    }
+}
+
 Result<std::int64_t> Vault::import_file(
     const std::filesystem::path& source_path,
     const std::function<void(double)>& progress,
-    const std::int64_t folder_id) {
+    const std::int64_t folder_id,
+    bool* already_present) {
     std::lock_guard<std::mutex> guard(*mutex_);
+    if (already_present != nullptr) {
+        *already_present = false;
+    }
     if (!impl_) {
         return locked_error();
     }
@@ -677,6 +747,49 @@ Result<std::int64_t> Vault::import_file(
     const auto source_size = std::filesystem::file_size(source_path, error);
     if (error) {
         return filesystem_error(error, "inspect source file size");
+    }
+
+    // Hash the plaintext before sealing it. A second copy of the same bytes
+    // returns the item already in the vault and writes nothing new.
+    const auto hash_progress = [&progress](const double fraction) {
+        if (progress) {
+            progress(std::clamp(fraction, 0.0, 1.0) * 0.15);
+        }
+    };
+    auto content_hash = hash_source_file(source_path, source_size, hash_progress);
+    if (!content_hash) {
+        return content_hash.error();
+    }
+    auto known = impl.database_.query_video_id_by_content_sha256(content_hash.value());
+    if (!known) {
+        return known.error();
+    }
+    if (known.value()) {
+        note_existing(already_present, progress);
+        return known.value().value();
+    }
+    // Items imported before content hashes existed are identified by size,
+    // then hashed from the stored package. Only same-size files are opened.
+    auto unhashed = impl.database_.list_videos_missing_content_hash(source_size);
+    if (!unhashed) {
+        return unhashed.error();
+    }
+    for (const auto existing_id : unhashed.value()) {
+        auto reader = open_package_reader(
+            root_, impl.database_, impl.master_key_, existing_id);
+        if (!reader) {
+            continue;
+        }
+        auto existing_hash = hash_plaintext(reader.value());
+        if (!existing_hash) {
+            continue;
+        }
+        const bool same = existing_hash.value() == content_hash.value();
+        (void)impl.database_.set_content_sha256(existing_id, existing_hash.value());
+        if (same) {
+            note_existing(already_present, progress);
+            return existing_id;
+        }
     }
 
     const auto data_directory = root_ / L"vault-data";
@@ -706,9 +819,14 @@ Result<std::int64_t> Vault::import_file(
         return VaultError{VaultErrorCode::PermissionDenied,
             "unable to open the source file"};
     }
+    const auto package_progress = [&progress](const double fraction) {
+        if (progress) {
+            progress(0.15 + std::clamp(fraction, 0.0, 1.0) * 0.85);
+        }
+    };
     auto written = internal::write_package_file(
         staging_package, file_key, internal::kDefaultPackageChunkSize, source,
-        source_size, progress);
+        source_size, package_progress);
     if (!written) {
         std::error_code ignored;
         std::filesystem::remove(staging_package, ignored);
@@ -729,6 +847,7 @@ Result<std::int64_t> Vault::import_file(
     if (duplicate.value()) {
         std::error_code ignored;
         std::filesystem::remove(staging_package, ignored);
+        note_existing(already_present, progress);
         return duplicate.value()->id;
     }
 
@@ -763,6 +882,8 @@ Result<std::int64_t> Vault::import_file(
         reinterpret_cast<const char*>(relative_u8.data()), relative_u8.size());
     row.package_size = written.value().package_size;
     row.package_sha256 = written.value().sha256;
+    row.content_sha256 = content_hash.value();
+    row.has_content_sha256 = true;
     row.format_version = internal::kPackageFormatVersion;
     row.algorithm_id = internal::kPackageAlgorithmXChaCha20Poly1305;
     row.chunk_size = internal::kDefaultPackageChunkSize;

@@ -107,6 +107,37 @@ inline QString appStyleSheet() {
             font-weight: 600;
         }
         QPushButton[primary="true"]:hover { background: #4ba0f5; }
+        QPushButton[quiet="true"] {
+            color: #d1d1d6;
+            background: transparent;
+            border: none;
+            min-height: 32px;
+        }
+        QPushButton[quiet="true"]:hover { background: rgba(255, 255, 255, 18); }
+        QPushButton[quiet="true"]:disabled { color: #636366; background: transparent; }
+        QLabel#statusNote {
+            color: #aeaeb2;
+            background: transparent;
+            border: none;
+            padding: 0;
+        }
+        QLabel#statusNote[problem="true"] { color: #ff6b6b; }
+        QProgressBar {
+            background: #1c1c1e;
+            border: none;
+            border-radius: 4px;
+            max-height: 8px;
+            min-height: 8px;
+        }
+        QProgressBar::chunk { background: #3390ec; border-radius: 4px; }
+        QToolTip {
+            color: #ffffff;
+            background: #2c2c2e;
+            border: 1px solid rgba(255, 255, 255, 36);
+            padding: 6px 8px;
+        }
+        QMessageBox { background: #161618; }
+        QMessageBox QLabel { color: #f2f2f7; background: transparent; }
         QPushButton#tagRemove {
             min-height: 28px;
             max-width: 28px;

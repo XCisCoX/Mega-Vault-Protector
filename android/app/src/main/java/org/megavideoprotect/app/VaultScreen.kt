@@ -8,13 +8,23 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.SystemClock
+import android.widget.Toast
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.DragAndDropPermissions
 import android.view.View
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -56,13 +66,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -83,18 +86,17 @@ import androidx.compose.ui.draganddrop.DragAndDropTransferData
 import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
@@ -306,6 +308,7 @@ fun VaultScreen(
     var confirmRemove by remember { mutableStateOf(false) }
     var showTags by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showTransfers by remember { mutableStateOf(false) }
     // Batch import progress: fraction of the bytes of the whole selection.
     var importProgress by remember { mutableStateOf<Float?>(null) }
     var importLabel by remember { mutableStateOf("") }
@@ -355,6 +358,10 @@ fun VaultScreen(
             GalleryCache.clear()
             refresh()
         }
+    }
+
+    LaunchedEffect(TransferHub.landed) {
+        if (TransferHub.landed > 0) refresh()
     }
 
     // Import: multi-select, streamed into the vault one file at a time with a
@@ -675,6 +682,27 @@ fun VaultScreen(
         selectedIds = emptySet()
     }
 
+    var lastExitPress by remember { mutableStateOf(0L) }
+    BackHandler {
+        if (showSettings) {
+            showSettings = false
+            return@BackHandler
+        }
+        if (currentFolderId != 0L) {
+            lastExitPress = 0L
+            val parent = folders.firstOrNull { it.id == currentFolderId }?.parentId ?: 0L
+            openFolder(parent)
+            return@BackHandler
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastExitPress < 2000L) {
+            (context as? Activity)?.moveTaskToBack(true)
+        } else {
+            lastExitPress = now
+            Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun moveDragged(drag: VaultDrag, destination: Long) {
         if (RemoteVault.connected()) {
             error = "This vault is open on your PC. Move it on the PC."
@@ -767,7 +795,14 @@ fun VaultScreen(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        if (showSettings) {
+        if (showTransfers) {
+            TransferPage(onClose = { showTransfers = false })
+        }
+        AnimatedVisibility(
+            visible = showSettings,
+            enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 10 },
+            exit = fadeOut(tween(160)) + slideOutVertically(tween(160)) { it / 10 },
+        ) {
             SettingsDialog(
                 currentTags = tags,
                 remote = RemoteVault.connected(),
@@ -854,7 +889,22 @@ fun VaultScreen(
                 ?.let { FolderEntry(PEER_FOLDER_ID, 0L, it) }
             if (pcFolder != null) listOf(pcFolder) + sorted else sorted
         }
-        Box(Modifier.fillMaxSize().hazeSource(state = haze)) {
+        val libraryFade = remember { Animatable(1f) }
+        var librarySettled by remember { mutableStateOf(false) }
+        LaunchedEffect(currentFolderId, viewMode) {
+            if (!librarySettled) {
+                librarySettled = true
+                return@LaunchedEffect
+            }
+            libraryFade.snapTo(0.35f)
+            libraryFade.animateTo(1f, tween(240))
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = libraryFade.value }
+                .hazeSource(state = haze),
+        ) {
             when (viewMode) {
                 0 -> DetailsView(
                     shown, orderedFolders, upParentId, selectedIds,
@@ -958,11 +1008,16 @@ fun VaultScreen(
             }
         }
 
-        Row(
+        Column(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .onSizeChanged { bottomInset = it.height }
+                .onSizeChanged { bottomInset = it.height },
+        ) {
+        TransferBar { showTransfers = true }
+        Row(
+            Modifier
+                .fillMaxWidth()
                 .hazeEffect(state = haze, style = glass)
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -970,6 +1025,7 @@ fun VaultScreen(
         ) {
             Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text("${childFolders.size + filtered.size} items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
+        }
         }
 
         error?.let { message ->
@@ -1204,7 +1260,7 @@ fun VaultScreen(
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton("Files", onClick = {
                     showAdd = false
-                    fileLauncher.launch(arrayOf("video/*", "audio/*", "image/*", "application/octet-stream"))
+                    fileLauncher.launch(arrayOf("*/*"))
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton("New folder", onClick = {
                     showAdd = false
@@ -1360,9 +1416,9 @@ private fun GalleryHeader(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            HeaderIcon("Add", Icons.Filled.Add, onImport, filled = true)
-            HeaderIcon("Settings", Icons.Filled.Settings, onSettings)
-            HeaderIcon("Lock", Icons.Filled.Lock, onLock)
+            HeaderIcon("Add", R.drawable.msg_add, onImport, filled = true)
+            HeaderIcon("Settings", R.drawable.msg_settings, onSettings)
+            HeaderIcon("Lock", R.drawable.outline_header_lock_24, onLock)
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -1380,10 +1436,10 @@ private fun GalleryHeader(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    Icons.Filled.Search,
+                    painterResource(R.drawable.outline_header_search),
                     contentDescription = null,
                     tint = Mvp.placeholder,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(8.dp))
                 BasicTextField(
@@ -1411,7 +1467,7 @@ private fun GalleryHeader(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            Icons.Filled.Close,
+                            painterResource(R.drawable.msg_close),
                             contentDescription = "Clear search",
                             tint = Mvp.description,
                             modifier = Modifier.size(14.dp),
@@ -1427,9 +1483,9 @@ private fun GalleryHeader(
                     .padding(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ViewModeButton(DetailsIcon, "Details", viewMode == 0) { onViewMode(0) }
-                ViewModeButton(GridIcon, "Icons", viewMode == 1) { onViewMode(1) }
-                ViewModeButton(Icons.Filled.List, "List", viewMode == 2) { onViewMode(2) }
+                ViewModeButton(R.drawable.iv_list, "Details", viewMode == 0) { onViewMode(0) }
+                ViewModeButton(R.drawable.msg_media, "Icons", viewMode == 1) { onViewMode(1) }
+                ViewModeButton(R.drawable.msg_list, "List", viewMode == 2) { onViewMode(2) }
             }
             if (tags.isNotEmpty()) {
                 TagFilterButton(tags, filterTagId, onFilterTag)
@@ -1440,7 +1496,7 @@ private fun GalleryHeader(
 
 @Composable
 private fun ViewModeButton(
-    icon: ImageVector,
+    icon: Int,
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
@@ -1454,10 +1510,10 @@ private fun ViewModeButton(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            icon,
+            painterResource(icon),
             contentDescription = label,
             tint = if (selected) Color.White else Mvp.description,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(18.dp),
         )
     }
 }
@@ -1470,7 +1526,7 @@ private fun TagFilterButton(
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
-        ViewModeButton(FilterIcon, "Tags", filterTagId != 0L) { open = true }
+        ViewModeButton(R.drawable.menu_tag_filter, "Tags", filterTagId != 0L) { open = true }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
                 text = {
@@ -1501,7 +1557,7 @@ private fun TagFilterButton(
 @Composable
 private fun HeaderIcon(
     label: String,
-    icon: ImageVector,
+    icon: Int,
     onClick: () -> Unit,
     filled: Boolean = false,
 ) {
@@ -1515,41 +1571,12 @@ private fun HeaderIcon(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            icon,
+            painterResource(icon),
             contentDescription = label,
             tint = if (filled) Color.White else Mvp.title,
-            modifier = Modifier.size(21.dp),
+            modifier = Modifier.size(22.dp),
         )
     }
-}
-
-private fun iconPath(builder: ImageVector.Builder, path: String): ImageVector {
-    builder.addPath(
-        pathData = PathParser().parsePathString(path).toNodes(),
-        fill = SolidColor(Color.Black),
-    )
-    return builder.build()
-}
-
-private val GridIcon: ImageVector by lazy {
-    iconPath(
-        ImageVector.Builder("Grid", 24.dp, 24.dp, 24f, 24f),
-        "M4,4h6v6H4z M14,4h6v6h-6z M4,14h6v6H4z M14,14h6v6h-6z",
-    )
-}
-
-private val DetailsIcon: ImageVector by lazy {
-    iconPath(
-        ImageVector.Builder("Details", 24.dp, 24.dp, 24f, 24f),
-        "M4,5h5v5H4z M11,6h9v2h-9z M11,9h7v1.5H11z M4,12.5h5v5H4z M11,13.5h9v2h-9z M11,16.5h7v1.5H11z",
-    )
-}
-
-private val FilterIcon: ImageVector by lazy {
-    iconPath(
-        ImageVector.Builder("Filter", 24.dp, 24.dp, 24f, 24f),
-        "M4,5h16l-6,7.2V19l-4,2v-8.8z",
-    )
 }
 
 private fun queryName(resolver: android.content.ContentResolver, uri: Uri): String? {
@@ -1783,22 +1810,12 @@ private fun Crumb(
 
 @Composable
 private fun FolderGlyph(modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        drawRoundRect(
-            color = Color(0xFF8CC4FF),
-            topLeft = Offset(w * 0.08f, h * 0.14f),
-            size = Size(w * 0.42f, h * 0.22f),
-            cornerRadius = CornerRadius(w * 0.08f, w * 0.08f),
-        )
-        drawRoundRect(
-            color = Color(0xFF408CE6),
-            topLeft = Offset(w * 0.06f, h * 0.30f),
-            size = Size(w * 0.88f, h * 0.56f),
-            cornerRadius = CornerRadius(w * 0.1f, w * 0.1f),
-        )
-    }
+    Icon(
+        painterResource(R.drawable.files_folder),
+        contentDescription = null,
+        tint = Color(0xFF4FA6F7),
+        modifier = modifier,
+    )
 }
 
 private fun folderModifier(
@@ -1954,12 +1971,50 @@ private suspend fun importBatch(
 }
 
 @Composable
-private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = false) {
-    // Thumbnails are cached across screens too — returning from the player must
-    // not re-decode every visible frame.
+private fun FileTile(video: VideoEntry, edge: Int, square: Boolean) {
+    var kind by remember(video.id) { mutableStateOf(FileKinds.peek(video.id)) }
+    LaunchedEffect(video.id, video.name) {
+        if (kind == null) {
+            kind = withContext(Dispatchers.IO) { FileKinds.resolve(video.id, video.name) }
+        }
+    }
+    val resolved = kind
+    val shape = if (square) RoundedCornerShape(0.dp) else RoundedCornerShape(6.dp)
+    val modifier = if (square) Modifier.fillMaxSize() else Modifier.size(edge.dp).clip(shape)
+    if (resolved != null && resolved.route == 0) {
+        KindPlate(resolved.label, FileKinds.compactSize(video.size), modifier.clip(shape))
+        return
+    }
+    val audio = resolved?.route == 2 || (resolved == null && isAudioName(video.name))
+    val pdf = resolved?.route == 3 || (resolved == null && isPdfName(video.name))
+    val image = resolved?.let { FileKinds.isImage(it) } ?: isImageName(video.name)
+    if (square) {
+        SquareThumb(video.id, audio = audio, image = image, pdf = pdf)
+    } else {
+        Thumb(video.id, edge, audio = audio, image = image, pdf = pdf)
+    }
+}
+
+@Composable
+private fun KindPlate(label: String, sizeText: String, modifier: Modifier) {
+    val colors = listOf(
+        0xFFC44B4B, 0xFF3E7CB8, 0xFF3F8F6B, 0xFFC4842A, 0xFF7A5AC4, 0xFF2F8A8A,
+        0xFFB04E7A, 0xFF5C6BC4, 0xFF8A6A3B, 0xFF3D7A4A, 0xFFA14E3C, 0xFF4A6A8A,
+    )
+    val color = Color(colors[(label.hashCode() and Int.MAX_VALUE) % colors.size].toInt())
+    Box(modifier.background(color), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("[ $label ]", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(sizeText, color = Color.White, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = false, pdf: Boolean = false) {
     var bmp by remember(id) { mutableStateOf(GalleryCache.thumb(id, size)) }
     LaunchedEffect(id) {
-        if (bmp != null) return@LaunchedEffect
+        if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
             if (image && !RemoteVault.connected()) {
                 decodeVaultImage(id, 320)
@@ -1987,6 +2042,8 @@ private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = 
         )
     } else if (audio) {
         MusicNote(Modifier.size(size.dp).clip(RoundedCornerShape(6.dp)))
+    } else if (pdf) {
+        PdfBadge(Modifier.size(size.dp).clip(RoundedCornerShape(6.dp)), large = false)
     } else {
         Box(
             Modifier.size(size.dp).clip(RoundedCornerShape(6.dp)).background(Mvp.card),
@@ -1998,16 +2055,45 @@ private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = 
 @Composable
 private fun MusicNote(modifier: Modifier) {
     Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
-        Text("♪", color = Mvp.accent, fontSize = 16.sp)
+        Icon(
+            painterResource(R.drawable.files_music),
+            contentDescription = null,
+            tint = Mvp.accent,
+            modifier = Modifier.size(22.dp),
+        )
+    }
+}
+
+@Composable
+private fun PdfBadge(modifier: Modifier, large: Boolean) {
+    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.fillMaxSize(if (large) 0.56f else 0.82f),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painterResource(R.drawable.media_doc_blue),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            Text(
+                "PDF",
+                color = Color.White,
+                fontSize = if (large) 13.sp else 7.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = if (large) 8.dp else 3.dp),
+            )
+        }
     }
 }
 
 /** Square crop that fills an Instagram-style grid cell. */
 @Composable
-private fun SquareThumb(id: Long, audio: Boolean = false, image: Boolean = false) {
+private fun SquareThumb(id: Long, audio: Boolean = false, image: Boolean = false, pdf: Boolean = false) {
     var bmp by remember(id) { mutableStateOf(GalleryCache.thumb(id, 480)) }
     LaunchedEffect(id) {
-        if (bmp != null) return@LaunchedEffect
+        if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
             if (image && !RemoteVault.connected()) {
                 decodeVaultImage(id, 480)
@@ -2035,6 +2121,8 @@ private fun SquareThumb(id: Long, audio: Boolean = false, image: Boolean = false
         )
     } else if (audio) {
         MusicNote(Modifier.fillMaxSize())
+    } else if (pdf) {
+        PdfBadge(Modifier.fillMaxSize(), large = true)
     } else {
         Box(Modifier.fillMaxSize().background(Mvp.card), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
@@ -2052,7 +2140,12 @@ private fun RowActions(onClick: () -> Unit) {
             .padding(vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text("⋮", color = Mvp.headerText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Icon(
+            painterResource(R.drawable.ic_ab_other),
+            contentDescription = "Actions",
+            tint = Mvp.headerText,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
@@ -2145,7 +2238,7 @@ private fun DetailsView(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Thumb(v.id, 44, audio = isAudioName(v.name), image = isImageName(v.name))
+                FileTile(v, 44, square = false)
                 Text(v.name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(2.2f))
                 Text(v.sizeText, color = Mvp.description, fontSize = 12.sp, modifier = Modifier.weight(1f))
                 Text(media?.durationText ?: "…", color = Mvp.description, fontSize = 12.sp, modifier = Modifier.weight(1f))
@@ -2210,8 +2303,34 @@ private fun IconGridView(
                         transfer = { dragOf(v) },
                     ),
             ) {
-                SquareThumb(v.id, audio = isAudioName(v.name), image = isImageName(v.name))
-                if (isAudioName(v.name)) {
+                FileTile(v, 0, square = true)
+                val known = FileKinds.peek(v.id)
+                if (known?.route == 3 || (known == null && isPdfName(v.name))) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(36.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f)),
+                                ),
+                            ),
+                    )
+                    Text(
+                        v.name.substringBeforeLast('.').ifBlank { v.name },
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
+                    )
+                }
+                if (known?.route == 2 || (known == null && isAudioName(v.name))) {
                     val parsed = songLabel(v.name)
                     val artist = media?.artist?.takeIf { it.isNotBlank() } ?: parsed.first
                     val title = media?.title?.takeIf { it.isNotBlank() } ?: parsed.second
@@ -2288,7 +2407,12 @@ private fun IconGridView(
                             .background(Mvp.primary),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✓", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Icon(
+                            painterResource(R.drawable.checkbig),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp),
+                        )
                     }
                 }
             }
@@ -2354,7 +2478,7 @@ private fun ListView(
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Thumb(v.id, 36, audio = isAudioName(v.name), image = isImageName(v.name))
+                FileTile(v, 36, square = false)
                 Column(Modifier.weight(1f).padding(start = 10.dp)) {
                     Text(v.name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("${v.sizeText} · ${v.tags.joinToString(", ")}", color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2379,6 +2503,12 @@ private fun ListSortBar() {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            Icon(
+                painterResource(R.drawable.menu_sort_date),
+                contentDescription = null,
+                tint = Mvp.description,
+                modifier = Modifier.size(16.dp),
+            )
             Text("Sort", color = Mvp.description, fontSize = 12.sp)
             Text("$arrow  ${key.label}", color = Mvp.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }

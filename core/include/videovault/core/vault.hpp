@@ -158,15 +158,19 @@ public:
 
     // Phase 3: import and gallery.
     // Imports an opaque file as an encrypted package and records it in the
-    // vault database. Identical content re-imports return the existing id.
+    // vault database. The same bytes are stored once: a second copy, even
+    // under another name, returns the existing id and adds nothing.
     // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
     // file processed, called from the importing thread.
     // folder_id 0 stores the new video in the library root. An existing
     // copy of the same file keeps the folder it already has.
+    // already_present, when given, is set true when the bytes were already
+    // in the vault and false when a new item was stored.
     [[nodiscard]] Result<std::int64_t> import_file(
         const std::filesystem::path& source_path,
         const std::function<void(double)>& progress = {},
-        std::int64_t folder_id = 0);
+        std::int64_t folder_id = 0,
+        bool* already_present = nullptr);
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 

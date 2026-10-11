@@ -18,6 +18,10 @@ struct VideoRow {
     std::uint64_t original_size{0U};
     std::uint64_t package_size{0U};
     Sha256Digest package_sha256{};
+    // SHA-256 of the plaintext. Zero when this row was imported before
+    // content deduplication and has not been hashed yet.
+    Sha256Digest content_sha256{};
+    bool has_content_sha256{false};
     std::string package_relative_path;
     std::uint32_t format_version{1U};
     std::uint32_t algorithm_id{1U};
@@ -95,6 +99,17 @@ public:
 
     [[nodiscard]] Result<std::optional<VideoRow>> query_video_by_sha256(
         const Sha256Digest& package_sha256) const;
+
+    // Plaintext identity. Missing hashes are rows imported before dedup.
+    [[nodiscard]] Result<std::optional<std::int64_t>> query_video_id_by_content_sha256(
+        const Sha256Digest& content_sha256) const;
+
+    [[nodiscard]] Result<std::vector<std::int64_t>> list_videos_missing_content_hash(
+        std::uint64_t original_size) const;
+
+    [[nodiscard]] Result<bool> set_content_sha256(
+        std::int64_t video_id,
+        const Sha256Digest& content_sha256);
 
     [[nodiscard]] Result<WrappedVideoKey> query_video_key(
         std::int64_t video_id) const;

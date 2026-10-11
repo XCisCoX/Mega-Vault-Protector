@@ -42,6 +42,8 @@ struct PeerCopyPlan {
     std::vector<PeerFile> files;
     std::int64_t destination{0};
     std::uint64_t total_bytes{0U};
+    // Set when the user cancels the copy that is already moving.
+    std::shared_ptr<std::atomic_bool> stop;
 };
 
 // The swapped phone's library, read-only. Nothing here can change or remove

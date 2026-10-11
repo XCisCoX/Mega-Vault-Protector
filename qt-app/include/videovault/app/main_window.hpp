@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -10,6 +11,7 @@
 
 class QAbstractButton;
 class QButtonGroup;
+class QDialog;
 class QComboBox;
 class QDragEnterEvent;
 class QShowEvent;
@@ -45,6 +47,7 @@ namespace videovault::app {
 struct VaultOperationResult;
 class PlayerWindow;
 class MusicWindow;
+class PdfWindow;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -112,6 +115,8 @@ private:
     void openSettings();
     void beginPlayback(std::int64_t video_id);
     void beginMusic(std::int64_t video_id);
+    void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
+    void closePdf();
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
@@ -138,9 +143,15 @@ private:
     bool peerLinked() const;
     void openPeerBrowser();
     void beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan);
+    void pumpPeerCopies();
+    void showTransfers();
+    void refreshTransfers();
+    void notePeerCopyFinished(bool ok, const QString& message);
     void lockVault();
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
+    void showStatus(const QString& message, bool problem);
+    void showNotice(const QString& message);
 
     QWidget* captionBar_{nullptr};
     QAbstractButton* captionMax_{nullptr};
@@ -165,6 +176,9 @@ private:
 
     QLabel* unlockedLocation_{nullptr};
     QLabel* galleryStatus_{nullptr};
+    QLabel* emptyState_{nullptr};
+    QLabel* notice_{nullptr};
+    QTimer* noticeTimer_{nullptr};
     QPushButton* importButton_{nullptr};
     QPushButton* importFolderButton_{nullptr};
     QPushButton* newFolderButton_{nullptr};
@@ -188,6 +202,11 @@ private:
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
+    PdfWindow* pdfWindow_{nullptr};
+    // Pixmaps and probed metadata for the open vault. Moving a file only
+    // updates a row; painting the folder again must not reopen every package.
+    struct GalleryCache;
+    std::unique_ptr<GalleryCache> galleryCache_;
     QLabel* statusCountLabel_{nullptr};
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
@@ -205,11 +224,26 @@ private:
     std::uint64_t galleryGeneration_{0};
     std::uint64_t tagGeneration_{0};
     QTimer* autoLockTimer_{nullptr};
+    QTimer* searchTimer_{nullptr};
     // Batch worker thread: imports/restores run off the UI thread and report
     // progress through queued signals (never blocks the UI, no polling).
     QThread* batchThread_{nullptr};
     BatchWorker* batchWorker_{nullptr};
     bool batchBusy_{false};
+    bool peerCopyActive_{false};
+    struct PeerTransfer {
+        quint64 id{0};
+        QString title;
+        int percent{0};
+        enum State { Waiting, Running, Done, Failed, Canceled } state{Waiting};
+        std::shared_ptr<PeerCopyPlan> plan;
+        std::shared_ptr<std::atomic_bool> stop;
+    };
+    std::vector<PeerTransfer> transfers_;
+    quint64 transferSerial_{1};
+    QDialog* transferDialog_{nullptr};
+    QWidget* transferHost_{nullptr};
+    QPushButton* transfersButton_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<bool>>>* adminWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};

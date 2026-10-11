@@ -119,9 +119,11 @@ void BatchWorker::importFiles(
 
     const auto state = std::make_shared<BatchState>();
     std::atomic<int> imported{0};
+    std::atomic<int> skipped{0};
     runParallel(state, sources->size(), this,
         [&](const int index) {
             const auto reported = std::make_shared<std::atomic<std::int64_t>>(0);
+            bool duplicate = false;
             const auto outcome = vault->import_file((*sources)[index],
                 [this, state, reported, file_size = sizes[index], total_bytes](const double fraction) {
                     // The core reports a cumulative fraction. Adding that
@@ -138,7 +140,7 @@ void BatchWorker::importFiles(
                     const auto done = state->bytes_done.fetch_add(delta) + delta;
                     emit progress(std::min(done, total_bytes), total_bytes);
                 },
-                folder_id);
+                folder_id, &duplicate);
             if (!outcome) {
                 std::lock_guard<std::mutex> guard(state->error_mutex);
                 if (state->first_error.isEmpty()) {
@@ -146,14 +148,27 @@ void BatchWorker::importFiles(
                         videovault::core::user_message(outcome.error().code).data());
                     state->stop.store(true);
                 }
+            } else if (duplicate) {
+                ++skipped;
             } else {
                 ++imported;
             }
         });
 
     if (state->first_error.isEmpty()) {
-        emit finished(true,
-            QStringLiteral("Imported %1 video(s).").arg(imported.load()), imported.load());
+        const auto added = imported.load();
+        const auto duplicates = skipped.load();
+        QString message;
+        if (added == 0 && duplicates > 0) {
+            message = QStringLiteral("Already in the vault.");
+        } else if (duplicates > 0) {
+            message = QStringLiteral("Imported %1 file(s). Skipped %2 already in the vault.")
+                .arg(added)
+                .arg(duplicates);
+        } else {
+            message = QStringLiteral("Imported %1 file(s).").arg(added);
+        }
+        emit finished(true, message, added);
     } else {
         emit finished(false, state->first_error, imported.load());
     }
@@ -211,7 +226,7 @@ void BatchWorker::restoreVideos(
 
     if (state->first_error.isEmpty()) {
         emit finished(true,
-            QStringLiteral("Restored %1 video(s).").arg(restored.load()), restored.load());
+            QStringLiteral("Restored %1 file(s).").arg(restored.load()), restored.load());
     } else {
         emit finished(false, state->first_error, restored.load());
     }
@@ -241,7 +256,7 @@ void BatchWorker::removeVideos(
 
     if (state->first_error.isEmpty()) {
         emit finished(true,
-            QStringLiteral("Removed %1 video(s).").arg(removed.load()), removed.load());
+            QStringLiteral("Removed %1 file(s).").arg(removed.load()), removed.load());
     } else {
         emit finished(false, state->first_error, removed.load());
     }
@@ -293,6 +308,10 @@ void BatchWorker::copyFromPeer(
         }
         std::uint64_t offset = 0U;
         while (offset < file.size) {
+            if (plan->stop && plan->stop->load()) {
+                failure = QStringLiteral("Canceled.");
+                break;
+            }
             const auto ask = static_cast<int>(std::min<std::uint64_t>(kPeerChunkBytes, file.size - offset));
             QJsonObject request;
             request.insert(QStringLiteral("op"), QStringLiteral("read"));
@@ -322,6 +341,7 @@ void BatchWorker::copyFromPeer(
 
         const auto reported = std::make_shared<qlonglong>(0);
         const auto base = done;
+        bool duplicate = false;
         auto imported = vault->import_file(
             std::filesystem::path(path.toStdWString()),
             [this, reported, base, total, size = file.size](const double fraction) {
@@ -331,7 +351,7 @@ void BatchWorker::copyFromPeer(
                 *reported = now;
                 emit progress(std::min(base + now, total), total);
             },
-            localFolder(file.folder_id));
+            localFolder(file.folder_id), &duplicate);
         QFile::remove(path);
         if (!imported) {
             failure = QStringLiteral("\"%1\": %2").arg(file.name, QString::fromUtf8(
@@ -339,7 +359,9 @@ void BatchWorker::copyFromPeer(
             break;
         }
         done = base + static_cast<qlonglong>(file.size);
-        ++copied;
+        if (!duplicate) {
+            ++copied;
+        }
         emit fileFinished(copied, fileCount);
     }
 

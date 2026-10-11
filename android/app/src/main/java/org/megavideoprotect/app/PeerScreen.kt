@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -31,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,11 +43,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -109,9 +107,7 @@ fun PeerScreen(onClose: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var picked by remember { mutableStateOf(setOf<String>()) }
     var choosing by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf<Float?>(null) }
-    var progressLabel by remember { mutableStateOf("") }
-    val copying = progress != null
+    var showTransfers by remember { mutableStateOf(false) }
 
     LaunchedEffect(pc) {
         if (pc == null) onClose()
@@ -153,7 +149,6 @@ fun PeerScreen(onClose: () -> Unit) {
 
     BackHandler {
         when {
-            copying -> Unit
             choosing -> choosing = false
             picked.isNotEmpty() -> picked = emptySet()
             current != 0L -> open(folders.firstOrNull { it.id == current }?.parentId ?: 0L)
@@ -168,22 +163,18 @@ fun PeerScreen(onClose: () -> Unit) {
         }
         val pickedFolders = chosen.filter { it.startsWith("f") }.mapNotNull { it.drop(1).toLongOrNull() }
         val pickedFiles = chosen.filter { it.startsWith("v") }.mapNotNull { it.drop(1).toLongOrNull() }.toSet()
-        progress = 0f
-        progressLabel = "Getting ready"
+        val names = files.filter { it.id in pickedFiles }.map { it.name }
+        val title = when {
+            names.size == 1 && pickedFolders.isEmpty() -> names.first()
+            else -> "${pickedFiles.size + pickedFolders.size} from ${pc ?: "PC"}"
+        }
+        val where = if (destination == 0L) "Library" else "a folder in your library"
+        picked = emptySet()
         message = null
-        scope.launch {
-            val outcome = withContext(Dispatchers.IO) {
-                copyFromPc(context, folders, files, pickedFolders, pickedFiles, destination) { done, total, label ->
-                    withContext(Dispatchers.Main) {
-                        progress = if (total > 0L) done.toFloat() / total.toFloat() else 0f
-                        progressLabel = label
-                    }
-                }
+        TransferHub.enqueue(title, "Into $where") { onProgress, canceled ->
+            copyFromPc(context, folders, files, pickedFolders, pickedFiles, destination, canceled) { done, total, label ->
+                onProgress(if (total > 0L) done.toFloat() / total.toFloat() else 0f, label)
             }
-            progress = null
-            progressLabel = ""
-            picked = emptySet()
-            message = outcome
         }
     }
 
@@ -207,7 +198,7 @@ fun PeerScreen(onClose: () -> Unit) {
                         color = Mvp.accent,
                         fontSize = 15.sp,
                         modifier = Modifier
-                            .clickable(enabled = !copying) { onClose() }
+                            .clickable { onClose() }
                             .padding(end = 12.dp, top = 4.dp, bottom = 4.dp),
                     )
                     Text(
@@ -224,7 +215,7 @@ fun PeerScreen(onClose: () -> Unit) {
                         color = Color(0xFFFF6B6B),
                         fontSize = 14.sp,
                         modifier = Modifier
-                            .clickable(enabled = !copying) {
+                            .clickable {
                                 PeerLink.unlink()
                                 onClose()
                             }
@@ -237,7 +228,7 @@ fun PeerScreen(onClose: () -> Unit) {
                     color = Mvp.description,
                     fontSize = 12.sp,
                 )
-                PeerCrumbs(pc.orEmpty(), folders, current, enabled = !copying) { open(it) }
+                PeerCrumbs(pc.orEmpty(), folders, current, enabled = true) { open(it) }
             }
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -263,7 +254,7 @@ fun PeerScreen(onClose: () -> Unit) {
                     ) {
                         if (upParent != null) {
                             item(key = "up") {
-                                PeerFolderTile("..", picked = false, onClick = { if (!copying) open(upParent) }, onLongPress = {})
+                                PeerFolderTile("..", picked = false, onClick = { open(upParent) }, onLongPress = {})
                             }
                         }
                         items(childFolders, key = { "f${it.id}" }) { folder ->
@@ -272,7 +263,6 @@ fun PeerScreen(onClose: () -> Unit) {
                                 folder.name,
                                 picked = key in picked,
                                 onClick = {
-                                    if (copying) return@PeerFolderTile
                                     if (picked.isNotEmpty()) {
                                         picked = if (key in picked) picked - key else picked + key
                                     } else {
@@ -280,20 +270,21 @@ fun PeerScreen(onClose: () -> Unit) {
                                     }
                                 },
                                 onLongPress = {
-                                    if (!copying) picked = if (key in picked) picked - key else picked + key
+                                    picked = if (key in picked) picked - key else picked + key
                                 },
                             )
                         }
                         items(childFiles, key = { "v${it.id}" }) { file ->
                             val key = pickKey(false, file.id)
                             PeerFileTile(file, picked = key in picked) {
-                                if (!copying) picked = if (key in picked) picked - key else picked + key
+                                picked = if (key in picked) picked - key else picked + key
                             }
                         }
                     }
                 }
             }
 
+            TransferBar { showTransfers = true }
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -303,40 +294,27 @@ fun PeerScreen(onClose: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 message?.let { Text(it, color = Mvp.text, fontSize = 13.sp) }
-                val fraction = progress
-                if (fraction != null) {
-                    LinearProgressIndicator(
-                        progress = { fraction.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth(),
-                        color = Mvp.primary,
-                        trackColor = Mvp.sliderGroove,
+                val nothingHere = childFolders.isEmpty() && childFiles.isEmpty()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MvpButton(
+                        if (picked.isEmpty()) "Copy everything here" else "Copy ${picked.size} to my library",
+                        onClick = { choosing = true },
+                        primary = true,
+                        enabled = !loading && (picked.isNotEmpty() || !nothingHere),
+                        modifier = Modifier.weight(1f),
                     )
-                    Text(
-                        "${(fraction * 100).toInt()}%  $progressLabel",
-                        color = Mvp.description,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                } else {
-                    val nothingHere = childFolders.isEmpty() && childFiles.isEmpty()
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MvpButton(
-                            if (picked.isEmpty()) "Copy everything here" else "Copy ${picked.size} to my library",
-                            onClick = { choosing = true },
-                            primary = true,
-                            enabled = !loading && (picked.isNotEmpty() || !nothingHere),
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (picked.isNotEmpty()) {
-                            MvpButton("Clear", onClick = { picked = emptySet() })
-                        } else {
-                            MvpButton("Refresh", onClick = { reload() }, enabled = !loading)
-                        }
+                    if (picked.isNotEmpty()) {
+                        MvpButton("Clear", onClick = { picked = emptySet() })
+                    } else {
+                        MvpButton("Refresh", onClick = { reload() }, enabled = !loading)
                     }
                 }
             }
         }
+    }
+
+    if (showTransfers) {
+        TransferPage(onClose = { showTransfers = false })
     }
 
     if (choosing) {
@@ -398,22 +376,12 @@ private fun PeerFolderTile(name: String, picked: Boolean, onClick: () -> Unit, o
             .background(Color(0xFF161618))
             .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
-        Canvas(Modifier.align(Alignment.Center).fillMaxSize().padding(18.dp)) {
-            val w = size.width
-            val h = size.height
-            drawRoundRect(
-                color = Color(0xFF8CC4FF),
-                topLeft = Offset(w * 0.08f, h * 0.14f),
-                size = Size(w * 0.42f, h * 0.22f),
-                cornerRadius = CornerRadius(w * 0.08f, w * 0.08f),
-            )
-            drawRoundRect(
-                color = Color(0xFF408CE6),
-                topLeft = Offset(w * 0.06f, h * 0.30f),
-                size = Size(w * 0.88f, h * 0.56f),
-                cornerRadius = CornerRadius(w * 0.1f, w * 0.1f),
-            )
-        }
+        Icon(
+            painterResource(R.drawable.files_folder),
+            contentDescription = null,
+            tint = Color(0xFF4FA6F7),
+            modifier = Modifier.align(Alignment.Center).fillMaxSize().padding(22.dp),
+        )
         Text(
             name,
             color = Color.White,
@@ -457,13 +425,41 @@ private fun PeerFileTile(file: VideoEntry, picked: Boolean, onClick: () -> Unit)
                 contentScale = ContentScale.Crop,
             )
         } else {
-            Text(
-                if (isAudioName(file.name)) "♪" else file.name.substringAfterLast('.', "").uppercase(),
-                color = Mvp.description,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.align(Alignment.Center),
-            )
+            if (isAudioName(file.name)) {
+                Icon(
+                    painterResource(R.drawable.files_music),
+                    contentDescription = null,
+                    tint = Mvp.accent,
+                    modifier = Modifier.align(Alignment.Center).size(28.dp),
+                )
+            } else if (file.name.endsWith(".pdf", ignoreCase = true)) {
+                Box(
+                    Modifier.align(Alignment.Center).size(52.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        painterResource(R.drawable.media_doc_blue),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                    Text(
+                        "PDF",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            } else {
+                Text(
+                    file.name.substringAfterLast('.', "").uppercase(),
+                    color = Mvp.description,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
         }
         Text(
             file.name,
@@ -493,7 +489,12 @@ private fun PickedMark() {
                 .background(Mvp.primary),
             contentAlignment = Alignment.Center,
         ) {
-            Text("✓", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Icon(
+                painterResource(R.drawable.checkbig),
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
+            )
         }
     }
 }
@@ -567,6 +568,7 @@ private suspend fun copyFromPc(
     pickedFolders: List<Long>,
     pickedFiles: Set<Long>,
     destination: Long,
+    canceled: () -> Boolean,
     onProgress: suspend (done: Long, total: Long, label: String) -> Unit,
 ): String {
     val ordered = ArrayList<FolderEntry>()
@@ -616,6 +618,7 @@ private suspend fun copyFromPc(
     var copied = 0
     try {
         for ((index, file) in plannedFiles.withIndex()) {
+            if (canceled()) return "Canceled. Copied $copied."
             val label = "Copying ${file.name} (${index + 1} of ${plannedFiles.size})"
             onProgress(done, total, label)
             // The vault names the item after the file it imports, so keep the name.
@@ -625,6 +628,7 @@ private suspend fun copyFromPc(
                 target.outputStream().use { out ->
                     var offset = 0L
                     while (offset < file.size) {
+                        if (canceled()) return "Canceled. Copied $copied."
                         val ask = minOf(1L shl 20, file.size - offset).toInt()
                         val chunk = PeerLink.readRange(file.id, offset, ask)
                         if (chunk == null || chunk.isEmpty()) {

@@ -15,7 +15,10 @@ class QListWidget;
 class QMouseEvent;
 class QPaintEvent;
 class QPushButton;
+class QResizeEvent;
+class QScrollArea;
 class QShowEvent;
+class QVBoxLayout;
 
 template <typename T>
 class QFutureWatcher;
@@ -38,6 +41,7 @@ public:
     explicit SettingsDialog(
         const std::shared_ptr<videovault::core::Vault>& vault,
         QWidget* parent = nullptr);
+    void reject() override;
 
 signals:
     void settingsChanged();
@@ -45,7 +49,10 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
 
 private:
     void reloadTags();
@@ -58,6 +65,8 @@ private:
     void beginRegenerateMissing();
     void finishRegenerateMissing();
     void setStatus(const QString& message, bool error = false);
+    void fitSheet();
+    void playIntro();
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     std::shared_ptr<videovault::core::Vault> vault_;
@@ -86,6 +95,11 @@ private:
 
     QLabel* status_{nullptr};
     QImage backdrop_;
+    QFrame* sheet_{nullptr};
+    QScrollArea* scroll_{nullptr};
+    QVBoxLayout* outerLayout_{nullptr};
+    bool closing_{false};
+    bool introPlayed_{false};
 };
 
 } // namespace videovault::app

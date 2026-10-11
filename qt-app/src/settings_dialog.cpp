@@ -18,10 +18,15 @@
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QScrollArea>
 #include <QSettings>
 #include <QShowEvent>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
+#include <QEasingCurve>
 
 #include <utility>
 
@@ -37,14 +42,17 @@ SettingsDialog::SettingsDialog(
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
 
-    auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(48, 48, 48, 48);
-    outer->addStretch(1);
+    outerLayout_ = new QVBoxLayout(this);
+    outerLayout_->setSizeConstraint(QLayout::SetNoConstraint);
+    outerLayout_->setContentsMargins(48, 84, 48, 12);
+    outerLayout_->addStretch(1);
 
-    auto* sheet = new QFrame(this);
+    sheet_ = new QFrame(this);
+    auto* sheet = sheet_;
     sheet->setObjectName(QStringLiteral("sheet"));
     sheet->setAttribute(Qt::WA_StyledBackground, true);
     sheet->setFixedWidth(440);
+    sheet->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     sheet->setStyleSheet(QStringLiteral(
         "QFrame#sheet { background: #121214; border-radius: 18px; }"
         "QFrame#settingsGroup { background: #1c1c1e; border: none; border-radius: 14px; }"
@@ -55,14 +63,16 @@ SettingsDialog::SettingsDialog(
         "QPushButton#sheetAction {"
         "  background: transparent; border: none; color: #3390ec; font-weight: 600; min-height: 40px; }"
         "QPushButton#sheetAction:disabled { color: #636366; }"));
-    auto* layout = new QVBoxLayout(sheet);
-    layout->setContentsMargins(18, 16, 18, 18);
-    layout->setSpacing(14);
+    auto* sheetLayout = new QVBoxLayout(sheet);
+    sheetLayout->setContentsMargins(0, 16, 0, 8);
+    sheetLayout->setSpacing(0);
 
-    auto* titleRow = new QHBoxLayout();
-    auto* title = new QLabel(QStringLiteral("Settings"), sheet);
+    auto* titleWrap = new QWidget(sheet);
+    auto* titleRow = new QHBoxLayout(titleWrap);
+    titleRow->setContentsMargins(18, 0, 12, 8);
+    auto* title = new QLabel(QStringLiteral("Settings"), titleWrap);
     title->setObjectName(QStringLiteral("pageTitle"));
-    auto* done = new QPushButton(QStringLiteral("Done"), sheet);
+    auto* done = new QPushButton(QStringLiteral("Done"), titleWrap);
     done->setObjectName(QStringLiteral("sheetAction"));
     done->setCursor(Qt::PointingHandCursor);
     done->setFocusPolicy(Qt::NoFocus);
@@ -71,7 +81,31 @@ SettingsDialog::SettingsDialog(
     titleRow->addWidget(title);
     titleRow->addStretch(1);
     titleRow->addWidget(done);
-    layout->addLayout(titleRow);
+    sheetLayout->addWidget(titleWrap);
+
+    scroll_ = new QScrollArea(sheet);
+    scroll_->setObjectName(QStringLiteral("settingsScroll"));
+    scroll_->setFrameShape(QFrame::NoFrame);
+    scroll_->setWidgetResizable(true);
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll_->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    scroll_->setStyleSheet(QStringLiteral(
+        "QScrollArea#settingsScroll { background: transparent; border: none; }"
+        "QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 2px 2px 0; }"
+        "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 70); border-radius: 4px; min-height: 28px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"));
+    scroll_->viewport()->setAutoFillBackground(false);
+    scroll_->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* content = new QWidget();
+    content->setAttribute(Qt::WA_StyledBackground, true);
+    content->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(18, 0, 18, 12);
+    layout->setSpacing(14);
+    scroll_->setWidget(content);
+    sheetLayout->addWidget(scroll_, 1);
 
     auto section = [sheet](const QString& text) {
         auto* label = new QLabel(text, sheet);
@@ -197,7 +231,7 @@ SettingsDialog::SettingsDialog(
     regenerateButton_->setDefault(false);
     regenerateButton_->setFocusPolicy(Qt::NoFocus);
     regenerateButton_->setToolTip(QStringLiteral(
-        "Build thumbnails only for videos that do not have one yet"));
+        "Build thumbnails only for items that do not have one yet"));
     playbackLayout->addWidget(regenerateButton_);
     layout->addWidget(playbackBox);
 
@@ -219,8 +253,13 @@ SettingsDialog::SettingsDialog(
         "github.com/XCisCoX/Mega-Vault-Protector</a>"));
     layout->addWidget(about);
 
-    outer->addWidget(sheet, 0, Qt::AlignHCenter);
-    outer->addStretch(1);
+    outerLayout_->addWidget(sheet, 0, Qt::AlignHCenter);
+    outerLayout_->addStretch(1);
+    if (parent != nullptr) {
+        parent->installEventFilter(this);
+        setFixedSize(parent->size());
+    }
+    setWindowOpacity(0.0);
 
     connect(done, &QPushButton::clicked, this, &QDialog::reject);
 
@@ -261,10 +300,79 @@ void SettingsDialog::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
     if (QWidget* host = parentWidget()) {
         const QPoint origin = host->mapToGlobal(QPoint(0, 0));
-        setGeometry(QRect(origin, host->size()));
+        setFixedSize(host->size());
+        move(origin);
+        fitSheet();
         backdrop_ = frost(host->grab().toImage());
         update();
     }
+    if (!introPlayed_) {
+        introPlayed_ = true;
+        playIntro();
+    }
+}
+
+void SettingsDialog::resizeEvent(QResizeEvent* event) {
+    QDialog::resizeEvent(event);
+    fitSheet();
+}
+
+QSize SettingsDialog::sizeHint() const {
+    if (const QWidget* host = parentWidget()) {
+        return host->size();
+    }
+    return QSize(1080, 700);
+}
+
+QSize SettingsDialog::minimumSizeHint() const {
+    return QSize(480, 320);
+}
+
+void SettingsDialog::fitSheet() {
+    if (sheet_ == nullptr || scroll_ == nullptr || scroll_->widget() == nullptr) {
+        return;
+    }
+    const int cap = std::max(240, height() - 72);
+    const int titleHeight = 56;
+    const int contentHeight = scroll_->widget()->sizeHint().height();
+    sheet_->setFixedHeight(std::min(titleHeight + contentHeight, cap));
+}
+
+void SettingsDialog::playIntro() {
+    auto* fade = new QPropertyAnimation(this, "windowOpacity", this);
+    fade->setDuration(220);
+    fade->setStartValue(0.0);
+    fade->setEndValue(1.0);
+    fade->setEasingCurve(QEasingCurve::OutCubic);
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
+
+    auto* slide = new QVariantAnimation(this);
+    slide->setDuration(280);
+    slide->setStartValue(36);
+    slide->setEndValue(0);
+    slide->setEasingCurve(QEasingCurve::OutCubic);
+    connect(slide, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        if (outerLayout_ == nullptr || closing_) {
+            return;
+        }
+        const int drop = value.toInt();
+        outerLayout_->setContentsMargins(48, 48 + drop, 48, std::max(12, 48 - drop));
+    });
+    slide->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void SettingsDialog::reject() {
+    if (closing_) {
+        return;
+    }
+    closing_ = true;
+    auto* fade = new QPropertyAnimation(this, "windowOpacity", this);
+    fade->setDuration(160);
+    fade->setStartValue(windowOpacity());
+    fade->setEndValue(0.0);
+    fade->setEasingCurve(QEasingCurve::InCubic);
+    connect(fade, &QPropertyAnimation::finished, this, [this] { QDialog::reject(); });
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void SettingsDialog::mousePressEvent(QMouseEvent* event) {
@@ -280,9 +388,17 @@ void SettingsDialog::setStatus(const QString& message, const bool error) {
     status_->setStyleSheet(error
         ? QStringLiteral("color: #ff6b6b;")
         : QStringLiteral("color: #3390ec;"));
+    fitSheet();
 }
 
 bool SettingsDialog::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == parentWidget() && event->type() == QEvent::Resize && !closing_) {
+        const QPoint origin = parentWidget()->mapToGlobal(QPoint(0, 0));
+        setFixedSize(parentWidget()->size());
+        move(origin);
+        fitSheet();
+        return false;
+    }
     if (watched == newTagEdit_ && event->type() == QEvent::KeyPress) {
         const auto* key = static_cast<const QKeyEvent*>(event);
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
@@ -322,7 +438,7 @@ void SettingsDialog::reloadTags() {
         item->setData(Qt::UserRole, static_cast<qulonglong>(tag.id));
         item->setData(Qt::UserRole + 1, name);
         item->setSizeHint(QSize(0, 44));
-        item->setToolTip(QStringLiteral("Double-click to rename. Videos: %1")
+        item->setToolTip(QStringLiteral("Double-click to rename. Items: %1")
             .arg(tag.video_count));
         auto* row = new QWidget(tagList_);
         auto* rowLayout = new QHBoxLayout(row);
@@ -357,6 +473,7 @@ void SettingsDialog::reloadTags() {
         });
     }
     tagList_->setEnabled(true);
+    fitSheet();
 }
 
 void SettingsDialog::beginPasswordChange() {
@@ -516,7 +633,7 @@ void SettingsDialog::finishRegenerateMissing() {
         return;
     }
     if (missing == 0) {
-        setStatus(QStringLiteral("Every video already has a thumbnail."), false);
+        setStatus(QStringLiteral("Every item already has a thumbnail."), false);
         return;
     }
     if (regenerated == missing) {

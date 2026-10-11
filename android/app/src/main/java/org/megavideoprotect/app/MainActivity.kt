@@ -8,14 +8,34 @@ import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.core.view.WindowCompat
 
 /** Survives leaving the app, as long as the process is still alive. */
@@ -97,11 +117,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = MvpColorScheme) {
-                // Back leaves the player for the library. From the library or
-                // the login screen it leaves the app without locking.
-                BackHandler(enabled = screen !is Screen.Setup) {
+                // A player, picture, PDF, or song returns to the library. The library
+                // walks up one folder, then leaves only after a second press.
+                // Login leaves on one press. Setup has nowhere to go back to.
+                BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Peer -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Peer -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -112,8 +133,20 @@ class MainActivity : ComponentActivity() {
                         runCatching { CoreBridge.nativeLock() }
                     }
                 }
+                var notice by remember { mutableStateOf<String?>(null) }
+                LaunchedEffect(notice) {
+                    if (notice != null) {
+                        delay(2600)
+                        notice = null
+                    }
+                }
                 Box(Modifier.fillMaxSize()) {
-                    when (val current = screen) {
+                    AnimatedContent(
+                        targetState = screen,
+                        transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
+                        label = "screen",
+                    ) { current ->
+                    when (current) {
                         is Screen.Setup -> SetupScreen(
                             vaultLocation = vaultRoot,
                             locationOptions = locationOptions,
@@ -145,23 +178,34 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onPlay = { id, name, playlist ->
-                                show(
-                                    when {
-                                        isImageName(name) -> Screen.Image(id, name)
-                                        isAudioName(name) -> {
-                                            val songs = playlist
-                                                .filter { isAudioName(it.name) }
-                                                .map { PlayItem(it.id, it.name) }
+                                lifecycleScope.launch {
+                                    val kind = withContext(Dispatchers.IO) { FileKinds.resolve(id, name) }
+                                    if (kind.route == 0) {
+                                        notice = "this format currently not supported"
+                                        return@launch
+                                    }
+                                    val next = when {
+                                        FileKinds.isImage(kind) -> Screen.Image(id, name)
+                                        kind.route == 3 -> Screen.Pdf(id, name)
+                                        kind.route == 2 -> {
+                                            val songs = withContext(Dispatchers.IO) {
+                                                playlist.filter { FileKinds.resolve(it.id, it.name).route == 2 }
+                                                    .map { PlayItem(it.id, it.name) }
+                                            }
                                             Screen.Music(id, name, songs)
                                         }
                                         else -> {
-                                            val playable = playlist
-                                                .filter { !isImageName(it.name) && !isAudioName(it.name) }
-                                                .map { PlayItem(it.id, it.name) }
+                                            val playable = withContext(Dispatchers.IO) {
+                                                playlist.filter {
+                                                    val item = FileKinds.resolve(it.id, it.name)
+                                                    item.route == 1 && !FileKinds.isImage(item)
+                                                }.map { PlayItem(it.id, it.name) }
+                                            }
                                             Screen.Player(id, name, playable)
                                         }
-                                    },
-                                )
+                                    }
+                                    show(next)
+                                }
                             },
                         )
                         is Screen.Peer -> PeerScreen(onClose = { show(Screen.Vault) })
@@ -176,12 +220,34 @@ class MainActivity : ComponentActivity() {
                             name = current.name,
                             onBack = { show(Screen.Vault) },
                         )
+                        is Screen.Pdf -> PdfScreen(
+                            videoId = current.videoId,
+                            name = current.name,
+                            onBack = { show(Screen.Vault) },
+                        )
                         is Screen.Music -> MusicScreen(
                             videoId = current.videoId,
                             name = current.name,
                             playlist = current.playlist,
                             startFresh = current.startFresh,
                             onBack = { show(Screen.Vault) },
+                        )
+                    }
+                    }
+                    AnimatedVisibility(
+                        visible = notice != null,
+                        enter = fadeIn(tween(180)),
+                        exit = fadeOut(tween(420)),
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    ) {
+                        Text(
+                            notice.orEmpty(),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .padding(bottom = 72.dp)
+                                .background(Color(0xFFC62828), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
                         )
                     }
                 }
@@ -202,14 +268,14 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Music || screen is Screen.Peer
         if (inside && unlocked()) show(Screen.Vault)
     }
 
     override fun onStart() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Music || screen is Screen.Peer
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }

@@ -11,15 +11,19 @@ import android.media.AudioTrack
 import android.view.ViewGroup
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -34,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -52,6 +57,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.input.pointer.pointerInput
@@ -72,32 +79,14 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-
-@Composable
-private fun PlayerCircle(
-    label: String,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
-    Box(
-        Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = if (enabled) 0.38f else 0.16f))
-            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.22f else 0.08f), CircleShape)
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            color = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
-            fontSize = 18.sp,
-        )
-    }
-}
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 
 /**
  * Full-screen vertical feed. Swipe up for the next video and down for the
@@ -124,6 +113,7 @@ fun PlayerScreen(
     var playing by remember { mutableStateOf(true) }
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
+    var buffered by remember { mutableLongStateOf(0L) }
     var scrubbing by remember { mutableStateOf(false) }
     var scrubFraction by remember { mutableFloatStateOf(0f) }
     // Stays on the thumbnail until ExoPlayer has drawn the first frame.
@@ -138,7 +128,13 @@ fun PlayerScreen(
     val page = pagerState.settledPage
     val shown = items[page.coerceIn(0, items.lastIndex)]
     val view = LocalView.current
-    var fullscreen by remember { mutableStateOf(false) }
+    var fullscreen by remember { mutableStateOf(true) }
+    var titleVisible by remember(shown.id) { mutableStateOf(true) }
+    var seekHint by remember { mutableStateOf<String?>(null) }
+    var hintOnRight by remember { mutableStateOf(true) }
+    var hintToken by remember { mutableIntStateOf(0) }
+    var holding by remember { mutableStateOf(false) }
+    var holdBack by remember { mutableStateOf(false) }
     DisposableEffect(fullscreen) {
         val activity = view.context as? Activity
         val window = activity?.window
@@ -179,7 +175,55 @@ fun PlayerScreen(
             position = exo?.currentPosition ?: 0L
             val length = exo?.duration ?: 0L
             duration = if (length > 0L) length else 0L
+            buffered = (exo?.bufferedPosition ?: 0L).coerceAtLeast(position)
             delay(200)
+        }
+    }
+
+    val titleAlpha by animateFloatAsState(
+        targetValue = if (titleVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 900),
+        label = "titleFade",
+    )
+    LaunchedEffect(shown.id) {
+        titleVisible = true
+        delay(2600)
+        titleVisible = false
+    }
+    LaunchedEffect(hintToken) {
+        if (seekHint != null) {
+            delay(700)
+            seekHint = null
+        }
+    }
+    LaunchedEffect(holding, holdBack, player) {
+        val exo = player ?: return@LaunchedEffect
+        if (!holding) {
+            exo.setPlaybackSpeed(1f)
+            return@LaunchedEffect
+        }
+        if (holdBack) {
+            try {
+                while (isActive) {
+                    val length = exo.duration
+                    val next = (exo.currentPosition - 250L).coerceAtLeast(0L)
+                    exo.seekTo(exo.currentMediaItemIndex, next)
+                    if (next == 0L) break
+                    delay(125)
+                }
+            } finally {
+                exo.setPlaybackSpeed(1f)
+            }
+        } else {
+            val wasPlaying = exo.isPlaying
+            exo.setPlaybackSpeed(2f)
+            if (!wasPlaying) exo.play()
+            try {
+                while (isActive) delay(80)
+            } finally {
+                exo.setPlaybackSpeed(1f)
+                if (!wasPlaying) exo.pause()
+            }
         }
     }
 
@@ -292,21 +336,78 @@ fun PlayerScreen(
                     .fillMaxSize()
                     .background(Color.Black)
                     .pointerInput(player, index) {
-                        // A tap pauses. The down event is left alone so a
-                        // vertical swipe still moves the pager to the next video.
+                        // Vertical swipes stay with the pager. A tap on the left
+                        // jumps back, a double tap on the right jumps forward,
+                        // and holding either side plays at double speed.
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val start = down.position
-                            val up = waitForUpOrCancellation() ?: return@awaitEachGesture
-                            val moved = up.position - start
-                            if (moved.x * moved.x + moved.y * moved.y > 64f * 64f) return@awaitEachGesture
+                            val right = start.x >= size.width / 2f
+                            val began = System.nanoTime()
+                            var released: Offset? = null
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Main)
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+                                val delta = change.position - start
+                                if (abs(delta.y) > 72f && abs(delta.y) > abs(delta.x)) {
+                                    return@awaitEachGesture
+                                }
+                                if (!change.pressed) {
+                                    released = change.position
+                                    break
+                                }
+                                val heldMs = (System.nanoTime() - began) / 1_000_000L
+                                if (heldMs >= 320L && delta.getDistance() < 36f) {
+                                    if (index != pagerState.settledPage) return@awaitEachGesture
+                                    if (clipById[items[index].id] != null) return@awaitEachGesture
+                                    change.consume()
+                                    holdBack = !right
+                                    hintOnRight = right
+                                    holding = true
+                                    while (true) {
+                                        val next = awaitPointerEvent()
+                                        val still = next.changes.firstOrNull { it.id == down.id } ?: break
+                                        still.consume()
+                                        if (!still.pressed) break
+                                    }
+                                    holding = false
+                                    return@awaitEachGesture
+                                }
+                            }
+                            val up = released ?: return@awaitEachGesture
+                            if ((up - start).getDistance() > 48f) return@awaitEachGesture
                             if (index != pagerState.settledPage) return@awaitEachGesture
+                            val second = withTimeoutOrNull(240) {
+                                awaitFirstDown(requireUnconsumed = false)
+                            }
                             if (clipById[items[index].id] != null) {
+                                if (second != null) waitForUpOrCancellation()
                                 loopPaused = !loopPaused
                                 return@awaitEachGesture
                             }
                             val exo = player ?: return@awaitEachGesture
-                            if (exo.isPlaying) exo.pause() else exo.play()
+                            fun jump(delta: Long, label: String, onRight: Boolean) {
+                                val length = exo.duration
+                                val next = (exo.currentPosition + delta).coerceIn(
+                                    0L,
+                                    if (length > 0L) length else Long.MAX_VALUE,
+                                )
+                                exo.seekTo(exo.currentMediaItemIndex, next)
+                                seekHint = label
+                                hintOnRight = onRight
+                                hintToken += 1
+                            }
+                            if (second != null) {
+                                val secondRight = second.position.x >= size.width / 2f
+                                waitForUpOrCancellation()
+                                jump(if (secondRight) 5_000L else -5_000L, if (secondRight) "+5s" else "−5s", secondRight)
+                            } else if (!right) {
+                                jump(-5_000L, "−5s", false)
+                            } else if (exo.isPlaying) {
+                                exo.pause()
+                            } else {
+                                exo.play()
+                            }
                         }
                     },
             ) {
@@ -366,7 +467,12 @@ fun PlayerScreen(
                             .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("▶", color = Color.White, fontSize = 28.sp)
+                        Icon(
+                            painterResource(R.drawable.pip_play_large),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp),
+                        )
                     }
                 }
             }
@@ -377,41 +483,70 @@ fun PlayerScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .height(108.dp)
+                .graphicsLayer { alpha = titleAlpha }
                 .background(
                     Brush.verticalGradient(
                         listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
                     ),
                 ),
         )
-        Row(
-            Modifier
+        Text(
+            shown.name,
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+                .fillMaxWidth()
+                .graphicsLayer { alpha = titleAlpha },
+        )
+        val hintLabel = if (holding) "2×" else seekHint
+        var lastHint by remember { mutableStateOf("") }
+        if (hintLabel != null) lastHint = hintLabel
+        AnimatedVisibility(
+            visible = hintLabel != null,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(320)),
+            modifier = Modifier
+                .align(if (hintOnRight) Alignment.CenterEnd else Alignment.CenterStart)
+                .padding(horizontal = 40.dp),
         ) {
-            PlayerCircle("‹", onClick = onBack)
-            Text(
-                shown.name,
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            PlayerCircle(if (fullscreen) "↙" else "⛶", onClick = { fullscreen = !fullscreen })
+            Box(
+                Modifier
+                    .size(76.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.42f))
+                    .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    lastHint,
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
 
         val barDuration = if (loopDuration > 0L) loopDuration else duration
         val barPosition = if (loopDuration > 0L) loopPosition else position
+        val barBuffered = if (loopDuration > 0L) loopDuration else buffered.coerceAtLeast(barPosition)
         val fraction = if (barDuration > 0L) (barPosition.toFloat() / barDuration.toFloat()).coerceIn(0f, 1f) else 0f
-        val shown = if (scrubbing) scrubFraction else fraction
+        val loaded = if (barDuration > 0L) (barBuffered.toFloat() / barDuration.toFloat()).coerceIn(fraction, 1f) else 0f
+        val played = if (scrubbing) scrubFraction else fraction
+        val timelineThin = !scrubbing && (playing || (loopDuration > 0L && !loopPaused))
+        val barHeight by animateDpAsState(
+            targetValue = if (timelineThin) 2.dp else 6.dp,
+            animationSpec = tween(durationMillis = 220),
+            label = "timeline",
+        )
         if (scrubbing && barDuration > 0L) {
             Text(
-                "${formatClock((shown * barDuration).toLong())} / ${formatClock(barDuration)}",
+                "${formatClock((played * barDuration).toLong())} / ${formatClock(barDuration)}",
                 color = Color.White,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -460,13 +595,19 @@ fun PlayerScreen(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(if (scrubbing) 5.dp else 3.dp)
-                    .background(Color.White.copy(alpha = 0.28f)),
+                    .height(barHeight)
+                    .background(Color.White.copy(alpha = 0.22f)),
             ) {
                 Box(
                     Modifier
                         .fillMaxHeight()
-                        .fillMaxWidth(shown)
+                        .fillMaxWidth(loaded)
+                        .background(Color.White.copy(alpha = 0.45f)),
+                )
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(played)
                         .background(Color.White),
                 )
             }
@@ -475,7 +616,7 @@ fun PlayerScreen(
                     Modifier
                         .align(Alignment.BottomStart)
                         .padding(bottom = 0.dp)
-                        .fillMaxWidth(shown),
+                        .fillMaxWidth(played),
                 ) {
                     Box(
                         Modifier

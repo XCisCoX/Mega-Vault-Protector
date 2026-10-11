@@ -5,7 +5,7 @@
 # Mega Vault Protect
 
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1000&color=5B7CFA&center=true&vCenter=true&width=580&lines=Your+private+video+vault.;Encrypted+on+your+machine.;Playable+without+ever+decrypting+to+disk." alt="Typing SVG" />
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1000&color=5B7CFA&center=true&vCenter=true&width=620&lines=A+private+library+for+your+files.;Encrypted+on+this+device.;Video%2C+pictures%2C+music%2C+and+PDFs." alt="Typing SVG" />
 </p>
 
 [![C++20](https://img.shields.io/badge/Core-C%2B%2B%2020-536fe8?style=for-the-badge&logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20)
@@ -26,26 +26,49 @@
 [![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)]() &nbsp;
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)]()
 
-**[Features](#features)** · **[Screenshots](#screenshots)** · **[Downloads](#downloads)** · **[Tests](#tests)** · **[Security model](#security-model)** · **[Build & run](#build--run)**
+**[What it is](#what-it-is)** · **[Library](#library)** · **[Phone and PC](#phone-and-pc)** · **[Security model](#security-model)** · **[Downloads](#downloads)** · **[Build & run](#build--run)**
 
 </div>
 
-**Your private video vault — encrypted on your machine, playable without ever decrypting to disk.**
+Mega Vault Protect is a private library for the files on your computer or phone. The vault is locked with a password you choose. Every imported file is stored as an authenticated encrypted package on that device. The same C++ core runs the Windows and Linux app and the Android app.
 
-Mega Vault Protect is a video organizer that treats privacy as the default. Every video you import is split into authenticated, encrypted packages stored inside a vault locked by a password you choose; nothing leaves your computer. The app plays back your videos **in memory** through a streaming, tamper-checked reader — the plaintext never touches your disk. The same C++ core powers a **native Android app** (Kotlin/Jetpack Compose) whose UI mirrors the desktop client exactly, with the core exposed through a JNI bridge.
+The filename is not the type. The app reads the file header. It uses the extension only when the header is not a known type. A RAR named `.mp4` stays a RAR.
 
-## Features
+## What it is
 
-- 🔐 **Real encryption, not hiding.** Argon2id key derivation, an SQLCipher-encrypted database, domain-separated subkeys, and XChaCha20-Poly1305 authenticated packages (`.vvp`) for every video. Each package carries per-chunk authentication — tampering is detected, not assumed.
-- 🎞️ **Explorer-style gallery.** Details / Large icons / List views, auto-generated thumbnails at import, and per-video metadata (duration, resolution, codec) — all dark-themed.
-- 🏷️ **Tags.** Multi-tag per video, tag filtering + live search, and a tag editor — no folders to break, tags just work.
-- ▶️ **In-memory player.** Streaming authenticated reader with a read-ahead cache (4–128 MB), A/V-synced playback, volume/mute, fullscreen, and full keyboard shortcuts. Nothing is decrypted to a temp file.
-- 🛡️ **Vault administration.** Password change re-keys the entire vault (database + every wrapped key + thumbnails), and removal is permanent (package deleted, not just unlinked).
-- ⏱️ **Auto-lock.** 5 minutes of inactivity locks the vault; re-open with your password.
+Import accepts any file, one at a time or a whole folder. Dropping files on the Windows library does the same.
+
+| What you imported | What the app does |
+|---|---|
+| Video | Plays it from the encrypted package. Playback reads only the chunks it needs. |
+| Picture | Opens it in the viewer. Drag moves the picture. The wheel or a pinch zooms toward the pointer. |
+| Music | Opens the music player. On Android it keeps playing from the notification. |
+| PDF | Opens the page viewer. Pinch or the wheel zooms. Double-tap switches between fit and a closer view. |
+| Anything else | Stays in the library. The tile shows a stable color for that type, a label such as `[ Rar ]`, and the size. Opening it shows **this format currently not supported**. The file is not deleted and is not sent to another app. |
+
+Video, pictures, and music are decrypted in memory for viewing. On Android, the PDF viewer writes the open document into the app cache because the system PDF renderer needs a file. That cache file is the open document, not the vault copy.
+
+## Library
+
+Folders are names inside the vault. The encrypted packages stay where the vault put them. Removing a folder moves its items up. It does not delete them.
+
+The library has three views: large icons, a list, and a details table. Search matches the file name or a tag. Tags are edited in Settings. The vault locks after 5 minutes without use. Changing the password re-wraps keys and re-encrypts thumbnails. It does not re-encrypt the packages. Removing an item deletes its package.
+
+On Android, Back walks up one folder. At the library root, a second press within two seconds leaves the app. The video player starts fullscreen, fades the title, seeks ±5 seconds on a double tap, and plays at 2× while a side is held. The timeline shows the buffered region.
+
+## Phone and PC
+
+Both devices have to be on the same network.
+
+**Open the PC vault on the phone.** Share on the PC shows a QR code. The code contains the address and the fingerprint of that session’s TLS certificate. The phone checks the certificate before it sends the vault password. Locking the PC window does not stop sharing. Stopping share does.
+
+**Swap libraries.** From the phone, Swap with PC asks the PC to accept. After that, each side can browse the other’s library and copy items into its own. Neither side can rename, move, or delete the other’s files.
+
+Copies wait in a queue and run one at a time, because the vault writes one package at a time. You can leave the other library, open your own, and add more copies while a transfer is running. **Transfers** lists what is copying and what is waiting. Cancel removes a waiting item immediately, and stops the item that is currently copying.
 
 ## Screenshots
 
-Taken from the Windows and Android apps after importing the test patterns (SMPTE bars, classic test card, RGB test, `testsrc2`, and a mandelbrot sweep) plus a PNG test card. Nothing in these pictures is decrypted to disk.
+The pictures below are the library and the video player. Pictures, music, PDFs, and phone sharing are in the app and are not in these shots.
 
 ### Windows
 
@@ -53,12 +76,10 @@ Taken from the Windows and Android apps after importing the test patterns (SMPTE
 |---|---|
 | **Icons** — thumbnail grid, search, and sort. | **List** — name, size, and cover. |
 | ![Windows icons](docs/screenshots/windows-icons.png) | ![Windows list](docs/screenshots/windows-list.png) |
-| **Details** — size, duration, resolution, codec, tags, imported time. | **Player** — in-memory playback of `Test Pattern.mp4`, with previous/next, seek, volume, and fullscreen. |
+| **Details** — size, duration, resolution, codec, tags, imported time. | **Player** — playback of an imported video, with previous/next, seek, volume, and fullscreen. |
 | ![Windows details](docs/screenshots/windows-details.png) | ![Windows player](docs/screenshots/windows-player.png) |
 
 ### Android
-
-The phone library uses the same three views. Swipe changes clips; the top bar shows the file name and fullscreen.
 
 <p align="center">
   <img src="docs/screenshots/android-icons.png" alt="Android icons" width="240" />
@@ -76,23 +97,24 @@ Each [GitHub Release](https://github.com/XCisCoX/Mega-Vault-Protector/releases) 
 | `MegaVaultProtect-linux-x64.tar.gz` | Extract and run `./MegaVaultProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). |
 | `MegaVaultProtect-android-arm64.apk` | Install on an arm64 phone running Android 8 or newer. |
 
-Create another release from Actions → **Release** → Run workflow, or push a tag such as `v0.4.0`. The Android package is debug-signed so it can be installed directly. If a later release is signed with a different debug key, uninstall the old one before installing the new APK. 
+Create another release from Actions → **Release** → Run workflow, or push a tag such as `v0.4.0`. The Android package is debug-signed so it can be installed directly. If a later release is signed with a different debug key, uninstall the old one before installing the new APK.
 
 ## Security model
 
-- **Master key** is derived from your password with **Argon2id** (8 MiB–1 GiB memory, 1–20 iterations, 1–16 lanes — you pick the profile).
-- Domain-separated **subkeys** (libsodium `crypto_kdf`) are derived for the database, password verifier, file-key wrapping, and thumbnails — one compromised key never leaks the others.
-- The vault database is encrypted with **SQLCipher** (4096-byte pages, HMAC-SHA512, `secure_delete ON`).
-- Every video is stored as a `.vvp` package: random 256-bit file key, wrapped under your vault key, chunked and **authenticated per chunk** (header tag + per-chunk AEAD tags). Seeking plays only the chunks it needs, verifying each before its bytes are used.
-- Vault creation is **crash-consistent**: the database is built in a temp file, flushed, atomically renamed, and only then is the ready marker written.
-- Sensitive buffers live in **guarded/locked memory** (libsodium) and are wiped on release.
+- The master key comes from the password with **Argon2id** (8 MiB–1 GiB memory, 1–20 iterations, 1–16 lanes).
+- Domain-separated subkeys (libsodium `crypto_kdf`) cover the database, the password verifier, file-key wrapping, and thumbnails.
+- The vault database is **SQLCipher** (4096-byte pages, HMAC-SHA512, `secure_delete ON`).
+- Each imported file is a `.vvp` package: a random 256-bit file key, wrapped under the vault key, split into chunks, and authenticated per chunk. A seek verifies the chunks it reads.
+- Creating a vault is crash-consistent: the database is written to a temporary file, flushed, renamed into place, and only then is the ready marker written.
+- Key material is held in libsodium guarded memory and wiped on release. Wiping is best effort.
 
 ## Platforms
 
-- **Linux x64** — validated on Ubuntu 24.04 (GCC 13, Qt 5.15, distro FFmpeg 6.1 / SQLCipher / Argon2 / libsodium).
-- **Windows x64** — MSVC 2022 + Qt 5.12.12 + pinned vcpkg dependencies.
-- **Android (arm64-v8a)** — native Kotlin/Jetpack Compose app reusing the same C++ core via JNI; built in a pinned NDK container and auto-built in CI.
-- One core; platform-specific code is confined to atomic file I/O (`_WIN32` vs POSIX), dependency discovery (vcpkg vs pkg-config), and the Android JNI bridge. The Release workflow builds all three and runs the test suites on Windows and Linux before it publishes.
+- **Linux x64** — Ubuntu 24.04 (GCC 13, Qt 5.15, distro FFmpeg 6.1 / SQLCipher / Argon2 / libsodium).
+- **Windows x64** — MSVC 2022, Qt 5.12.12, pinned vcpkg dependencies.
+- **Android (arm64-v8a)** — Kotlin and Jetpack Compose, with the same core through JNI. CI builds it in a pinned NDK container.
+
+Platform-specific code is the file I/O (`_WIN32` vs POSIX), dependency discovery (vcpkg vs pkg-config), the JNI bridge, and the phone and desktop UI. The Release workflow builds all three and runs the test suites on Windows and Linux before it publishes.
 
 ## Build & run
 
@@ -123,16 +145,11 @@ cmake --build --preset vs2022-x64-debug --target VideoVaultCoreTests VideoVaultA
 ctest --preset vs2022-x64-debug
 ```
 
-Windows-only notes: the vcpkg FFmpeg port installs stub import libraries — re-run `scripts/regenerate-ffmpeg-importlibs.sh` after any ffmpeg reinstall; FFmpeg 7.x headers carry no `extern "C"` guards (the sources wrap every include).
+The vcpkg FFmpeg port installs stub import libraries. Re-run `scripts/regenerate-ffmpeg-importlibs.sh` after a FFmpeg reinstall. FFmpeg 7.x headers have no `extern "C"` guards, so the sources wrap every include.
 
 ### Android
 
-A native Kotlin/Jetpack Compose app whose UI replicates the desktop client 1:1
-(setup/login, gallery with Details/Icons/List views, settings, player), with
-the C++ core compiled for arm64-v8a and exposed through a JNI bridge
-(`android/app/src/main/cpp/jni_bridge.cpp`). The vault lives in the app's
-sandbox; imports go through the Storage Access Framework; playback decodes in
-memory via the core's streaming reader.
+The phone app is Kotlin and Jetpack Compose. The core is compiled for arm64-v8a and exposed through `android/app/src/main/cpp/jni_bridge.cpp`. The vault is in the app sandbox. Import uses the system picker (`*/*`, plus gallery and music shortcuts). Video and music play through the streaming reader.
 
 ```text
 # Cross-compile core + dependencies, then build the APK (in a pinned NDK container):
@@ -146,8 +163,7 @@ docker run --rm --user root -e HOST_UID="$(id -u)" -v "$PWD":/repo \
 adb install -r out/android-arm64/MegaVaultProtect-native-debug.apk
 ```
 
-Full procedure, SDK-wiring details, and limitations: [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md).
-CI builds the same APK on every push (`.github/workflows/android-build.yml`).
+Full procedure: [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md). CI builds the same APK on every push (`.github/workflows/android-build.yml`).
 
 ### Tests
 
@@ -171,18 +187,17 @@ ctest --preset vs2022-x64-debug
 ## Project layout
 
 ```text
-core/        Qt-independent C++20 library: crypto, SQLCipher database, .vvp
-             packages, streaming reader, FFmpeg probing, thumbnails, tags
-qt-app/      Qt 5 desktop application: setup/login, gallery, player, settings
-android/     Native Android app (Kotlin + Jetpack Compose + JNI over core/)
-tests/       ctest suites for the core (headless)
-scripts/     android cross-build (build-android-core.sh), Windows FFmpeg
-             import-library regeneration
-third_party/ vcpkg overlay ports + release-only CI triplet (Windows builds)
-docs/        ANDROID-BUILD.md, screenshots, logo assets
+core/        C++20 library: crypto, SQLCipher, .vvp packages, streaming
+             reader, FFmpeg probing, thumbnails, tags, folders
+qt-app/      Qt 5 app: library, video, pictures, PDF, music, share, transfers
+android/     Kotlin + Jetpack Compose app over the same core
+tests/       Headless ctest suites
+scripts/     Android cross-build and Windows FFmpeg import libraries
+third_party/ vcpkg overlay ports (Windows)
+docs/        ANDROID-BUILD.md, screenshots, logo
 .github/     Release workflow (Windows zip, Linux tarball, Android APK)
 ```
 
 ## Tech stack
 
-C++20 · Qt 5 (Widgets, Multimedia) · Kotlin + Jetpack Compose (Android) · JNI · Argon2id · libsodium (XChaCha20-Poly1305, crypto_kdf) · SQLCipher · FFmpeg (libavcodec/libavformat/swscale/swresample) · CMake · Gradle/AGP (Android) · vcpkg (Windows) / pkg-config (Linux)
+C++20 · Qt 5 (Widgets, Multimedia) · Kotlin + Jetpack Compose · JNI · Argon2id · libsodium (XChaCha20-Poly1305, crypto_kdf) · SQLCipher · FFmpeg · CMake · Gradle (Android) · vcpkg (Windows) / pkg-config (Linux)

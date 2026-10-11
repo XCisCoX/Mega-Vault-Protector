@@ -2,8 +2,11 @@ package org.megavideoprotect.app
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -11,11 +14,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -59,6 +66,9 @@ private val AUDIO_EXTENSIONS = setOf(
 
 fun isAudioName(name: String): Boolean =
     name.substringAfterLast('.', "").lowercase() in AUDIO_EXTENSIONS
+
+fun isPdfName(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase() == "pdf"
 
 /**
  * Full-screen viewer for an image inside the vault. The frame comes from the
@@ -96,11 +106,6 @@ fun ImageViewerScreen(
         failed = decoded == null
     }
 
-    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 6f)
-        offset = if (scale <= 1f) Offset.Zero else offset + panChange
-    }
-
     Column(Modifier.fillMaxSize().background(Mvp.window).safeDrawingPadding()) {
         Row(
             Modifier
@@ -110,7 +115,17 @@ fun ImageViewerScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            MvpButton("← Back", onClick = onBack)
+            Box(
+                Modifier.size(40.dp).clickable(onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_ab_back),
+                    contentDescription = "Back",
+                    tint = Mvp.title,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
             Text(
                 name,
                 color = Mvp.title,
@@ -131,27 +146,51 @@ fun ImageViewerScreen(
             }
         }
 
-        Box(
+        BoxWithConstraints(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(Mvp.card)
-                .pointerInput(videoId) {
-                    detectTapGestures(
-                        onDoubleTap = {
-                            if (scale > 1f) {
-                                scale = 1f
-                                offset = Offset.Zero
-                            } else {
-                                scale = 3f
-                            }
-                        },
-                    )
-                }
-                .transformable(transformState),
+                .background(Mvp.card),
             contentAlignment = Alignment.Center,
         ) {
+            val maxW = constraints.maxWidth.toFloat()
+            val maxH = constraints.maxHeight.toFloat()
+            val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+                val next = (scale * zoomChange).coerceIn(1f, 6f)
+                val maxX = (maxW * (next - 1f) / 2f).coerceAtLeast(0f)
+                val maxY = (maxH * (next - 1f) / 2f).coerceAtLeast(0f)
+                scale = next
+                offset = if (next <= 1f) {
+                    Offset.Zero
+                } else {
+                    Offset(
+                        (offset.x + panChange.x).coerceIn(-maxX, maxX),
+                        (offset.y + panChange.y).coerceIn(-maxY, maxY),
+                    )
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(videoId) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                }
+                            },
+                        )
+                    }
+                    .transformable(transformState),
+            ) {
             val image = bitmap
+            val appear = remember(videoId) { Animatable(0f) }
+            LaunchedEffect(image) {
+                if (image != null) appear.animateTo(1f, tween(280))
+            }
             when {
                 image != null -> Image(
                     bitmap = image.asImageBitmap(),
@@ -163,6 +202,7 @@ fun ImageViewerScreen(
                             scaleY = scale,
                             translationX = offset.x,
                             translationY = offset.y,
+                            alpha = appear.value,
                         ),
                     contentScale = ContentScale.Fit,
                 )
@@ -185,6 +225,7 @@ fun ImageViewerScreen(
                         )
                     }
                 }
+            }
             }
         }
 

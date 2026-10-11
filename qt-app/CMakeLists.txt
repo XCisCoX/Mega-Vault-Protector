@@ -22,6 +22,7 @@ set(MVP_APP_SOURCES
     src/media_decoder.cpp
     src/player_window.cpp
     src/music_window.cpp
+    src/pdf_window.cpp
     src/settings_dialog.cpp
     src/batch_worker.cpp
     src/share_server.cpp
@@ -33,6 +34,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
+    include/videovault/app/pdf_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
@@ -83,7 +85,19 @@ target_link_libraries(VideoVaultApp
         ${MVP_FFMPEG_LIBS}
 )
 if(WIN32)
-    target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32)
+    target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32 windowsapp)
+    set(_mvp_cppwinrt "")
+    if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+        set(_mvp_cppwinrt "C:/Program Files (x86)/Windows Kits/10/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/cppwinrt")
+    endif()
+    if(NOT EXISTS "${_mvp_cppwinrt}/winrt/Windows.Data.Pdf.h")
+        file(GLOB _mvp_kits "C:/Program Files (x86)/Windows Kits/10/Include/*/cppwinrt")
+        list(SORT _mvp_kits ORDER DESCENDING)
+        list(GET _mvp_kits 0 _mvp_cppwinrt)
+    endif()
+    if(EXISTS "${_mvp_cppwinrt}/winrt/Windows.Data.Pdf.h")
+        target_include_directories(VideoVaultApp PRIVATE "${_mvp_cppwinrt}")
+    endif()
 endif()
 
 target_compile_features(VideoVaultApp PRIVATE cxx_std_20)

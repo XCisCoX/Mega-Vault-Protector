@@ -1,4 +1,8 @@
 #include "videovault/app/player_window.hpp"
+#include "videovault/core/vault.hpp"
+
+#include <QtConcurrent/QtConcurrentRun>
+#include <QFutureWatcher>
 
 extern "C" {
 #include <libavutil/error.h>
@@ -283,6 +287,10 @@ AudioSink::~AudioSink() = default;
 
 void AudioSink::append(const std::int16_t* samples, const std::size_t count) {
     std::lock_guard<std::mutex> guard(mutex_);
+    if (read_cursor_ > 8192U && read_cursor_ * 2U > buffer_.size()) {
+        buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+        read_cursor_ = 0;
+    }
     buffer_.insert(buffer_.end(), samples, samples + count);
 }
 
@@ -305,6 +313,12 @@ qint64 AudioSink::readData(char* data, qint64 maxSize) {
     if (take > 0) {
         std::memcpy(data, buffer_.data() + read_cursor_, take);
         read_cursor_ += take / sizeof(std::int16_t);
+        // The device reads from the front forever. Dropping the consumed
+        // prefix is what keeps a long playlist from holding every sample.
+        if (read_cursor_ > 8192U && read_cursor_ * 2U > buffer_.size()) {
+            buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(read_cursor_));
+            read_cursor_ = 0;
+        }
     }
     return static_cast<qint64>(take);
 }
@@ -511,15 +525,7 @@ PlayerWindow::PlayerWindow(
         }
     }
     cacheCombo_->setCurrentIndex(cache_index);
-    cacheCombo_->setToolTip(QStringLiteral(
-        "How much of the video to buffer in memory while streaming"));
-    cacheCombo_->setStyleSheet(QStringLiteral(
-        "QComboBox { background: rgba(255,255,255,20); border: 1px solid rgba(255,255,255,40);"
-        " border-radius: 14px; color: rgba(255,255,255,220);"
-        " padding: 4px 10px; min-height: 26px; font-size: 11px; }"
-        "QComboBox::drop-down { border: none; width: 18px; }"
-        "QComboBox QAbstractItemView { background: #1c1c1e; color: white;"
-        " border: 1px solid rgba(255,255,255,40); selection-background-color: #3390ec; }"));
+    cacheCombo_->hide();
 
     fullscreenButton_ = new QPushButton(controlsOverlay_);
     fullscreenButton_->setIcon(makePlayerIcon(PlayerIcon::Fullscreen, 18, Qt::white));
@@ -551,7 +557,6 @@ PlayerWindow::PlayerWindow(
     side->setSpacing(6);
     side->addWidget(muteButton_);
     side->addWidget(volumeSlider_);
-    side->addWidget(cacheCombo_);
     side->addWidget(fullscreenButton_);
     auto* sideHost = new QWidget(controlsOverlay_);
     sideHost->setLayout(side);
@@ -735,7 +740,6 @@ void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std
         forwardButton_->show();
         muteButton_->show();
         volumeSlider_->show();
-        cacheCombo_->show();
         zoomOutButton_->hide();
         zoomLabel_->hide();
         zoomInButton_->hide();
@@ -762,10 +766,72 @@ void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std
     // constructor — connecting again here would run tick() twice per tick.
     vault_ = std::move(vault);
     video_id_ = video_id;
+    ++stillEpoch_;
     timer_.setInterval(16);
     timer_.start();
     playing_.store(true);
     worker_ = std::thread(&PlayerWindow::workerLoop, this);
+}
+
+void PlayerWindow::playStill(
+    std::shared_ptr<videovault::core::Vault> vault, const std::int64_t video_id) {
+    playVideo(std::move(vault), video_id);
+    // playVideo starts the video clock. A picture has no timeline, so stop
+    // that worker and decrypt the file through the same chunked reader.
+    quit_.store(true);
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    quit_.store(false);
+    playing_.store(false);
+    ended_.store(false);
+    imageModeFlag_.store(true);
+    enterImageMode();
+    surface_->setText(QStringLiteral("Decrypting…"));
+    const int epoch = ++stillEpoch_;
+    const auto source = vault_;
+    auto* watcher = new QFutureWatcher<QImage>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, epoch] {
+        const QImage image = watcher->result();
+        watcher->deleteLater();
+        if (epoch != stillEpoch_) {
+            return;
+        }
+        if (image.isNull()) {
+            // Qt could not read it. The video decoder still handles WebP and
+            // anything else FFmpeg knows, through the same decrypt stream.
+            playVideo(vault_, video_id_);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(frameMutex_);
+            latestFrame_ = image;
+        }
+        surface_->setText({});
+        surface_->setFrame(image);
+        resetImageFit();
+    });
+    watcher->setFuture(QtConcurrent::run([source, video_id] {
+        std::vector<unsigned char> plain;
+        std::uint64_t offset = 0;
+        constexpr std::size_t kChunk = 1024U * 1024U;
+        for (;;) {
+            auto chunk = source->read_video_range(video_id, offset, kChunk);
+            if (!chunk || chunk.value().empty()) {
+                break;
+            }
+            plain.insert(plain.end(), chunk.value().begin(), chunk.value().end());
+            offset += static_cast<std::uint64_t>(chunk.value().size());
+            if (chunk.value().size() < kChunk || plain.size() > 80U * 1024U * 1024U) {
+                break;
+            }
+        }
+        QImage image;
+        if (!plain.empty()) {
+            image.loadFromData(plain.data(), static_cast<int>(plain.size()));
+        }
+        return image;
+    }));
 }
 
 void PlayerWindow::resizeEvent(QResizeEvent* event) {
@@ -1016,8 +1082,12 @@ bool PlayerWindow::handleKey(QKeyEvent* event) {
 }
 
 void PlayerWindow::mouseDoubleClickEvent(QMouseEvent* event) {
-    // A double-click means fullscreen, not two play/pause toggles.
     clickPending_ = false;
+    if (imageMode_) {
+        event->accept();
+        return;
+    }
+    // A double-click means fullscreen, not two play/pause toggles.
     toggleFullscreen();
     event->accept();
 }
@@ -1035,23 +1105,31 @@ bool PlayerWindow::eventFilter(QObject* watched, QEvent* event) {
             && handleKey(static_cast<QKeyEvent*>(event))) {
             return true; // consumed by the player
         }
-        if (event->type() == QEvent::MouseMove) {
+        if (event->type() == QEvent::MouseMove && !imageMode_) {
             // Any mouse movement over the player brings the chrome back and
-            // postpones the auto-hide.
+            // postpones the auto-hide. Pictures keep the controls on screen.
             showChrome();
             uiHideTimer_.start();
+        }
+        if (imageMode_ && event->type() == QEvent::MouseButtonDblClick) {
+            if (imageZoom_ <= 0.0) {
+                zoomImage(2.0, QPointF(surface_->width() / 2.0, surface_->height() / 2.0));
+            } else {
+                resetImageFit();
+            }
+            return true;
+        }
+        if (imageMode_ && event->type() == QEvent::Wheel) {
+            const auto* wheel = static_cast<QWheelEvent*>(event);
+            if (wheel->angleDelta().y() != 0) {
+                zoomImage(wheel->angleDelta().y() > 0 ? 1.25 : 0.8,
+                    surface_->mapFromGlobal(wheel->globalPos()));
+                return true;
+            }
         }
         if (imageMode_ && watched == surface_) {
             // Image viewer: wheel zooms (anchored at the cursor), left-drag
             // pans, and a plain click is consumed (no play/pause toggle).
-            if (event->type() == QEvent::Wheel) {
-                const auto* wheel = static_cast<QWheelEvent*>(event);
-                if (wheel->angleDelta().y() != 0) {
-                    zoomImage(wheel->angleDelta().y() > 0 ? 1.25 : 0.8,
-                        wheel->pos());
-                    return true;
-                }
-            }
             if (event->type() == QEvent::MouseButtonPress) {
                 const auto* mouse = static_cast<QMouseEvent*>(event);
                 if (mouse->button() == Qt::LeftButton) {
@@ -1059,42 +1137,45 @@ bool PlayerWindow::eventFilter(QObject* watched, QEvent* event) {
                     panStartPos_ = mouse->pos();
                     panStartOffset_ = imageOffset_;
                     if (imageZoom_ <= 0.0) {
-                        // Starting a drag from the fitted view: pin the fitted
-                        // geometry so the pan has a concrete scale.
+                        // Starting a drag from the fitted view: pin the same
+                        // rectangle the surface paints, so the picture does not jump.
                         QImage frame;
                         {
                             std::lock_guard<std::mutex> guard(frameMutex_);
                             frame = latestFrame_;
                         }
-                        if (!frame.isNull()) {
-                            const double fit = std::min(
-                                static_cast<double>(surface_->width()) / frame.width(),
-                                static_cast<double>(surface_->height()) / frame.height());
-                            imageZoom_ = fit;
+                        if (!frame.isNull() && frame.width() > 0 && frame.height() > 0) {
+                            const QSize fitted = frame.size().scaled(
+                                surface_->size(), Qt::KeepAspectRatio);
+                            imageZoom_ = static_cast<double>(fitted.width())
+                                / static_cast<double>(frame.width());
                             panStartOffset_ = QPointF(
-                                (surface_->width() - frame.width() * fit) / 2.0,
-                                (surface_->height() - frame.height() * fit) / 2.0);
+                                (surface_->width() - fitted.width()) / 2.0,
+                                (surface_->height() - fitted.height()) / 2.0);
                             imageOffset_ = panStartOffset_;
                             surface_->setView(imageZoom_, imageOffset_);
                             updateZoomLabel();
                         }
                     }
+                    panAnchor_ = mouse->globalPos();
+                    surface_->grabMouse();
+                    surface_->setCursor(Qt::ClosedHandCursor);
                     return true;
                 }
             }
             if (event->type() == QEvent::MouseMove && panning_) {
                 const auto* mouse = static_cast<QMouseEvent*>(event);
-                if (mouse->buttons() & Qt::LeftButton) {
-                    imageOffset_ = panStartOffset_
-                        + QPointF(mouse->pos() - panStartPos_);
-                    surface_->setView(imageZoom_, imageOffset_);
-                    return true;
-                }
+                imageOffset_ = panStartOffset_ + QPointF(mouse->globalPos() - panAnchor_);
+                clampImageOffset();
+                surface_->setView(imageZoom_, imageOffset_);
+                return true;
             }
             if (event->type() == QEvent::MouseButtonRelease && panning_) {
                 const auto* mouse = static_cast<QMouseEvent*>(event);
                 if (mouse->button() == Qt::LeftButton) {
                     panning_ = false;
+                    surface_->releaseMouse();
+                    surface_->setCursor(Qt::OpenHandCursor);
                     return true;
                 }
             }
@@ -1467,6 +1548,7 @@ void PlayerWindow::enterImageMode() {
     showChrome();
     layoutChrome();
     resetImageFit();
+    surface_->setCursor(Qt::OpenHandCursor);
 }
 
 // Zooms by `factor`, keeping the image point under `cursor_pos` fixed. From
@@ -1495,8 +1577,34 @@ void PlayerWindow::zoomImage(const double factor, const QPointF& cursor_pos) {
     const QPointF image_point = (cursor_pos - old_offset) / old_zoom;
     imageZoom_ = new_zoom;
     imageOffset_ = cursor_pos - image_point * new_zoom;
+    clampImageOffset();
     surface_->setView(imageZoom_, imageOffset_);
     updateZoomLabel();
+}
+
+void PlayerWindow::clampImageOffset() {
+    QImage frame;
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        frame = latestFrame_;
+    }
+    if (frame.isNull() || imageZoom_ <= 0.0 || surface_ == nullptr) {
+        return;
+    }
+    const double pictureWidth = frame.width() * imageZoom_;
+    const double pictureHeight = frame.height() * imageZoom_;
+    const double viewWidth = surface_->width();
+    const double viewHeight = surface_->height();
+    if (pictureWidth <= viewWidth) {
+        imageOffset_.setX((viewWidth - pictureWidth) / 2.0);
+    } else {
+        imageOffset_.setX(std::clamp(imageOffset_.x(), viewWidth - pictureWidth, 0.0));
+    }
+    if (pictureHeight <= viewHeight) {
+        imageOffset_.setY((viewHeight - pictureHeight) / 2.0);
+    } else {
+        imageOffset_.setY(std::clamp(imageOffset_.y(), viewHeight - pictureHeight, 0.0));
+    }
 }
 
 // Back to the aspect-fit view.
@@ -1569,7 +1677,7 @@ void PlayerWindow::tick() {
             std::lock_guard<std::mutex> guard(errorMutex_);
             message = openError_;
         }
-        surface_->setText(QStringLiteral("Cannot play this video:\n%1").arg(message));
+        surface_->setText(QStringLiteral("Cannot open this file:\n%1").arg(message));
         playButton_->setEnabled(false);
         positionSlider_->setEnabled(false);
     }

@@ -5,6 +5,8 @@ import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.view.WindowManager
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -26,8 +28,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -127,6 +133,8 @@ fun SettingsDialog(
                 window.setBackgroundBlurRadius(70)
             }
         }
+        val sheet = remember { Animatable(0f) }
+        LaunchedEffect(Unit) { sheet.animateTo(1f, tween(240)) }
         Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier
@@ -140,6 +148,10 @@ fun SettingsDialog(
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)
+                    .graphicsLayer {
+                        alpha = sheet.value
+                        translationY = (1f - sheet.value) * 56.dp.toPx()
+                    }
                     .fillMaxWidth()
                     .imePadding()
                     .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
@@ -208,7 +220,12 @@ fun SettingsDialog(
                             ) {
                                 Text(label, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
                                 if (idleLabel == label) {
-                                    Text("✓", color = Mvp.accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                    Icon(
+                                        painterResource(R.drawable.msg_check_s),
+                                        contentDescription = null,
+                                        tint = Mvp.accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
                                 }
                             }
                         }

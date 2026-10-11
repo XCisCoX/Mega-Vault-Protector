@@ -264,16 +264,16 @@ class MusicPlaybackService : Service() {
             Intent(this, MusicPlaybackService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val playIcon = if (playing) R.drawable.ic_tg_pause else R.drawable.ic_tg_play
+        val playIcon = if (playing) R.drawable.ic_action_pause else R.drawable.ic_action_play
         val playLabel = if (playing) "Pause" else "Play"
-        val repeatIcon = if (player.repeatMode == Player.REPEAT_MODE_ONE) {
-            R.drawable.ic_notify_repeat_one
-        } else {
-            R.drawable.ic_tg_repeat
+        val repeatIcon = when (player.repeatMode) {
+            Player.REPEAT_MODE_ONE -> R.drawable.player_new_repeatone
+            Player.REPEAT_MODE_ALL -> R.drawable.player_new_repeatall
+            else -> R.drawable.player_new_repeat_off
         }
         val artist = artistOf(player)
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_music)
+            .setSmallIcon(R.drawable.player)
             .setLargeIcon(coverFor(player.currentMediaItem?.mediaId?.toLongOrNull()))
             .setContentTitle(title)
             .setContentText(artist)
@@ -286,10 +286,10 @@ class MusicPlaybackService : Service() {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(playing)
             .setOnlyAlertOnce(true)
-            .addAction(action(ACTION_SHUFFLE, R.drawable.ic_notify_shuffle, "Shuffle", 6))
-            .addAction(action(ACTION_PREV, R.drawable.ic_tg_prev, "Previous", 3))
+            .addAction(action(ACTION_SHUFFLE, R.drawable.player_new_shuffle, "Shuffle", 6))
+            .addAction(action(ACTION_PREV, R.drawable.ic_action_previous, "Previous", 3))
             .addAction(action(ACTION_TOGGLE, playIcon, playLabel, 4))
-            .addAction(action(ACTION_NEXT, R.drawable.ic_tg_next, "Next", 5))
+            .addAction(action(ACTION_NEXT, R.drawable.ic_action_next, "Next", 5))
             .addAction(action(ACTION_REPEAT, repeatIcon, "Repeat", 7))
             .setStyle(
                 Notification.MediaStyle()
