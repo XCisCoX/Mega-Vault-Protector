@@ -33,7 +33,7 @@ on_err() {
         tail -n 40 "$STEPLOG" || true
         local msg
         msg="$(tail -n 12 "$STEPLOG" | tr '\n' ' ' | sed 's/::/:/g' | head -c 1200)"
-        [ -n "$msg" ] && echo "::error::$msg"
+        if [ -n "$msg" ]; then echo "::error::$msg"; fi
     fi
     exit "$rc"
 }
