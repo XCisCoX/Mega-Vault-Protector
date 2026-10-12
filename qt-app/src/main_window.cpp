@@ -4,6 +4,7 @@
 #include "videovault/app/music_window.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/pdf_window.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
@@ -1556,14 +1557,15 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             }
             std::unordered_set<qlonglong> inside_files;
             if (!folder_ids.empty()) {
-                const auto confirm = QMessageBox::question(
-                    this, QStringLiteral("Remove"),
-                    videos.empty()
-                        ? QStringLiteral("Delete %1 folder(s) and everything inside them? This cannot be undone.")
-                            .arg(folder_ids.size())
-                        : QStringLiteral("Delete the selected folders, the files inside them, and the selected items? This cannot be undone."),
-                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-                if (confirm != QMessageBox::Yes) {
+                InWindowSheet confirm(this);
+                confirm.setTitle(QStringLiteral("Remove"));
+                confirm.setMessage(videos.empty()
+                    ? QStringLiteral("Delete %1 folder(s) and everything inside them? This cannot be undone.")
+                        .arg(folder_ids.size())
+                    : QStringLiteral("Delete the selected folders, the files inside them, and the selected items? This cannot be undone."));
+                confirm.addButton(QStringLiteral("Cancel"), 0, false);
+                confirm.addButton(QStringLiteral("Delete"), 1, true);
+                if (confirm.run() != 1) {
                     return true;
                 }
                 if (!videos.empty()) {
@@ -2062,8 +2064,8 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* filterRow = new QHBoxLayout();
     filterRow->setSpacing(8);
     filterRow->addWidget(searchEdit_, 1);
-    filterRow->addWidget(modeHost);
     filterRow->addWidget(sortButton_);
+    filterRow->addWidget(modeHost);
     filterRow->addWidget(tagFilterCombo_);
     toolbarLayout->addLayout(filterRow);
 
@@ -2740,14 +2742,14 @@ void MainWindow::finishEditTags() {
         return;
     }
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Edit tags"));
-    auto* layout = new QVBoxLayout(&dialog);
+    InWindowSheet dialog(this);
+    dialog.setTitle(QStringLiteral("Edit tags"));
+    auto* layout = dialog.body();
 
     if (data->video_ids.size() > 1U) {
         auto* hint = new QLabel(
             QStringLiteral("Applying to %1 selected items — checked tags are set on all of them.")
-                .arg(data->video_ids.size()), &dialog);
+                .arg(data->video_ids.size()));
         hint->setWordWrap(true);
         layout->addWidget(hint);
     }
@@ -2766,17 +2768,17 @@ void MainWindow::finishEditTags() {
     }
 
     auto* inputRow = new QHBoxLayout();
-    auto* input = new QLineEdit(&dialog);
+    auto* input = new QLineEdit();
     input->setPlaceholderText(QStringLiteral("New tag…"));
-    auto* addButton = new QPushButton(QStringLiteral("Add"), &dialog);
+    auto* addButton = new QPushButton(QStringLiteral("Add"));
     inputRow->addWidget(input, 1);
     inputRow->addWidget(addButton);
 
-    auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    list->setMinimumHeight(220);
     layout->addWidget(list, 1);
     layout->addLayout(inputRow);
-    layout->addWidget(buttons);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Save"), 1, true);
 
     connect(addButton, &QPushButton::clicked, &dialog, [list, input] {
         const QString name = input->text().trimmed();
@@ -2797,9 +2799,7 @@ void MainWindow::finishEditTags() {
         list->setCurrentItem(item);
         input->clear();
     });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (dialog.run() != 1) {
         return;
     }
 
@@ -3423,60 +3423,51 @@ struct PackagePassword {
 };
 
 PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
-    QDialog dialog(parent);
-    dialog.setWindowTitle(exporting
+    InWindowSheet dialog(parent);
+    dialog.setTitle(exporting
         ? QStringLiteral("Export package")
         : QStringLiteral("Import package"));
-    dialog.setStyleSheet(QStringLiteral(
-        "QDialog { background: #101014; }"
-        "QLabel { color: white; }"
-        "QLineEdit { color: white; background: #1c1c22; border: 1px solid #3a3a44;"
-        " border-radius: 6px; padding: 6px 8px; min-width: 260px; }"
-        "QCheckBox { color: white; }"
-        "QPushButton { color: white; background: #2a2a32; border: none;"
-        " border-radius: 8px; min-height: 32px; padding: 0 14px; }"
-        "QPushButton:default { background: #3390ec; }"));
-    auto* layout = new QFormLayout(&dialog);
-    layout->setContentsMargins(18, 16, 18, 16);
-    layout->setSpacing(10);
-    auto* hint = new QLabel(exporting
+    dialog.setMessage(exporting
         ? QStringLiteral("This password locks the package. It is separate from the vault password.")
-        : QStringLiteral("Enter the password that was set when this package was created."),
-        &dialog);
-    hint->setWordWrap(true);
-    layout->addRow(hint);
-    auto* password = new QLineEdit(&dialog);
+        : QStringLiteral("Enter the password that was set when this package was created."));
+    auto* password = new QLineEdit();
     password->setEchoMode(QLineEdit::Password);
     password->setPlaceholderText(QStringLiteral("Package password"));
-    layout->addRow(QStringLiteral("Password"), password);
+    dialog.body()->addWidget(password);
     QLineEdit* confirm = nullptr;
     QCheckBox* compress = nullptr;
     if (exporting) {
-        confirm = new QLineEdit(&dialog);
+        confirm = new QLineEdit();
         confirm->setEchoMode(QLineEdit::Password);
-        layout->addRow(QStringLiteral("Confirm"), confirm);
-        compress = new QCheckBox(QStringLiteral("Compress the files"), &dialog);
+        confirm->setPlaceholderText(QStringLiteral("Confirm password"));
+        dialog.body()->addWidget(confirm);
+        compress = new QCheckBox(QStringLiteral("Compress the files"));
         compress->setChecked(true);
-        layout->addRow(compress);
+        dialog.body()->addWidget(compress);
     }
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    layout->addRow(buttons);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    auto* ok = new QPushButton(exporting
+        ? QStringLiteral("Export")
+        : QStringLiteral("Import"));
+    ok->setObjectName(QStringLiteral("inWindowPrimary"));
+    ok->setCursor(Qt::PointingHandCursor);
+    ok->setFocusPolicy(Qt::NoFocus);
+    dialog.buttons()->addWidget(ok);
+    QObject::connect(password, &QLineEdit::returnPressed, ok, &QPushButton::click);
+    QObject::connect(ok, &QPushButton::clicked, &dialog, [&dialog, password, confirm] {
+        if (password->text().isEmpty()) {
+            dialog.setMessage(QStringLiteral("Enter a password."), true);
+            return;
+        }
+        if (confirm != nullptr && password->text() != confirm->text()) {
+            dialog.setMessage(QStringLiteral("The password confirmation does not match."), true);
+            return;
+        }
+        dialog.finish(1);
+    });
     password->setFocus();
     PackagePassword result;
-    if (dialog.exec() != QDialog::Accepted) {
-        return result;
-    }
-    if (password->text().isEmpty()) {
-        QMessageBox::warning(parent, dialog.windowTitle(), QStringLiteral("Enter a password."));
-        return result;
-    }
-    if (confirm != nullptr && password->text() != confirm->text()) {
-        QMessageBox::warning(parent, dialog.windowTitle(),
-            QStringLiteral("The password confirmation does not match."));
-        password->clear();
-        confirm->clear();
+    if (dialog.run() != 1) {
         return result;
     }
     result.accepted = true;
@@ -4133,13 +4124,16 @@ void MainWindow::beginNewFolder() {
     if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
-    bool accepted = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("New folder"), QStringLiteral("Name"),
-        QLineEdit::Normal, QString(), &accepted);
-    if (!accepted) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("New folder"));
+    prompt.setMessage(QStringLiteral("Name"));
+    prompt.addTextEntry(QLineEdit::Normal, QString(), QStringLiteral("Folder name"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Create"), 1, true);
+    if (prompt.run() != 1) {
         return;
     }
+    const QString name = prompt.text();
     auto created = vault_->create_folder(currentFolderId_, name.toStdString());
     if (!created) {
         setError(galleryStatus_, vaultErrorText(created.error()));
@@ -4161,13 +4155,16 @@ void MainWindow::beginRenameFolder(const std::int64_t folder_id) {
             break;
         }
     }
-    bool accepted = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("Rename folder"), QStringLiteral("Name"),
-        QLineEdit::Normal, current, &accepted);
-    if (!accepted) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("Rename folder"));
+    prompt.setMessage(QStringLiteral("Name"));
+    prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Folder name"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    if (prompt.run() != 1) {
         return;
     }
+    const QString name = prompt.text();
     auto renamed = vault_->rename_folder(folder_id, name.toStdString());
     if (!renamed) {
         setError(galleryStatus_, vaultErrorText(renamed.error()));
@@ -4209,17 +4206,14 @@ void MainWindow::beginRemoveFolder(const std::int64_t folder_id) {
             }
         }
     }
-    QMessageBox box(this);
-    box.setWindowTitle(QStringLiteral("Remove folder"));
-    box.setText(QStringLiteral("Remove \"%1\"?").arg(name));
-    box.setInformativeText(inside > 0
+    InWindowSheet box(this);
+    box.setTitle(QStringLiteral("Remove folder"));
+    box.setMessage(QStringLiteral("Remove \"%1\"?\n\n%2").arg(name, inside > 0
         ? QStringLiteral("Delete %1 file(s) inside this folder? This cannot be undone.").arg(inside)
-        : QStringLiteral("This folder is empty."));
-    box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
-    box.button(QMessageBox::Ok)->setText(inside > 0
-        ? QStringLiteral("Delete")
-        : QStringLiteral("Remove folder"));
-    if (box.exec() != QMessageBox::Ok) {
+        : QStringLiteral("This folder is empty.")));
+    box.addButton(QStringLiteral("Cancel"), 0, false);
+    box.addButton(inside > 0 ? QStringLiteral("Delete") : QStringLiteral("Remove folder"), 1, true);
+    if (box.run() != 1) {
         return;
     }
     auto removed = vault_->remove_folder(folder_id);
@@ -4268,13 +4262,16 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
     } else if (auto* item = findListItemById(iconList_, video_id)) {
         current = item->data(Qt::UserRole + 1).toString();
     }
-    bool accepted = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("Rename"), QStringLiteral("Name"),
-        QLineEdit::Normal, current, &accepted);
-    if (!accepted) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("Rename"));
+    prompt.setMessage(QStringLiteral("Name"));
+    prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Name"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    if (prompt.run() != 1) {
         return;
     }
+    const QString name = prompt.text();
     auto renamed = vault_->rename_video(video_id, name.toStdString());
     if (!renamed) {
         setError(galleryStatus_, vaultErrorText(renamed.error()));
@@ -4357,11 +4354,10 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
         return parts.isEmpty() ? QStringLiteral("Library") : parts.join(QStringLiteral(" / "));
     };
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(title);
-    dialog.setMinimumWidth(360);
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* list = new QListWidget(&dialog);
+    InWindowSheet dialog(this);
+    dialog.setTitle(title);
+    auto* layout = dialog.body();
+    auto* list = new QListWidget();
     if (!blockedHas(0)) {
         auto* root = new QListWidgetItem(QStringLiteral("Library"), list);
         root->setData(Qt::UserRole, static_cast<qlonglong>(0));
@@ -4389,13 +4385,12 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
             break;
         }
     }
+    list->setMinimumHeight(240);
     layout->addWidget(list);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
-    if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
+    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Move"), 1, true);
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, [&dialog] { dialog.finish(1); });
+    if (dialog.run() != 1 || list->currentItem() == nullptr) {
         return false;
     }
     *chosen = list->currentItem()->data(Qt::UserRole).toLongLong();
@@ -5364,6 +5359,30 @@ void MainWindow::popPlayer() {
     playerWindow_->detach();
 }
 
+void MainWindow::embedPdf() {
+    if (pdfWindow_ == nullptr || contentStack_ == nullptr) {
+        return;
+    }
+    pdfWindow_->prepareDock();
+    if (contentStack_->indexOf(pdfWindow_) < 0) {
+        contentStack_->addWidget(pdfWindow_);
+    }
+    fadeStack(contentStack_, pdfWindow_);
+    pdfWindow_->show();
+    pdfWindow_->setFocus();
+}
+
+void MainWindow::popPdf() {
+    if (pdfWindow_ == nullptr || contentStack_ == nullptr) {
+        return;
+    }
+    contentStack_->removeWidget(pdfWindow_);
+    if (pages_ != nullptr) {
+        fadeStack(contentStack_, pages_);
+    }
+    pdfWindow_->detach();
+}
+
 void MainWindow::restoreGalleryFocus() {
     if (galleryStack_ == nullptr || contentStack_ == nullptr || pages_ == nullptr) {
         return;
@@ -5605,10 +5624,17 @@ void MainWindow::beginPdf(
         connect(window, &PdfWindow::closeRequested, this, [this] { closePdf(); });
         connect(window, &PdfWindow::previousRequested, this, [this] { stepPlayback(-1); });
         connect(window, &PdfWindow::nextRequested, this, [this] { stepPlayback(1); });
+        connect(window, &PdfWindow::detachRequested, this, [this] { popPdf(); });
+        connect(window, &PdfWindow::dockRequested, this, [this] { embedPdf(); });
         pdfWindow_ = window;
     }
     pdfWindow_->openDocument(vault_, video_id, title);
     pdfWindow_->setNeighbors(previous, next);
+    if (pdfWindow_->isDetached()) {
+        pdfWindow_->raise();
+        pdfWindow_->activateWindow();
+        return;
+    }
     if (contentStack_ != nullptr && contentStack_->indexOf(pdfWindow_) < 0) {
         contentStack_->addWidget(pdfWindow_);
     }
@@ -5755,12 +5781,13 @@ void MainWindow::beginRemoveSelected(const bool ask) {
         return;
     }
     if (ask) {
-        const auto confirm = QMessageBox::question(
-            this, QStringLiteral("Remove items"),
-            QStringLiteral("Remove %1 item(s) from the vault? This cannot be undone.")
-                .arg(ids.size()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (confirm != QMessageBox::Yes) {
+        InWindowSheet confirm(this);
+        confirm.setTitle(QStringLiteral("Remove items"));
+        confirm.setMessage(QStringLiteral("Remove %1 item(s) from the vault? This cannot be undone.")
+            .arg(ids.size()));
+        confirm.addButton(QStringLiteral("Cancel"), 0, false);
+        confirm.addButton(QStringLiteral("Remove"), 1, true);
+        if (confirm.run() != 1) {
             return;
         }
     }
@@ -5790,29 +5817,27 @@ void MainWindow::beginChangePassword() {
     }
     setError(galleryStatus_, {});
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Change vault password"));
-    dialog.setModal(true);
-    auto* form = new QFormLayout(&dialog);
-    auto* current = new QLineEdit(&dialog);
+    InWindowSheet dialog(this);
+    dialog.setTitle(QStringLiteral("Change vault password"));
+    auto* current = new QLineEdit();
     current->setEchoMode(QLineEdit::Password);
-    auto* next = new QLineEdit(&dialog);
+    current->setPlaceholderText(QStringLiteral("Current password"));
+    auto* next = new QLineEdit();
     next->setEchoMode(QLineEdit::Password);
-    auto* confirmation = new QLineEdit(&dialog);
+    next->setPlaceholderText(QStringLiteral("New password"));
+    auto* confirmation = new QLineEdit();
     confirmation->setEchoMode(QLineEdit::Password);
-    auto* profile = new QComboBox(&dialog);
+    confirmation->setPlaceholderText(QStringLiteral("Confirm new password"));
+    auto* profile = new QComboBox();
     profile->addItem(QStringLiteral("Balanced — 256 MiB, 3 iterations"));
     profile->addItem(QStringLiteral("High security — 512 MiB, 4 iterations"));
-    form->addRow(QStringLiteral("Current password"), current);
-    form->addRow(QStringLiteral("New password"), next);
-    form->addRow(QStringLiteral("Confirm new password"), confirmation);
-    form->addRow(QStringLiteral("Argon2id security profile"), profile);
-    auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    form->addRow(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() != QDialog::Accepted) {
+    dialog.body()->addWidget(current);
+    dialog.body()->addWidget(next);
+    dialog.body()->addWidget(confirmation);
+    dialog.body()->addWidget(profile);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Change"), 1, true);
+    if (dialog.run() != 1) {
         return;
     }
     if (next->text() != confirmation->text()) {
@@ -6264,13 +6289,16 @@ void MainWindow::beginNewNote() {
             return;
         }
     }
-    bool accepted = false;
-    const QString entered = QInputDialog::getText(
-        this, QStringLiteral("New note"), QStringLiteral("Name"),
-        QLineEdit::Normal, QStringLiteral("Note.txt"), &accepted);
-    if (!accepted) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("New note"));
+    prompt.setMessage(QStringLiteral("Name"));
+    prompt.addTextEntry(QLineEdit::Normal, QStringLiteral("Note.txt"), QStringLiteral("Name"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Create"), 1, true);
+    if (prompt.run() != 1) {
         return;
     }
+    const QString entered = prompt.text();
     const QString name = noteFileName(entered);
     closePdf();
     if (playerWindow_ != nullptr) {
@@ -6402,16 +6430,17 @@ bool MainWindow::closeText(const bool force) {
         return false;
     }
     if (!force && page != nullptr && !openTextTruncated_ && page->dirty()) {
-        const auto answer = QMessageBox::question(
-            this,
-            QStringLiteral("Save note"),
-            QStringLiteral("Save changes to %1?").arg(openTextTitle_),
-            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-            QMessageBox::Save);
-        if (answer == QMessageBox::Cancel) {
+        InWindowSheet prompt(this);
+        prompt.setTitle(QStringLiteral("Save note"));
+        prompt.setMessage(QStringLiteral("Save changes to %1?").arg(openTextTitle_));
+        prompt.addButton(QStringLiteral("Cancel"), 0, false);
+        prompt.addButton(QStringLiteral("Discard"), 2, false);
+        prompt.addButton(QStringLiteral("Save"), 1, true);
+        const int answer = prompt.run();
+        if (answer == 0) {
             return false;
         }
-        if (answer == QMessageBox::Save) {
+        if (answer == 1) {
             saveOpenText(true);
             return false;
         }
@@ -6636,7 +6665,11 @@ void MainWindow::openShare() {
     if (!shareServer_->running()) {
         QString error;
         if (!shareServer_->start(vault_->root_path(), &error)) {
-            QMessageBox::warning(this, QStringLiteral("Share with phone"), error);
+            InWindowSheet notice(this);
+            notice.setTitle(QStringLiteral("Share with phone"));
+            notice.setMessage(error, true);
+            notice.addButton(QStringLiteral("OK"), 1, true);
+            notice.run();
             return;
         }
     }

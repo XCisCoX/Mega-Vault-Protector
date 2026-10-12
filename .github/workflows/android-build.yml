@@ -2,6 +2,12 @@ name: Android Build
 
 on:
   workflow_call:
+    inputs:
+      version:
+        description: 'Version stamped into the APK, such as 2.0.4 or 2.0.4-beta.1. Empty keeps 2.0.3.'
+        required: false
+        type: string
+        default: ''
   push:
     branches: [main]
   pull_request:
@@ -144,13 +150,13 @@ jobs:
           # The wrapper distribution is pinned to the mirror reachable from the
           # developer's network. If that mirror is ever unavailable, fall back to
           # the official distribution before failing the job.
-          if ! ./gradlew --no-daemon assembleDebug; then
+          if ! MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon assembleDebug; then
             echo "::warning::gradlew failed; retrying with the official Gradle distribution"
             # Written with printf rather than sed: the backslash that escapes the
             # colon in a .properties value must survive shell + YAML layers.
             printf 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip\n' \
               > gradle/wrapper/gradle-wrapper.properties
-            ./gradlew --no-daemon assembleDebug
+            MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon assembleDebug
           fi
 
       - name: Verify the APK carries a working native core

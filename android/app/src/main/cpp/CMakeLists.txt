@@ -27,7 +27,13 @@ target_include_directories(mvpcore PRIVATE
     ${MVP_ANDROID_PREFIX}/include
 )
 
-target_compile_definitions(mvpcore PRIVATE SQLITE_HAS_CODEC)
+if(NOT MVP_VERSION)
+    set(MVP_VERSION "2.0.3")
+endif()
+target_compile_definitions(mvpcore PRIVATE
+    SQLITE_HAS_CODEC
+    MVP_VERSION_STRING="${MVP_VERSION}"
+)
 
 target_link_libraries(mvpcore
     ${MVP_ANDROID_PREFIX}/lib/libsodium.a

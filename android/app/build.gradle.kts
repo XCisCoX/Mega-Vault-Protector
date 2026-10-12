@@ -16,12 +16,22 @@ android {
     // is not installed and cannot be downloaded on this network.
     ndkVersion = "30.0.14904198"
 
+    val mvpVersion = (System.getenv("MVP_VERSION") ?: "").ifBlank { "2.0.3" }
+    val mvpMatch = Regex("""(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?""").find(mvpVersion)
+        ?: error("MVP_VERSION must look like 2.0.4 or 2.0.4-beta.1, got '$mvpVersion'")
+    val mvpMajor = mvpMatch.groupValues[1].toInt()
+    val mvpMinor = mvpMatch.groupValues[2].toInt()
+    val mvpPatch = mvpMatch.groupValues[3].toInt()
+    // A release sits above its own betas and below the next patch.
+    val mvpPre = mvpMatch.groupValues[4].toIntOrNull() ?: 99
+    val mvpCode = mvpMajor * 10_000_000 + mvpMinor * 100_000 + mvpPatch * 100 + mvpPre
+
     defaultConfig {
         applicationId = "org.megavideoprotect.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = mvpCode
+        versionName = mvpVersion
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -30,6 +40,7 @@ android {
                 cppFlags += listOf("-std=c++20")
                 arguments += listOf(
                     "-DANDROID_STL=c++_static",
+                    "-DMVP_VERSION=$mvpVersion",
                     "-DMVP_ANDROID_PREFIX=${System.getenv("MVP_ANDROID_PREFIX") ?: "/repo/out/android-arm64/prefix"}"
                 )
             }

@@ -92,6 +92,11 @@ add_library(VideoVaultCore STATIC
 
 add_library(VideoVault::Core ALIAS VideoVaultCore)
 
+if(NOT MVP_VERSION)
+    set(MVP_VERSION "2.0.3")
+endif()
+target_compile_definitions(VideoVaultCore PRIVATE MVP_VERSION_STRING="${MVP_VERSION}")
+
 target_include_directories(VideoVaultCore
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

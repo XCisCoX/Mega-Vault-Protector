@@ -145,6 +145,8 @@ private:
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
+    void embedPdf();
+    void popPdf();
     void restoreGalleryFocus();
     std::int64_t selectedVideoId() const;
     std::vector<std::int64_t> selectedVideoIds() const;

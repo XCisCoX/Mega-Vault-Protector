@@ -23,6 +23,7 @@ set(MVP_APP_SOURCES
     src/player_window.cpp
     src/music_window.cpp
     src/pdf_window.cpp
+    src/in_window_sheet.cpp
     src/settings_dialog.cpp
     src/batch_worker.cpp
     src/share_server.cpp
@@ -35,6 +36,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
     include/videovault/app/pdf_window.hpp
+    include/videovault/app/in_window_sheet.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
