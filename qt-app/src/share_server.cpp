@@ -988,7 +988,7 @@ protected:
             setGeometry(parentWidget()->rect());
             raise();
         }
-        if (event->type() == QEvent::MouseButtonPress && sheet_ != nullptr) {
+        if (watched != parentWidget() && event->type() == QEvent::MouseButtonPress && sheet_ != nullptr) {
             const auto* mouse = static_cast<const QMouseEvent*>(event);
             const auto* source = qobject_cast<QWidget*>(watched);
             if (source != nullptr && !sheet_->rect().contains(sheet_->mapFrom(source, mouse->pos()))) {
@@ -1179,15 +1179,24 @@ void ShareServer::showDialog(QWidget* parent) {
     });
 
     auto* scroll = new QScrollArea(dialog);
+    scroll->setObjectName(QStringLiteral("shareScroll"));
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     scroll->setStyleSheet(QStringLiteral(
-        "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }"));
+        "QScrollArea#shareScroll { background: transparent; border: none; }"
+        "QScrollBar:vertical { background: transparent; width: 8px; margin: 8px 4px 8px 0; }"
+        "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 90); border-radius: 4px; min-height: 36px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"));
+    scroll->viewport()->setAutoFillBackground(false);
+    scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* outerHost = new QWidget();
     outerHost->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* outer = new QVBoxLayout(outerHost);
-    outer->setContentsMargins(48, 48, 48, 48);
+    outer->setContentsMargins(24, 24, 24, 24);
     outer->addStretch(1);
     scroll->setWidget(outerHost);
     scroll->viewport()->installEventFilter(dialog);
@@ -1199,7 +1208,7 @@ void ShareServer::showDialog(QWidget* parent) {
     sheet->setObjectName(QStringLiteral("shareSheet"));
     sheet->setAttribute(Qt::WA_StyledBackground, true);
     sheet->setFixedWidth(440);
-    sheet->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Minimum);
+    sheet->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     sheet->setStyleSheet(QStringLiteral(
         "QFrame#shareSheet { background: #121214; border-radius: 18px; }"
         "QFrame#shareAddress { background: #1c1c1e; border: none; border-radius: 12px; }"
@@ -1246,8 +1255,7 @@ void ShareServer::showDialog(QWidget* parent) {
     intro->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
     layout->addWidget(intro);
 
-    const int qrSide = qBound(180, parent != nullptr ? parent->height() / 3 : 220, 240);
-    auto* code = new QrCard(qrSide, sheet);
+    auto* code = new QrCard(320, sheet);
     layout->addWidget(code, 0, Qt::AlignHCenter);
 
     auto* addressBar = new QFrame(sheet);
@@ -1330,6 +1338,11 @@ void ShareServer::showDialog(QWidget* parent) {
 
     outer->addWidget(sheet, 0, Qt::AlignHCenter);
     outer->addStretch(1);
+    layout->activate();
+    const int cardHeight = layout->totalHeightForWidth(sheet->width());
+    if (cardHeight > 0) {
+        sheet->setFixedHeight(cardHeight);
+    }
     dialog->watchSheet(sheet);
     dialog->show();
     dialog->raise();

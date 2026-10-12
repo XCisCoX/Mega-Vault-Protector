@@ -84,6 +84,10 @@ target_link_libraries(VideoVaultApp
         Qt5::MultimediaWidgets
         ${MVP_FFMPEG_LIBS}
 )
+if(UNIX AND NOT ANDROID)
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(VideoVaultApp PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 if(WIN32)
     target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32 windowsapp)
     set(_mvp_cppwinrt "")

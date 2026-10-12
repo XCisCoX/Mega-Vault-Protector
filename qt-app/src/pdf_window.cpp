@@ -92,23 +92,13 @@ bool hasPdfHeader(const std::vector<unsigned char>& bytes) {
     return false;
 }
 
-bool looksEncrypted(const std::vector<unsigned char>& bytes) {
-    const char mark[] = "/Encrypt";
-    const auto markSize = sizeof(mark) - 1U;
-    if (bytes.size() < markSize) {
-        return false;
-    }
-    const auto scan = [&](const std::size_t begin, const std::size_t end) {
-        for (std::size_t i = begin; i + markSize <= end; ++i) {
-            if (std::memcmp(bytes.data() + i, mark, markSize) == 0) {
-                return true;
-            }
-        }
-        return false;
-    };
-    const auto head = std::min<std::size_t>(bytes.size(), 65536U);
-    const auto tail = std::min<std::size_t>(bytes.size(), 262144U);
-    return scan(0U, head) || scan(bytes.size() - tail, bytes.size());
+bool passwordRejected(const winrt::hresult code, const QString& message) {
+    const auto value = static_cast<std::uint32_t>(static_cast<int32_t>(code));
+    // LoadFromStreamAsync reports a missing or wrong PDF password with these
+    // Win32 codes. A file that merely contains the letters "/Encrypt" is not
+    // one of these failures.
+    return value == 0x8007052BU || value == 0x8007052EU || value == 0x80070056U
+        || message.contains(QStringLiteral("password"), Qt::CaseInsensitive);
 }
 
 QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const int pixelWidth) {
@@ -135,7 +125,7 @@ QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const
         white.G = 255;
         white.B = 255;
         options.BackgroundColor(white);
-        options.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::PngEncoderId());
+        options.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::JpegEncoderId());
         winrt::Windows::Storage::Streams::InMemoryRandomAccessStream output;
         page.RenderToStreamAsync(output, options).get();
         const auto encodedSize = static_cast<std::uint32_t>(output.Size());
@@ -147,7 +137,7 @@ QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const
         std::vector<unsigned char> encoded(encodedSize);
         reader.ReadBytes(winrt::array_view<std::uint8_t>(encoded.data(), encodedSize));
         QImage image;
-        if (!image.loadFromData(encoded.data(), static_cast<int>(encoded.size()), "PNG")) {
+        if (!image.loadFromData(encoded.data(), static_cast<int>(encoded.size()), "JPEG")) {
             return {};
         }
         return image;
@@ -162,6 +152,7 @@ struct OpenOutcome {
     std::shared_ptr<DocState> doc;
     std::vector<QSizeF> sizes;
     QString error;
+    bool needsPassword{false};
     bool badPassword{false};
 };
 
@@ -207,13 +198,19 @@ OpenOutcome openPdf(const std::vector<unsigned char>& bytes, const QString& pass
         }
         outcome.doc = std::move(state);
     } catch (const winrt::hresult_error& error) {
-        outcome.badPassword = !password.isEmpty();
-        outcome.error = outcome.badPassword
-            ? QStringLiteral("That password did not open this PDF.")
-            : QString::fromWCharArray(error.message().c_str());
-        if (outcome.error.isEmpty()) {
-            outcome.error = QStringLiteral("This PDF could not be opened.");
+        const QString message = QString::fromWCharArray(error.message().c_str());
+        if (passwordRejected(error.code(), message)) {
+            if (password.isEmpty()) {
+                outcome.needsPassword = true;
+            } else {
+                outcome.badPassword = true;
+                outcome.error = QStringLiteral("That password did not open this PDF.");
+            }
+            return outcome;
         }
+        outcome.error = message.isEmpty()
+            ? QStringLiteral("This PDF could not be opened.")
+            : message;
     }
     return outcome;
 }
@@ -446,12 +443,13 @@ void PdfWindow::openDocument(
         }
         result.bytes = std::make_shared<std::vector<unsigned char>>(std::move(plain));
 #ifdef Q_OS_WIN
-        result.encrypted = looksEncrypted(*result.bytes);
-        if (!result.encrypted) {
-            auto opened = openPdf(*result.bytes, {});
-            result.doc = std::move(opened.doc);
-            result.sizes = std::move(opened.sizes);
-            result.error = std::move(opened.error);
+        auto opened = openPdf(*result.bytes, {});
+        result.encrypted = opened.needsPassword;
+        result.doc = std::move(opened.doc);
+        result.sizes = std::move(opened.sizes);
+        result.error = std::move(opened.error);
+        result.badPassword = opened.badPassword;
+        if (result.doc != nullptr || result.encrypted) {
             if (result.doc != nullptr) {
                 result.bytes.reset();
             }
@@ -541,6 +539,7 @@ void PdfWindow::askPassword(const bool rejected) {
         result.doc = std::move(opened.doc);
         result.sizes = std::move(opened.sizes);
         result.error = std::move(opened.error);
+        result.encrypted = opened.needsPassword;
         result.badPassword = opened.badPassword;
         if (result.doc != nullptr) {
             result.bytes.reset();
@@ -647,7 +646,7 @@ void PdfWindow::pump() {
     const int generation = impl_->generation;
     const auto state = impl_->doc;
     const qreal ratio = std::max<qreal>(1.0, impl_->devicePixelRatio);
-    const int pixels = std::clamp(static_cast<int>(width * ratio), width, 4096);
+    const int pixels = std::clamp(static_cast<int>(width * ratio), width, 2048);
     impl_->renderWatcher->setFuture(QtConcurrent::run([state, next, width, pixels, generation] {
         RenderResult result;
         result.generation = generation;
@@ -769,7 +768,7 @@ bool PdfWindow::eventFilter(QObject* watched, QEvent* event) {
 
 QImage renderPdfFirstPage(const std::vector<unsigned char>& bytes, const int maxEdge) {
 #ifdef Q_OS_WIN
-    if (maxEdge < 16 || looksEncrypted(bytes)) {
+    if (maxEdge < 16) {
         return {};
     }
     auto opened = openPdf(bytes, {});

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QStringList>
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 class QAbstractButton;
@@ -27,6 +29,7 @@ class QThread;
 class QStackedWidget;
 class QTimer;
 class QEvent;
+class QLocalServer;
 class QObject;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -69,6 +72,7 @@ class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+    void acceptExternalPaths(const QStringList& paths);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -93,11 +97,15 @@ private:
     void beginImport();
     void beginImportFolder();
     void beginImportMany(std::vector<std::filesystem::path> sources, std::int64_t folder_id);
+    void beginImportTree(std::vector<std::filesystem::path> sources, std::int64_t folder_id);
+    void flushExternalImports();
     bool handleExplorerDrag(QObject* watched, QEvent* event);
     void moveItemsToFolder(std::int64_t destination);
     void highlightDropFolder(std::int64_t folder_id, bool on);
     bool galleryHasFocus() const;
     void beginRestoreSelected();
+    void beginExportPackage(std::int64_t only_folder_id = 0);
+    void beginImportPackage();
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
     void revealVideo(qlonglong id, const QString& name, qlonglong size,
@@ -106,6 +114,8 @@ private:
     void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
     void placeFolderRow(qlonglong id, const QString& name);
     void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void paintGalleryBatch();
+    void decorateVisible();
     void recountLibrary();
     void openFolder(std::int64_t folder_id);
     void rebuildBreadcrumb();
@@ -126,8 +136,11 @@ private:
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
     void closePdf();
+    void beginNewNote();
     void beginText(std::int64_t video_id, const QString& title);
-    void closeText();
+    // Returns false when the reader stays open.
+    bool closeText(bool force = false);
+    void saveOpenText(bool closeAfter);
     void placeTransferPanel();
     void stepPlayback(int delta);
     void embedPlayer();
@@ -138,6 +151,8 @@ private:
     void setViewMode(int index);
     void applyGallerySort(int key);
     void sortGalleryItems();
+    void scheduleGallerySort();
+    void showGallerySortIndicator();
     void updateSortButton();
     void layoutLibraryChrome();
     void refreshTagFilter();
@@ -151,9 +166,12 @@ private:
     void openShare();
     void ensureShareServer();
     void approvePeer(const QString& phone, std::function<void(bool)> answer);
+    void finishPeerApproval(bool allow);
     void peerChanged();
     bool peerLinked() const;
     void openPeerBrowser();
+    void closePeerBrowser();
+    void dismissPeerBrowser();
     void beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan);
     void pumpPeerCopies();
     void showTransfers();
@@ -197,6 +215,8 @@ private:
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
+    std::vector<std::filesystem::path> pendingExternal_;
+    QLocalServer* importServer_{nullptr};
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
@@ -206,6 +226,9 @@ private:
     QPushButton* sortButton_{nullptr};
     int sortKey_{0};
     bool sortAscending_{true};
+    bool sortingGallery_{false};
+    bool gallerySortAgain_{false};
+    bool gallerySortQueued_{false};
     QComboBox* tagFilterCombo_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
@@ -216,6 +239,13 @@ private:
     MusicWindow* musicWindow_{nullptr};
     PdfWindow* pdfWindow_{nullptr};
     QWidget* textPage_{nullptr};
+    std::int64_t openTextId_{0};
+    std::int64_t openTextFolderId_{0};
+    QString openTextTitle_;
+    bool openTextTruncated_{false};
+    bool openTextBusy_{false};
+    bool closeTextAfterSave_{false};
+    bool lockAfterTextSave_{false};
     // Pixmaps and probed metadata for the open vault. Moving a file only
     // updates a row; painting the folder again must not reopen every package.
     struct GalleryCache;
@@ -235,6 +265,19 @@ private:
     // the tag filter and the gallery don't invalidate each other when they
     // run as part of the same refresh cycle.
     std::uint64_t galleryGeneration_{0};
+    struct PendingGalleryVideo {
+        std::int64_t id{0};
+        QString name;
+        std::uint64_t size{0};
+        std::int64_t importedAt{0};
+        QString tags;
+    };
+    // Rows still waiting to be inserted. The first screen is shown before the rest.
+    std::vector<PendingGalleryVideo> galleryQueue_;
+    std::size_t galleryQueueIndex_{0};
+    std::uint64_t galleryPaintGeneration_{0};
+    std::unordered_set<std::int64_t> decoratedIds_;
+    int sortProbeCursor_{0};
     // True while refreshGallery is rebuilding the rows. Arrivals during that
     // window are kept and merged into the snapshot, so a late list cannot
     // wipe a file that landed after the list was read.
@@ -273,6 +316,8 @@ private:
     std::vector<PeerTransfer> transfers_;
     quint64 transferSerial_{1};
     QWidget* transferPanel_{nullptr};
+    QWidget* approvalVeil_{nullptr};
+    std::function<void(bool)> pendingPeerAnswer_;
     QWidget* transferHost_{nullptr};
     QPushButton* transfersButton_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};

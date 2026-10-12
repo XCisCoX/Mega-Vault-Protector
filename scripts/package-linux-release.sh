@@ -85,11 +85,33 @@ while IFS= read -r -d '' so; do
   enqueue "$so"
 done < <(find "$root/plugins" "$root/gstreamer-1.0" -type f -name '*.so' -print0)
 
+# Qt's xcb plugin loads these with dlopen, so ldd never sees them. A desktop
+# session then reports that the platform plugin failed to initialize.
+for extra in libxcb-cursor.so.0 libxcb-xinerama.so.0; do
+  found="$(ldconfig -p 2>/dev/null | awk -v name="$extra" '$1 == name { print $NF; exit }')"
+  if [[ -n "$found" && -e "$found" ]]; then
+    enqueue "$found"
+  fi
+done
+
 index=0
 while [[ "$index" -lt "${#queue[@]}" ]]; do
   collect_deps "${queue[$index]}"
   index=$((index + 1))
 done
+
+# ldd names are symlinks (libQt5Core.so.5 -> libQt5Core.so.5.15.x). The queue
+# stores the real file, and the loader asks for the symlink name. Copy the
+# real file, then add the SONAME the binary was linked against.
+link_soname() {
+  local file="$1"
+  local soname base
+  soname="$(readelf -d "$file" 2>/dev/null | awk -F'[][]' '/SONAME/ { print $2; exit }')"
+  base="$(basename "$file")"
+  if [[ -n "$soname" && "$soname" != "$base" ]]; then
+    ln -sfn "$base" "$root/lib/$soname"
+  fi
+}
 
 app_real="$(readlink -f "$root/MegaVaultProtect")"
 for file in "${queue[@]}"; do
@@ -98,7 +120,52 @@ for file in "${queue[@]}"; do
     "$root"/*) continue ;;
   esac
   cp -L "$file" "$root/lib/$(basename "$file")"
+  link_soname "$root/lib/$(basename "$file")"
 done
+
+is_glibc_name() {
+  case "$1" in
+    libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libresolv.so.*|libutil.so.*|ld-linux-x86-64.so.*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+missing=0
+check_needed() {
+  local file="$1"
+  local needed
+  while read -r needed; do
+    [[ -n "$needed" ]] || continue
+    if is_glibc_name "$needed"; then
+      continue
+    fi
+    if [[ -e "$root/lib/$needed" || -e "$(dirname "$file")/$needed" ]]; then
+      continue
+    fi
+    echo "Missing library $needed required by ${file#"$root"/}" >&2
+    missing=1
+  done < <(readelf -d "$file" 2>/dev/null | awk -F'[][]' '/\(NEEDED\)/ { print $2 }')
+}
+
+check_needed "$root/MegaVaultProtect"
+while IFS= read -r -d '' so; do
+  check_needed "$so"
+done < <(find "$root/lib" "$root/plugins" "$root/gstreamer-1.0" -type f -name '*.so*' -print0)
+if [[ "$missing" -ne 0 ]]; then
+  echo "The Linux bundle is missing libraries, so it will not start." >&2
+  exit 1
+fi
+
+cat > "$root/qt.conf" << 'EOF'
+[Paths]
+Prefix=.
+Plugins=plugins
+Libraries=lib
+EOF
 
 cat > "$root/MegaVaultProtect.sh" << 'EOF'
 #!/bin/sh
@@ -108,6 +175,11 @@ export QT_PLUGIN_PATH="$HERE/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$HERE/plugins/platforms"
 export GST_PLUGIN_PATH="$HERE/gstreamer-1.0"
 export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/gstreamer-1.0"
+# This archive ships the xcb plugin. Leave the variable alone when the user
+# already chose a platform.
+if [ -z "${QT_QPA_PLATFORM:-}" ]; then
+  export QT_QPA_PLATFORM=xcb
+fi
 exec "$HERE/MegaVaultProtect" "$@"
 EOF
 chmod +x "$root/MegaVaultProtect.sh"

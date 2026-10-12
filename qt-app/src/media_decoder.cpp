@@ -136,7 +136,8 @@ public:
     StreamCache(StreamCache&& other) noexcept
         : budget_(other.budget()),
           window_start_(other.window_start_),
-          data_(std::move(other.data_)) {}
+          data_(std::move(other.data_)),
+          head_(std::move(other.head_)) {}
 
     StreamCache(const StreamCache&) = delete;
     StreamCache& operator=(const StreamCache&) = delete;
@@ -168,6 +169,14 @@ public:
         }
         const auto pos = static_cast<std::uint64_t>(position);
         const std::uint64_t window_budget = budget();
+        // The first window stays pinned. A loop seeks back to the start, and
+        // re-decrypting that range is what made the restart sit on "Loading".
+        if (!head_.empty() && pos < head_.size()) {
+            const auto take = std::min(
+                size, static_cast<std::size_t>(head_.size() - pos));
+            std::memcpy(buffer, head_.data() + static_cast<std::size_t>(pos), take);
+            return static_cast<std::int64_t>(take);
+        }
         if (pos < window_start_ || pos >= window_start_ + data_.size()) {
             if (!load_window(vault, video_id, pos, file_size, window_budget)) {
                 return -1;
@@ -187,6 +196,7 @@ public:
 
     void clear() {
         data_.clear();
+        head_.clear();
         window_start_ = kNoWindow;
     }
 
@@ -223,6 +233,9 @@ private:
             return false;
         }
         data_.insert(data_.end(), got.value().begin(), got.value().end());
+        if (window_start_ == 0 && data_.size() > head_.size()) {
+            head_.assign(data_.begin(), data_.end());
+        }
         return true;
     }
 
@@ -230,6 +243,8 @@ private:
     std::uint64_t budget_{kDefaultStreamCacheBytes};
     std::uint64_t window_start_{kNoWindow};
     std::vector<unsigned char> data_;
+    // Bytes of the file from offset 0, kept after the read window slides forward.
+    std::vector<unsigned char> head_;
 };
 
 // Random-access plaintext source over the encrypted package. Reads are served
@@ -332,7 +347,8 @@ public:
     bool open(
         const std::shared_ptr<videovault::core::Vault>& vault,
         const std::int64_t video_id,
-        QString* error) {
+        QString* error,
+        const char* name_hint) {
         close();
 
         // The package plaintext size for the AVIO size callback. The encrypted
@@ -423,6 +439,9 @@ public:
         int status = AVERROR_INVALIDDATA;
         if (audio_only_) {
             status = open_input(nullptr);
+            if (status < 0 && name_hint != nullptr && name_hint[0] != '\0') {
+                status = open_input(name_hint);
+            }
         } else {
             for (const char* hint : kImageHints) {
                 status = open_input(hint);
@@ -458,6 +477,9 @@ public:
         for (unsigned int index = 0U; index < raw_format->nb_streams; ++index) {
             AVStream* stream = raw_format->streams[index];
             if (stream == nullptr || stream->codecpar == nullptr) {
+                continue;
+            }
+            if (audio_only_ && stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
                 continue;
             }
             if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_stream_ == -1
@@ -496,6 +518,17 @@ public:
                 status = avcodec_parameters_to_context(
                     audio_codec_.get(), stream->codecpar);
                 if (status < 0 || avcodec_open2(audio_codec_.get(), decoder, nullptr) < 0) {
+                    audio_codec_.reset();
+                    audio_stream_ = -1;
+                    continue;
+                }
+                if (audio_codec_->ch_layout.nb_channels <= 0) {
+                    const int channels = stream->codecpar->ch_layout.nb_channels > 0
+                        ? stream->codecpar->ch_layout.nb_channels
+                        : 2;
+                    av_channel_layout_default(&audio_codec_->ch_layout, channels);
+                }
+                if (audio_codec_->sample_rate <= 0) {
                     audio_codec_.reset();
                     audio_stream_ = -1;
                     continue;
@@ -686,6 +719,8 @@ public:
                     if (avcodec_receive_frame(video_codec_.get(), decoded.get()) >= 0) {
                         frame->image = convert_frame(decoded.get());
                         frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_);
+                        frame->source_width = decoded->width;
+                        frame->source_height = decoded->height;
                         return !frame->image.isNull();
                     }
                 }
@@ -708,6 +743,8 @@ public:
                 }
                 frame->image = convert_frame(decoded.get());
                 frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_);
+                frame->source_width = decoded->width;
+                frame->source_height = decoded->height;
                 return true;
             }
             if (stream_index == audio_stream_ && audio_codec_ && swr_) {
@@ -1000,8 +1037,9 @@ MediaDecoder::~MediaDecoder() = default;
 bool MediaDecoder::open(
     const std::shared_ptr<videovault::core::Vault>& vault,
     const std::int64_t video_id,
-    QString* error) {
-    return impl_->open(vault, video_id, error);
+    QString* error,
+    const char* name_hint) {
+    return impl_->open(vault, video_id, error, name_hint);
 }
 
 bool MediaDecoder::is_open() const { return impl_->is_open(); }

@@ -738,6 +738,11 @@ fun VaultScreen(
             showSettings = false
             return@BackHandler
         }
+        if (selectedIds.isNotEmpty()) {
+            lastExitPress = 0L
+            selectedIds = emptySet()
+            return@BackHandler
+        }
         if (currentFolderId != 0L) {
             lastExitPress = 0L
             val parent = folders.firstOrNull { it.id == currentFolderId }?.parentId ?: 0L
@@ -746,10 +751,10 @@ fun VaultScreen(
         }
         val now = SystemClock.elapsedRealtime()
         if (now - lastExitPress < 2000L) {
-            (context as? Activity)?.moveTaskToBack(true)
+            onLock()
         } else {
             lastExitPress = now
-            Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Press back again to lock", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -921,14 +926,6 @@ fun VaultScreen(
                 ranked.filter { it.id !in fresh } + filtered.filter { it.id in fresh }
             }
         }
-        LaunchedEffect(sortKey, videos) {
-            if (sortKey != SortKey.Duration && sortKey != SortKey.Resolution && sortKey != SortKey.Codec) return@LaunchedEffect
-            for (v in videos) {
-                if (GalleryCache.media.containsKey(v.id)) continue
-                val loaded = withContext(Dispatchers.Default) { loadMedia(v.id) } ?: continue
-                GalleryCache.noteMedia(v.id, loaded)
-            }
-        }
 
         val selecting = selectedIds.isNotEmpty()
         val openActions: (VideoEntry) -> Unit = { v ->
@@ -1042,6 +1039,12 @@ fun VaultScreen(
                 tags = tags,
                 filterTagId = filterTagId,
                 search = search,
+                selectionTitle = when (selectedIds.size) {
+                    0 -> null
+                    1 -> videos.firstOrNull { it.id in selectedIds }?.name ?: "1 file"
+                    else -> "${selectedIds.size} files"
+                },
+                actionsEnabled = !actionBusy,
                 onViewMode = { mode ->
                     viewMode = mode
                     GalleryCache.viewMode = mode
@@ -1063,6 +1066,17 @@ fun VaultScreen(
                 },
                 onSettings = { showSettings = true },
                 onLock = onLock,
+                onMove = {
+                    if (RemoteVault.connected()) {
+                        error = "This vault is open on your PC. Move it on the PC."
+                    } else {
+                        moveTarget = MoveRequest.Videos(selectedIds.toList())
+                    }
+                },
+                onRemove = { confirmRemove = true },
+                onRestore = { restoreLauncher.launch(null) },
+                onTag = { showTags = true },
+                onClearSelection = { selectedIds = emptySet() },
             )
             TelegramMusicBar(onOpen = onOpenMusic)
             FolderBar(
@@ -1071,33 +1085,6 @@ fun VaultScreen(
                 onOpen = { openFolder(it) },
                 onDrop = { event, folderId -> handleDrop(event, folderId) },
             )
-            AnimatedVisibility(
-                visible = selecting,
-                enter = fadeIn(tween(180)) + expandVertically(tween(220)),
-                exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
-            ) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text("${selectedIds.size} selected", color = Mvp.title, fontSize = 14.sp)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MvpButton("Move", onClick = {
-                            if (RemoteVault.connected()) {
-                                error = "This vault is open on your PC. Move it on the PC."
-                            } else {
-                                moveTarget = MoveRequest.Videos(selectedIds.toList())
-                            }
-                        }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                        MvpButton("Remove", onClick = { confirmRemove = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                        MvpButton("Restore", onClick = { restoreLauncher.launch(null) }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                        MvpButton("Tag", onClick = { showTags = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                        MvpButton("Cancel", onClick = { selectedIds = emptySet() }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                    }
-                }
-            }
             importProgress?.let { fraction ->
                 Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                     LinearProgressIndicator(
@@ -1558,12 +1545,19 @@ private fun GalleryHeader(
     tags: List<TagEntry>,
     filterTagId: Long,
     search: String,
+    selectionTitle: String?,
+    actionsEnabled: Boolean,
     onViewMode: (Int) -> Unit,
     onFilterTag: (Long) -> Unit,
     onSearch: (String) -> Unit,
     onImport: () -> Unit,
     onSettings: () -> Unit,
     onLock: () -> Unit,
+    onMove: () -> Unit,
+    onRemove: () -> Unit,
+    onRestore: () -> Unit,
+    onTag: () -> Unit,
+    onClearSelection: () -> Unit,
 ) {
         Column(
         Modifier
@@ -1571,6 +1565,27 @@ private fun GalleryHeader(
             .padding(start = 16.dp, end = 10.dp, top = 8.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (selectionTitle != null) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HeaderIcon("Clear selection", R.drawable.msg_close, onClearSelection)
+                Text(
+                    selectionTitle,
+                    color = Mvp.title,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                )
+                HeaderIcon("Move", R.drawable.msg_forward, onMove, enabled = actionsEnabled)
+                HeaderIcon("Tag", R.drawable.menu_tag_plus, onTag, enabled = actionsEnabled)
+                HeaderIcon("Restore", R.drawable.msg_download, onRestore, enabled = actionsEnabled)
+                HeaderIcon("Remove", R.drawable.msg_delete_filled, onRemove, enabled = actionsEnabled, iconTint = Mvp.errorText)
+            }
+        } else {
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1657,6 +1672,7 @@ private fun GalleryHeader(
                 TagFilterButton(tags, filterTagId, onFilterTag)
             }
         }
+        }
     }
 }
 
@@ -1736,20 +1752,23 @@ private fun HeaderIcon(
     icon: Int,
     onClick: () -> Unit,
     filled: Boolean = false,
+    enabled: Boolean = true,
+    iconTint: Color? = null,
 ) {
+    val tint = iconTint ?: if (filled) Color.White else Mvp.title
     Box(
         Modifier
             .padding(horizontal = 2.dp)
             .size(36.dp)
             .clip(CircleShape)
             .background(if (filled) Mvp.primary else Color.Transparent)
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             painterResource(icon),
             contentDescription = label,
-            tint = if (filled) Color.White else Mvp.title,
+            tint = if (enabled) tint else tint.copy(alpha = 0.35f),
             modifier = Modifier.size(22.dp),
         )
     }
@@ -2173,6 +2192,10 @@ private fun FileTile(video: VideoEntry, edge: Int, square: Boolean) {
         KindPlate(resolved.label, FileKinds.compactSize(video.size), modifier.clip(shape))
         return
     }
+    if (resolved?.route == 4) {
+        TextBadge(resolved.label, modifier)
+        return
+    }
     val audio = resolved?.route == 2 || (resolved == null && isAudioName(video.name))
     val pdf = resolved?.route == 3 || (resolved == null && isPdfName(video.name))
     val image = resolved?.let { FileKinds.isImage(it) } ?: isImageName(video.name)
@@ -2248,6 +2271,28 @@ private fun MusicNote(modifier: Modifier) {
         modifier = modifier,
         contentScale = ContentScale.Crop,
     )
+}
+
+@Composable
+private fun TextBadge(label: String, modifier: Modifier) {
+    val badge = label.uppercase().take(5)
+    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize(0.72f), contentAlignment = Alignment.Center) {
+            Image(
+                painterResource(R.drawable.media_doc_blue),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            Text(
+                badge,
+                color = Color.White,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
 }
 
 @Composable

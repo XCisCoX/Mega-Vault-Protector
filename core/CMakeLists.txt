@@ -85,6 +85,7 @@ add_library(VideoVaultCore STATIC
     src/media.cpp
     src/metadata.cpp
     src/package.cpp
+    src/share_package.cpp
     src/vault.cpp
     src/version.cpp
 )
@@ -109,6 +110,16 @@ target_link_libraries(VideoVaultCore
         ${MVP_SQLCIPHER_LIBS}
         ${MVP_FFMPEG_LIBS}
 )
+# Package compression. PUBLIC so the executable that links this static
+# library also pulls in zlib (static libs do not absorb that dependency).
+if(WIN32)
+    target_link_libraries(VideoVaultCore PUBLIC MvpZlib)
+elseif(ANDROID)
+    target_link_libraries(VideoVaultCore PUBLIC z)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(VideoVaultCore PUBLIC ZLIB::ZLIB)
+endif()
 if(ANDROID)
     # sqlcipher's codec routes its diagnostics through Android's logcat API
     # (bionic liblog); the static library carries the reference.

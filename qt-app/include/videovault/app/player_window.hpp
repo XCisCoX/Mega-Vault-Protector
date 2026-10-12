@@ -174,7 +174,7 @@ protected:
         painter.setBrush(QColor(255, 255, 255, 46));
         painter.drawRoundedRect(QRect(0, track_y, width(), track_h), track_h / 2, track_h / 2);
         if (fill_w > 0) {
-            painter.setBrush(QColor(91, 124, 250));
+            painter.setBrush(QColor(255, 255, 255, 230));
             painter.drawRoundedRect(QRect(0, track_y, fill_w, track_h), track_h / 2, track_h / 2);
         }
 
@@ -264,11 +264,16 @@ public:
         QWidget* parent = nullptr);
     ~PlayerWindow() override;
     void playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
+    // Same file, from the start, without opening it again.
+    void restartFromStart();
     // A still picture. Decrypts the package in chunks, like the video stream,
     // then shows it in the image viewer instead of the playback clock.
     void playStill(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
     void presentClip(const QString& title, int index, int count, bool hasPrevious, bool hasNext);
     std::int64_t videoId() const { return video_id_; }
+    // 0 off, 1 repeat the library, 2 repeat this file.
+    int repeatMode() const { return repeatMode_; }
+    bool shuffleOn() const { return shuffle_; }
     // Plays inside the main window until the viewer is popped into its own window.
     void prepareDock();
     void detach();
@@ -308,6 +313,7 @@ private:
     void hideChrome();
     void layoutChrome();
     void updatePopIcon();
+    void refreshTransportIcons();
     void applyDetachedFrame();
     void updateCenterButton();
     void enterImageMode();
@@ -320,6 +326,16 @@ private:
     void fitToVideoSize();
     void updatePositionLabel();
     QString formatTime(std::int64_t ms) const;
+    void noteLoopFrame(const QImage& image, std::int64_t ptsMs);
+    // False when this frame's decoder size is not the size the rest of the
+    // video settled on. Those frames are what make a loop look like it
+    // changes resolution.
+    bool frameSizeMatches(const DecodedFrame& frame);
+    void noteLoopAudio(const std::int16_t* samples, std::size_t count);
+    void dropLoopCapture();
+    // Plays a short clip from frames already decoded. Returns when repeat,
+    // seek, or close ends it.
+    void replayCachedLoop();
 
     std::shared_ptr<videovault::core::Vault> vault_;
     std::int64_t video_id_{0};
@@ -347,10 +363,28 @@ private:
     QPushButton* forwardButton_{nullptr};
     QSlider* positionSlider_{nullptr};
     QLabel* positionLabel_{nullptr};
+    QLabel* timeLeftLabel_{nullptr};
     QPushButton* muteButton_{nullptr};
     QSlider* volumeSlider_{nullptr};
     QComboBox* cacheCombo_{nullptr};
     QPushButton* fullscreenButton_{nullptr};
+    QPushButton* repeatButton_{nullptr};
+    QPushButton* shuffleButton_{nullptr};
+    int repeatMode_{0};
+    std::atomic<int> repeatWatch_{0};
+    bool shuffle_{false};
+    struct LoopPicture {
+        QImage image;
+        std::int64_t ptsMs{0};
+    };
+    std::vector<LoopPicture> loopFrames_;
+    std::vector<std::int16_t> loopPcm_;
+    bool loopCapture_{true};
+    int stableFrameW_{0};
+    int stableFrameH_{0};
+    int stableFrameRun_{0};
+    bool clipHasPrevious_{false};
+    bool clipHasNext_{false};
     // Image-viewer chrome (shown instead of the playback row for images).
     QPushButton* zoomOutButton_{nullptr};
     QLabel* zoomLabel_{nullptr};

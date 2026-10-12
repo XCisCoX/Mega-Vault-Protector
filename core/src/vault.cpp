@@ -56,8 +56,31 @@ bool is_audio_display_name(const std::string& name) {
     return false;
 }
 
+bool header_is_pdf(internal::PackageReader& reader) {
+    unsigned char head[1024]{};
+    const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
+    if (count < 5U) {
+        return false;
+    }
+    if (!reader.seek(0U)) {
+        return false;
+    }
+    const auto read = reader.read(std::span<unsigned char>(head, static_cast<std::size_t>(count)));
+    if (!read || read.value() < 5U) {
+        return false;
+    }
+    const char mark[] = "%PDF";
+    const auto limit = read.value();
+    for (std::size_t i = 0; i + 4 <= limit; ++i) {
+        if (std::memcmp(head + i, mark, 4) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool header_is_audio(internal::PackageReader& reader) {
-    unsigned char head[12] = {};
+    unsigned char head[64] = {};
     const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
     if (count < 4U) {
         return false;
@@ -78,8 +101,23 @@ bool header_is_audio(internal::PackageReader& reader) {
         && std::memcmp(head + 8, "WAVE", 4) == 0) {
         return true;
     }
-    return read.value() >= 12U && std::memcmp(head + 4, "ftyp", 4) == 0
-        && (std::memcmp(head + 8, "M4A ", 4) == 0 || std::memcmp(head + 8, "M4B ", 4) == 0);
+    if (read.value() < 12U || std::memcmp(head + 4, "ftyp", 4) != 0) {
+        return false;
+    }
+    const auto audio_brand = [](const unsigned char* brand) {
+        return std::memcmp(brand, "M4A ", 4) == 0 || std::memcmp(brand, "M4B ", 4) == 0
+            || std::memcmp(brand, "M4P ", 4) == 0 || std::memcmp(brand, "F4A ", 4) == 0
+            || std::memcmp(brand, "F4B ", 4) == 0;
+    };
+    if (audio_brand(head + 8)) {
+        return true;
+    }
+    for (std::size_t i = 16; i + 4 <= read.value(); i += 4) {
+        if (audio_brand(head + i)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string audio_open_hint(const std::string& name) {
@@ -269,6 +307,12 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     auto reader = open_package_reader(root, database, master_key, video_id);
     if (!reader) {
         return reader.error();
+    }
+    // FFmpeg has no PDF renderer. Probing one here reads the whole file and
+    // still stores nothing, so leave the page picture to store_thumbnail.
+    if (header_is_pdf(reader.value())) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "A PDF page thumbnail is stored by the library."};
     }
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
@@ -1108,6 +1152,54 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
     info.codec_name = probe.value().codec_name;
     info.title = probe.value().title;
     info.artist = probe.value().artist;
+    return info;
+}
+
+Result<ThumbnailInfo> Vault::store_thumbnail(
+    const std::int64_t video_id,
+    const std::vector<unsigned char>& jpeg,
+    const std::uint32_t width,
+    const std::uint32_t height) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    if (jpeg.size() < 32U || width == 0U || height == 0U) {
+        return VaultError{VaultErrorCode::InvalidArgument, "The thumbnail image is empty."};
+    }
+    auto& impl = *impl_;
+    auto row = impl.database_.query_video(video_id);
+    if (!row) {
+        return row.error();
+    }
+    auto thumbnail_key = internal::derive_subkey(
+        impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+    if (!thumbnail_key) {
+        return thumbnail_key.error();
+    }
+    internal::ThumbnailRow stored;
+    stored.mime = "image/jpeg";
+    stored.width = width;
+    stored.height = height;
+    internal::random_bytes(stored.nonce);
+    auto encrypted = internal::encrypt_xchacha20_poly1305(
+        jpeg, thumbnail_ad(video_id, row.value()), stored.nonce, thumbnail_key.value());
+    if (!encrypted) {
+        return encrypted.error();
+    }
+    stored.ciphertext = std::move(encrypted.value());
+    stored.created_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    auto inserted = impl.database_.insert_thumbnail(video_id, stored);
+    if (!inserted) {
+        return inserted.error();
+    }
+    ThumbnailInfo info;
+    info.video_id = video_id;
+    info.width = width;
+    info.height = height;
+    info.mime = stored.mime;
+    info.bytes = jpeg;
     return info;
 }
 

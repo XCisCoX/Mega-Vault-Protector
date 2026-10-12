@@ -25,6 +25,7 @@ extern "C" {
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
@@ -51,7 +52,10 @@ namespace videovault::app {
 
 namespace {
 
-enum class PlayerIcon { Play, Pause, Volume, Muted, Fullscreen, Previous, Next, Back, Forward };
+enum class PlayerIcon {
+    Play, Pause, Volume, Muted, Fullscreen, Previous, Next, Back, Forward,
+    Chevron, Repeat, RepeatOne, Shuffle, Pip
+};
 
 // Crisp vector-style icons drawn with QPainter (no external assets).
 QPixmap makePlayerIcon(const PlayerIcon kind, const int size, const QColor& color) {
@@ -127,20 +131,84 @@ QPixmap makePlayerIcon(const PlayerIcon kind, const int size, const QColor& colo
     case PlayerIcon::Previous:
     case PlayerIcon::Next: {
         const bool next = kind == PlayerIcon::Next;
+        painter.setPen(Qt::NoPen);
         painter.setBrush(color);
+        const double barX = next ? s * 0.72 : s * 0.16;
+        painter.drawRoundedRect(QRectF(barX, s * 0.24, s * 0.11, s * 0.52), s * 0.04, s * 0.04);
         QPolygonF triangle;
         if (next) {
-            triangle << QPointF(s * 0.16, s * 0.22) << QPointF(s * 0.62, s * 0.5)
-                     << QPointF(s * 0.16, s * 0.78);
+            triangle << QPointF(s * 0.18, s * 0.24) << QPointF(s * 0.62, s * 0.5)
+                     << QPointF(s * 0.18, s * 0.76);
         } else {
-            triangle << QPointF(s * 0.84, s * 0.22) << QPointF(s * 0.38, s * 0.5)
-                     << QPointF(s * 0.84, s * 0.78);
+            triangle << QPointF(s * 0.82, s * 0.24) << QPointF(s * 0.38, s * 0.5)
+                     << QPointF(s * 0.82, s * 0.76);
         }
         painter.drawPolygon(triangle);
-        painter.drawRoundedRect(
-            next ? QRectF(s * 0.7, s * 0.22, s * 0.12, s * 0.56)
-                 : QRectF(s * 0.18, s * 0.22, s * 0.12, s * 0.56),
-            s * 0.04, s * 0.04);
+        break;
+    }
+    case PlayerIcon::Chevron: {
+        QPen stroke(color, std::max(1.7, s * 0.1), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(stroke);
+        painter.setBrush(Qt::NoBrush);
+        QPainterPath path;
+        path.moveTo(s * 0.64, s * 0.2);
+        path.lineTo(s * 0.34, s * 0.5);
+        path.lineTo(s * 0.64, s * 0.8);
+        painter.drawPath(path);
+        break;
+    }
+    case PlayerIcon::Repeat:
+    case PlayerIcon::RepeatOne: {
+        QPen stroke(color, std::max(1.45, s * 0.085), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(stroke);
+        painter.setBrush(Qt::NoBrush);
+        const QRectF loop(s * 0.16, s * 0.2, s * 0.68, s * 0.6);
+        painter.drawArc(loop, 25 * 16, 150 * 16);
+        painter.drawArc(loop, 205 * 16, 150 * 16);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        QPolygonF headTop;
+        headTop << QPointF(s * 0.78, s * 0.16) << QPointF(s * 0.78, s * 0.4)
+                << QPointF(s * 0.58, s * 0.28);
+        QPolygonF headBottom;
+        headBottom << QPointF(s * 0.22, s * 0.6) << QPointF(s * 0.22, s * 0.84)
+                   << QPointF(s * 0.42, s * 0.72);
+        painter.drawPolygon(headTop);
+        painter.drawPolygon(headBottom);
+        if (kind == PlayerIcon::RepeatOne) {
+            QFont digit(QStringLiteral("Segoe UI"));
+            digit.setPixelSize(static_cast<int>(s * 0.34));
+            digit.setBold(true);
+            painter.setFont(digit);
+            painter.setPen(color);
+            painter.drawText(QRectF(0, s * 0.28, s, s * 0.46), Qt::AlignCenter, QStringLiteral("1"));
+        }
+        break;
+    }
+    case PlayerIcon::Shuffle: {
+        QPen stroke(color, std::max(1.45, s * 0.085), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(stroke);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(QPointF(s * 0.16, s * 0.72), QPointF(s * 0.78, s * 0.28));
+        painter.drawLine(QPointF(s * 0.16, s * 0.28), QPointF(s * 0.78, s * 0.72));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        QPolygonF up;
+        up << QPointF(s * 0.58, s * 0.16) << QPointF(s * 0.86, s * 0.16) << QPointF(s * 0.72, s * 0.4);
+        QPolygonF down;
+        down << QPointF(s * 0.58, s * 0.84) << QPointF(s * 0.86, s * 0.84) << QPointF(s * 0.72, s * 0.6);
+        painter.drawPolygon(up);
+        painter.drawPolygon(down);
+        break;
+    }
+    case PlayerIcon::Pip: {
+        QPen stroke(color, std::max(1.4, s * 0.08), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(stroke);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(QRectF(s * 0.1, s * 0.16, s * 0.58, s * 0.46), s * 0.06, s * 0.06);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawRoundedRect(QRectF(s * 0.38, s * 0.42, s * 0.5, s * 0.38), s * 0.05, s * 0.05);
         break;
     }
     case PlayerIcon::Back:
@@ -169,11 +237,13 @@ QPixmap makePlayerIcon(const PlayerIcon kind, const int size, const QColor& colo
     return pixmap;
 }
 
-// Transparent shade over the picture. The video itself shows through.
+// Top fade over the picture, or the floating control card.
+enum class GlassShade { Top, Card };
+
 class PlayerGlass final : public QWidget {
 public:
-    PlayerGlass(const bool top, QWidget* parent)
-        : QWidget(parent), top_(top) {
+    PlayerGlass(const GlassShade shade, QWidget* parent)
+        : QWidget(parent), shade_(shade) {
         setAttribute(Qt::WA_TranslucentBackground);
         setAutoFillBackground(false);
     }
@@ -181,35 +251,22 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        QLinearGradient shade(0, top_ ? 0 : height(), 0, top_ ? height() : 0);
-        shade.setColorAt(0.0, QColor(0, 0, 0, 150));
-        shade.setColorAt(1.0, QColor(0, 0, 0, 0));
-        painter.fillRect(rect(), shade);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        if (shade_ == GlassShade::Top) {
+            QLinearGradient shade(0, 0, 0, height());
+            shade.setColorAt(0.0, QColor(0, 0, 0, 150));
+            shade.setColorAt(1.0, QColor(0, 0, 0, 0));
+            painter.fillRect(rect(), shade);
+            return;
+        }
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1));
+        painter.setBrush(QColor(12, 12, 14, 214));
+        painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 14, 14);
     }
 
 private:
-    bool top_;
+    GlassShade shade_;
 };
-
-QPixmap viewerIcon(const bool dockBack) {
-    QPixmap pixmap(18, 18);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(Qt::white, 1.4));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRoundedRect(QRectF(1.5, 5.5, 9, 9), 1.4, 1.4);
-    if (!dockBack) {
-        painter.drawLine(QPointF(8, 9), QPointF(16, 1.5));
-        painter.drawLine(QPointF(11, 1.5), QPointF(16, 1.5));
-        painter.drawLine(QPointF(16, 1.5), QPointF(16, 6.5));
-    } else {
-        painter.drawLine(QPointF(16, 1.5), QPointF(8, 9));
-        painter.drawLine(QPointF(8, 4.5), QPointF(8, 9));
-        painter.drawLine(QPointF(8, 9), QPointF(12.5, 9));
-    }
-    return pixmap;
-}
 
 enum class PlayerCaptionGlyph { Minimize, Maximize, Restore, Close };
 
@@ -262,12 +319,6 @@ protected:
 private:
     PlayerCaptionGlyph glyph_;
 };
-
-const char* kIconButtonStyle =
-    "QPushButton { background: rgba(0,0,0,70); border: 1px solid rgba(255,255,255,40);"
-    " border-radius: 19px; }"
-    "QPushButton:hover { background: rgba(255,255,255,28); }"
-    "QPushButton:pressed { background: rgba(51,144,236,180); }";
 
 // Still-image codecs (FFmpeg demuxes jpg/png/... as single-frame "videos").
 bool is_image_codec(const std::string& codec_name) {
@@ -394,7 +445,7 @@ PlayerWindow::PlayerWindow(
     // Overlay chrome: title bar on top, center play button, bottom controls —
     // all direct children of the surface, so the empty video area keeps its
     // own mouse handling (click-to-seek) while the controls work normally.
-    topOverlay_ = new PlayerGlass(true, surface_);
+    topOverlay_ = new PlayerGlass(GlassShade::Top, surface_);
     topOverlay_->setFixedHeight(56);
     titleLabel_ = new QLabel(title, topOverlay_);
     QFont titleFont(QStringLiteral("Segoe UI"));
@@ -407,33 +458,23 @@ PlayerWindow::PlayerWindow(
     indexLabel_->setFont(indexFont);
     indexLabel_->setStyleSheet(QStringLiteral("color: rgba(255,255,255,150); background: transparent;"));
     auto* topLayout = new QHBoxLayout(topOverlay_);
-    topLayout->setContentsMargins(10, 8, 10, 8);
-    topLayout->setSpacing(8);
-    auto* closeViewer = new QPushButton(QStringLiteral("×"), topOverlay_);
-    closeViewer->setFixedSize(36, 36);
-    closeViewer->setCursor(Qt::PointingHandCursor);
-    closeViewer->setFocusPolicy(Qt::NoFocus);
-    closeViewer->setStyleSheet(QString::fromLatin1(kIconButtonStyle));
-    closeViewer->setToolTip(QStringLiteral("Close"));
-    connect(closeViewer, &QPushButton::clicked, this, &QWidget::close);
-    popButton_ = new QPushButton(topOverlay_);
-    popButton_->setFixedSize(36, 36);
-    popButton_->setCursor(Qt::PointingHandCursor);
-    popButton_->setFocusPolicy(Qt::NoFocus);
-    popButton_->setIconSize(QSize(18, 18));
-    popButton_->setStyleSheet(QString::fromLatin1(kIconButtonStyle));
-    updatePopIcon();
-    connect(popButton_, &QPushButton::clicked, this, [this] {
-        if (detached_) {
-            emit dockRequested();
-        } else {
-            emit detachRequested();
-        }
-    });
-    topLayout->addWidget(closeViewer);
+    topLayout->setContentsMargins(8, 6, 16, 6);
+    topLayout->setSpacing(4);
+    auto* backViewer = new QPushButton(topOverlay_);
+    backViewer->setIcon(makePlayerIcon(PlayerIcon::Chevron, 20, Qt::white));
+    backViewer->setIconSize(QSize(20, 20));
+    backViewer->setFixedSize(40, 40);
+    backViewer->setCursor(Qt::PointingHandCursor);
+    backViewer->setFocusPolicy(Qt::NoFocus);
+    backViewer->setStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; border: none; border-radius: 20px; }"
+        "QPushButton:hover { background: rgba(255,255,255,28); }"
+        "QPushButton:pressed { background: rgba(255,255,255,44); }"));
+    backViewer->setToolTip(QStringLiteral("Back"));
+    connect(backViewer, &QPushButton::clicked, this, &QWidget::close);
+    topLayout->addWidget(backViewer);
     topLayout->addWidget(titleLabel_, 1);
     topLayout->addWidget(indexLabel_);
-    topLayout->addWidget(popButton_);
 
     centerPlayButton_ = new QPushButton(surface_);
     centerPlayButton_->setFixedSize(72, 72);
@@ -449,16 +490,10 @@ PlayerWindow::PlayerWindow(
         togglePlayPause();
     });
 
-    controlsOverlay_ = new PlayerGlass(false, surface_);
+    controlsOverlay_ = new PlayerGlass(GlassShade::Card, surface_);
     auto* controlsLayout = new QVBoxLayout(controlsOverlay_);
-    controlsLayout->setContentsMargins(14, 8, 14, 10);
-    controlsLayout->setSpacing(4);
-
-    positionSlider_ = new SeekSlider(controlsOverlay_);
-    positionSlider_->setRange(0, 1);
-    positionSlider_->setTracking(false);
-    positionSlider_->setFixedHeight(30);
-    controlsLayout->addWidget(positionSlider_);
+    controlsLayout->setContentsMargins(16, 8, 16, 8);
+    controlsLayout->setSpacing(2);
 
     auto styleTransport = [](QPushButton* button, const int diameter) {
         button->setFixedSize(diameter, diameter);
@@ -466,11 +501,16 @@ PlayerWindow::PlayerWindow(
         button->setFocusPolicy(Qt::NoFocus);
         button->setIconSize(QSize(diameter / 2, diameter / 2));
         button->setStyleSheet(QStringLiteral(
-            "QPushButton { background: rgba(255,255,255,16); border: none; border-radius: %1px; }"
-            "QPushButton:hover { background: rgba(255,255,255,40); }"
-            "QPushButton:pressed { background: rgba(51,144,236,210); }"
+            "QPushButton { background: transparent; border: none; border-radius: %1px; }"
+            "QPushButton:hover { background: rgba(255,255,255,36); }"
+            "QPushButton:pressed { background: rgba(255,255,255,56); }"
             "QPushButton:disabled { background: transparent; }").arg(diameter / 2));
     };
+
+    positionSlider_ = new SeekSlider(controlsOverlay_);
+    positionSlider_->setRange(0, 1);
+    positionSlider_->setTracking(false);
+    positionSlider_->setFixedHeight(22);
 
     backButton_ = new QPushButton(controlsOverlay_);
     backButton_->setIcon(makePlayerIcon(PlayerIcon::Back, 18, Qt::white));
@@ -480,7 +520,7 @@ PlayerWindow::PlayerWindow(
     previousButton_->setToolTip(QStringLiteral("Previous (P)"));
     previousButton_->setEnabled(false);
     playButton_ = new QPushButton(controlsOverlay_);
-    playButton_->setIcon(makePlayerIcon(PlayerIcon::Pause, 22, Qt::white));
+    playButton_->setIcon(makePlayerIcon(PlayerIcon::Pause, 26, Qt::white));
     playButton_->setToolTip(QStringLiteral("Play or pause (Space)"));
     nextButton_ = new QPushButton(controlsOverlay_);
     nextButton_->setIcon(makePlayerIcon(PlayerIcon::Next, 18, Qt::white));
@@ -492,18 +532,24 @@ PlayerWindow::PlayerWindow(
     for (auto* button : {backButton_, previousButton_, nextButton_, forwardButton_}) {
         styleTransport(button, 40);
     }
-    styleTransport(playButton_, 48);
-    playButton_->setIconSize(QSize(22, 22));
-    playButton_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: rgba(255,255,255,28); border: none; border-radius: 24px; }"
-        "QPushButton:hover { background: #3390ec; }"
-        "QPushButton:pressed { background: #2b7fd4; }"));
+    styleTransport(playButton_, 44);
+    playButton_->setIconSize(QSize(26, 26));
 
-    positionLabel_ = new QLabel(QStringLiteral("0:00 / 0:00"), controlsOverlay_);
     QFont timeFont(QStringLiteral("Segoe UI"));
-    timeFont.setPointSize(10);
+    timeFont.setPointSize(9);
+    const QString timeStyle = QStringLiteral("color: rgba(255,255,255,220); background: transparent;");
+    positionLabel_ = new QLabel(QStringLiteral("0:00"), controlsOverlay_);
     positionLabel_->setFont(timeFont);
-    positionLabel_->setStyleSheet(QStringLiteral("color: rgba(255,255,255,210); background: transparent;"));
+    positionLabel_->setStyleSheet(timeStyle);
+    timeLeftLabel_ = new QLabel(QString(QChar(0x2212)) + QStringLiteral("0:00"), controlsOverlay_);
+    timeLeftLabel_->setFont(timeFont);
+    timeLeftLabel_->setStyleSheet(timeStyle);
+    auto* timeRow = new QHBoxLayout();
+    timeRow->setSpacing(10);
+    timeRow->addWidget(positionLabel_);
+    timeRow->addWidget(positionSlider_, 1);
+    timeRow->addWidget(timeLeftLabel_);
+    controlsLayout->addLayout(timeRow);
 
     muteButton_ = new QPushButton(controlsOverlay_);
     muteButton_->setIcon(makePlayerIcon(PlayerIcon::Volume, 18, Qt::white));
@@ -532,44 +578,48 @@ PlayerWindow::PlayerWindow(
     fullscreenButton_->setToolTip(QStringLiteral("Fullscreen (F)"));
     styleTransport(fullscreenButton_, 40);
 
+    repeatButton_ = new QPushButton(controlsOverlay_);
+    styleTransport(repeatButton_, 40);
+    shuffleButton_ = new QPushButton(controlsOverlay_);
+    shuffleButton_->setIcon(makePlayerIcon(PlayerIcon::Shuffle, 18, QColor(255, 255, 255, 120)));
+    shuffleButton_->setToolTip(QStringLiteral("Shuffle"));
+    styleTransport(shuffleButton_, 40);
+    popButton_ = new QPushButton(controlsOverlay_);
+    styleTransport(popButton_, 40);
+    updatePopIcon();
+    repeatMode_ = settings.value(QStringLiteral("player/repeat"), 0).toInt();
+    if (repeatMode_ < 0 || repeatMode_ > 2) {
+        repeatMode_ = 0;
+    }
+    shuffle_ = settings.value(QStringLiteral("player/shuffle"), false).toBool();
+    repeatWatch_.store(repeatMode_);
+    refreshTransportIcons();
+
     volumeSlider_ = new QSlider(Qt::Horizontal, controlsOverlay_);
     volumeSlider_->setRange(0, 100);
     volumeSlider_->setValue(volumePercent_);
     volumeSlider_->setFixedWidth(92);
     volumeSlider_->setToolTip(QStringLiteral("Volume (Up / Down)"));
     volumeSlider_->setStyleSheet(QStringLiteral(
-        "QSlider::groove:horizontal { height: 4px; background: rgba(255,255,255,46); border-radius: 2px; }"
-        "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
-        "QSlider::handle:horizontal { width: 12px; margin: -4px 0; border-radius: 6px; background: white; }"));
+        "QSlider::groove:horizontal { height: 3px; background: rgba(255,255,255,50); border-radius: 1px; }"
+        "QSlider::sub-page:horizontal { background: rgba(255,255,255,220); border-radius: 1px; }"
+        "QSlider::handle:horizontal { width: 10px; margin: -4px 0; border-radius: 5px; background: white; }"));
+    backButton_->hide();
+    forwardButton_->hide();
 
-    auto* transport = new QHBoxLayout();
-    transport->setSpacing(8);
-    transport->addWidget(backButton_);
-    transport->addWidget(previousButton_);
-    transport->addWidget(playButton_);
-    transport->addWidget(nextButton_);
-    transport->addWidget(forwardButton_);
-    auto* transportHost = new QWidget(controlsOverlay_);
-    transportHost->setLayout(transport);
-    transportHost->setAttribute(Qt::WA_TranslucentBackground);
-
-    auto* side = new QHBoxLayout();
-    side->setSpacing(6);
-    side->addWidget(muteButton_);
-    side->addWidget(volumeSlider_);
-    side->addWidget(fullscreenButton_);
-    auto* sideHost = new QWidget(controlsOverlay_);
-    sideHost->setLayout(side);
-    sideHost->setAttribute(Qt::WA_TranslucentBackground);
-
-    auto* bar = new QGridLayout();
-    bar->setHorizontalSpacing(12);
-    bar->addWidget(positionLabel_, 0, 0, Qt::AlignLeft | Qt::AlignVCenter);
-    bar->addWidget(transportHost, 0, 1, Qt::AlignCenter);
-    bar->addWidget(sideHost, 0, 2, Qt::AlignRight | Qt::AlignVCenter);
-    bar->setColumnStretch(0, 1);
-    bar->setColumnStretch(1, 0);
-    bar->setColumnStretch(2, 1);
+    auto* bar = new QHBoxLayout();
+    bar->setSpacing(4);
+    bar->addWidget(muteButton_);
+    bar->addWidget(volumeSlider_);
+    bar->addStretch(1);
+    bar->addWidget(previousButton_);
+    bar->addWidget(playButton_);
+    bar->addWidget(nextButton_);
+    bar->addStretch(1);
+    bar->addWidget(repeatButton_);
+    bar->addWidget(shuffleButton_);
+    bar->addWidget(popButton_);
+    bar->addWidget(fullscreenButton_);
     controlsLayout->addLayout(bar);
 
     // Image-viewer row (hidden until an image is opened; zoom controls).
@@ -627,8 +677,9 @@ PlayerWindow::PlayerWindow(
     connect(positionSlider_, &QSlider::valueChanged, this, [this](const int value) {
         if (seeking_.load()) {
             // Live position preview while dragging.
-            positionLabel_->setText(QStringLiteral("%1 / %2")
-                .arg(formatTime(value), formatTime(durationMs_.load())));
+            positionLabel_->setText(formatTime(value));
+            const auto left = std::max<std::int64_t>(0, durationMs_.load() - value);
+            timeLeftLabel_->setText(QString(QChar(0x2212)) + formatTime(left));
         }
     });
     connect(positionSlider_, &QSlider::sliderReleased, this, [this] {
@@ -648,6 +699,26 @@ PlayerWindow::PlayerWindow(
         settings.setValue(QStringLiteral("player/muted"), checked);
     });
     connect(fullscreenButton_, &QPushButton::clicked, this, [this] { toggleFullscreen(); });
+    connect(repeatButton_, &QPushButton::clicked, this, [this] {
+        repeatMode_ = (repeatMode_ + 1) % 3;
+        repeatWatch_.store(repeatMode_);
+        QSettings settings;
+        settings.setValue(QStringLiteral("player/repeat"), repeatMode_);
+        refreshTransportIcons();
+    });
+    connect(shuffleButton_, &QPushButton::clicked, this, [this] {
+        shuffle_ = !shuffle_;
+        QSettings settings;
+        settings.setValue(QStringLiteral("player/shuffle"), shuffle_);
+        refreshTransportIcons();
+    });
+    connect(popButton_, &QPushButton::clicked, this, [this] {
+        if (detached_) {
+            emit dockRequested();
+        } else {
+            emit detachRequested();
+        }
+    });
     connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
         [this](int) {
             const std::size_t bytes = static_cast<std::size_t>(
@@ -735,11 +806,21 @@ void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std
         imageMode_ = false;
         positionSlider_->show();
         positionLabel_->show();
+        timeLeftLabel_->show();
         playButton_->show();
-        backButton_->show();
-        forwardButton_->show();
+        previousButton_->show();
+        nextButton_->show();
         muteButton_->show();
         volumeSlider_->show();
+        if (repeatButton_ != nullptr) {
+            repeatButton_->show();
+        }
+        if (shuffleButton_ != nullptr) {
+            shuffleButton_->show();
+        }
+        if (popButton_ != nullptr) {
+            popButton_->show();
+        }
         zoomOutButton_->hide();
         zoomLabel_->hide();
         zoomInButton_->hide();
@@ -753,7 +834,8 @@ void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std
     positionSlider_->setValue(0);
     positionSlider_->setEnabled(true);
     playButton_->setEnabled(true);
-    positionLabel_->setText(QStringLiteral("0:00 / 0:00"));
+    positionLabel_->setText(QStringLiteral("0:00"));
+    timeLeftLabel_->setText(QString(QChar(0x2212)) + QStringLiteral("0:00"));
     errorShown_ = false;
     advanceArmed_ = false;
     ++playbackEpoch_;
@@ -853,10 +935,38 @@ void PlayerWindow::updatePopIcon() {
     if (popButton_ == nullptr) {
         return;
     }
-    popButton_->setIcon(QIcon(viewerIcon(detached_)));
+    popButton_->setIcon(makePlayerIcon(PlayerIcon::Pip, 18, Qt::white));
     popButton_->setToolTip(detached_
         ? QStringLiteral("Play in the main window")
-        : QStringLiteral("Open in a window"));
+        : QStringLiteral("Pop out"));
+}
+
+void PlayerWindow::refreshTransportIcons() {
+    if (repeatButton_ != nullptr) {
+        const bool active = repeatMode_ != 0;
+        const QColor ink = active ? QColor(255, 255, 255) : QColor(255, 255, 255, 120);
+        repeatButton_->setIcon(makePlayerIcon(
+            repeatMode_ == 2 ? PlayerIcon::RepeatOne : PlayerIcon::Repeat, 18, ink));
+        repeatButton_->setToolTip(repeatMode_ == 2
+            ? QStringLiteral("Repeat this video")
+            : (repeatMode_ == 1
+                ? QStringLiteral("Repeat all")
+                : QStringLiteral("Repeat off")));
+    }
+    if (shuffleButton_ != nullptr) {
+        shuffleButton_->setIcon(makePlayerIcon(
+            PlayerIcon::Shuffle, 18, shuffle_ ? QColor(255, 255, 255) : QColor(255, 255, 255, 120)));
+        shuffleButton_->setToolTip(shuffle_
+            ? QStringLiteral("Shuffle on")
+            : QStringLiteral("Shuffle"));
+    }
+    const bool roam = shuffle_ || repeatMode_ == 1;
+    if (previousButton_ != nullptr) {
+        previousButton_->setEnabled(roam || clipHasPrevious_);
+    }
+    if (nextButton_ != nullptr) {
+        nextButton_->setEnabled(roam || clipHasNext_);
+    }
 }
 
 void PlayerWindow::prepareDock() {
@@ -1216,7 +1326,16 @@ void PlayerWindow::workerLoop() {
         return;
     }
 
+    loopFrames_.clear();
+    loopPcm_.clear();
+    loopCapture_ = true;
+    stableFrameW_ = 0;
+    stableFrameH_ = 0;
+    stableFrameRun_ = 0;
     durationMs_.store(decoder_.duration_ms());
+    if (durationMs_.load() > 1500) {
+        loopCapture_ = false;
+    }
     videoWidth_.store(decoder_.video_width());
     videoHeight_.store(decoder_.video_height());
     // A still-image codec (png/mjpeg/...) is opened as an image viewer:
@@ -1260,23 +1379,26 @@ void PlayerWindow::workerLoop() {
             // asked to jump, not to hear the skipped part.
             std::int64_t shown_pts = target;
             QImage shown;
+            bool haveShown = false;
             for (int guard = 0; guard < 120; ++guard) {
                 (void)decoder_.take_audio_samples();
                 DecodedFrame frame;
                 if (!decoder_.decode_next_video_frame(&frame)) {
                     break;
                 }
-                if (frame.pts_ms >= target - 250) {
-                    shown = frame.image;
-                    shown_pts = frame.pts_ms;
-                    if (frame.pts_ms >= target) {
-                        break;
-                    }
+                if (frame.pts_ms < target - 250 || !frameSizeMatches(frame)) {
+                    continue;
+                }
+                shown = frame.image;
+                shown_pts = frame.pts_ms;
+                haveShown = true;
+                if (frame.pts_ms >= target) {
+                    break;
                 }
             }
             last_pts = shown_pts;
             playheadMs_.store(shown_pts);
-            if (!shown.isNull()) {
+            if (haveShown && !shown.isNull()) {
                 publishFrame(shown, shown_pts);
             }
             continue;
@@ -1314,6 +1436,47 @@ void PlayerWindow::workerLoop() {
         }
         DecodedFrame frame;
         if (!decoder_.decode_next_video_frame(&frame)) {
+            // Repeating this file must not open it again. A short clip replays
+            // the frames already decoded; anything longer seeks back, served
+            // from the pinned start of the stream so it does not decrypt again.
+            if (repeatWatch_.load() == 2 && !imageModeFlag_.load() && !quit_.load()) {
+                if (loopCapture_ && !loopFrames_.empty()) {
+                    loopCapture_ = false;
+                    replayCachedLoop();
+                    if (quit_.load()) {
+                        break;
+                    }
+                    if (seekRequested_.load()) {
+                        continue;
+                    }
+                    if (repeatWatch_.load() != 2) {
+                        ended_.store(true);
+                        playing_.store(false);
+                        continue;
+                    }
+                }
+                if (repeatWatch_.load() == 2 && !seekRequested_.load()) {
+                    if (AudioSink* sink = audioSinkAtomic_.load()) {
+                        sink->clear();
+                    }
+                    playheadMs_.store(0);
+                    ended_.store(false);
+                    (void)decoder_.seek_to(0);
+                    clock_base_ms = 0;
+                    clock_start_elapsed = clock.elapsed();
+                    last_pts = 0;
+                    (void)decoder_.take_audio_samples();
+                    DecodedFrame first;
+                    if (decoder_.decode_next_video_frame(&first)) {
+                        last_pts = first.pts_ms;
+                        playheadMs_.store(last_pts);
+                        if (frameSizeMatches(first)) {
+                            publishFrame(first.image, last_pts);
+                        }
+                    }
+                    continue;
+                }
+            }
             // EOF: park until the user seeks or plays again.
             ended_.store(true);
             playing_.store(false);
@@ -1322,7 +1485,10 @@ void PlayerWindow::workerLoop() {
         }
         last_pts = frame.pts_ms;
         playheadMs_.store(last_pts);
-        publishFrame(frame.image, last_pts);
+        if (frameSizeMatches(frame)) {
+            publishFrame(frame.image, last_pts);
+            noteLoopFrame(frame.image, last_pts);
+        }
     }
     decoder_.close();
 }
@@ -1357,6 +1523,115 @@ void PlayerWindow::publishFrame(const QImage& image, const std::int64_t pts_ms) 
     frameDirty_.store(true);
 }
 
+void PlayerWindow::restartFromStart() {
+    if (imageMode_ || imageModeFlag_.load()) {
+        return;
+    }
+    advanceArmed_ = false;
+    doSeek(0);
+    playing_.store(true);
+    playIconPlaying_ = true;
+    if (playButton_ != nullptr) {
+        playButton_->setIcon(makePlayerIcon(PlayerIcon::Pause, 26, Qt::white));
+    }
+    rebaseRequested_.store(true);
+    if (audioOutput_ != nullptr) {
+        audioOutput_->resume();
+    }
+}
+
+void PlayerWindow::dropLoopCapture() {
+    loopCapture_ = false;
+    loopFrames_.clear();
+    loopPcm_.clear();
+}
+
+bool PlayerWindow::frameSizeMatches(const DecodedFrame& frame) {
+    const int width = frame.source_width;
+    const int height = frame.source_height;
+    if (width <= 0 || height <= 0) {
+        return true;
+    }
+    // The size is not settled yet. Keep showing frames, and lock onto the
+    // size that actually repeats. A loop seek can then ignore the odd frames
+    // the decoder emits before it is back to that size.
+    if (stableFrameRun_ < 3) {
+        if (width == stableFrameW_ && height == stableFrameH_) {
+            ++stableFrameRun_;
+        } else {
+            stableFrameW_ = width;
+            stableFrameH_ = height;
+            stableFrameRun_ = 1;
+        }
+        return true;
+    }
+    return width == stableFrameW_ && height == stableFrameH_;
+}
+
+void PlayerWindow::noteLoopFrame(const QImage& image, const std::int64_t ptsMs) {
+    if (!loopCapture_ || image.isNull()) {
+        return;
+    }
+    if (ptsMs > 1500 || static_cast<int>(loopFrames_.size()) >= 48) {
+        dropLoopCapture();
+        return;
+    }
+    loopFrames_.push_back(LoopPicture{image, ptsMs});
+}
+
+void PlayerWindow::noteLoopAudio(const std::int16_t* samples, const std::size_t count) {
+    if (!loopCapture_ || samples == nullptr || count == 0U) {
+        return;
+    }
+    // About two seconds of stereo. Past that, this is not a short clip.
+    constexpr std::size_t kMaxSamples = 48000U * 2U * 2U;
+    if (loopPcm_.size() + count > kMaxSamples) {
+        dropLoopCapture();
+        return;
+    }
+    loopPcm_.insert(loopPcm_.end(), samples, samples + count);
+}
+
+void PlayerWindow::replayCachedLoop() {
+    const std::int64_t span = std::max<std::int64_t>(
+        loopFrames_.back().ptsMs + 40, durationMs_.load());
+    while (!quit_.load() && repeatWatch_.load() == 2 && !seekRequested_.load()) {
+        if (AudioSink* sink = audioSinkAtomic_.load()) {
+            sink->clear();
+            if (!loopPcm_.empty()) {
+                sink->append(loopPcm_.data(), loopPcm_.size());
+            }
+        }
+        QElapsedTimer clock;
+        clock.start();
+        std::int64_t origin = 0;
+        bool frozen = false;
+        std::size_t index = 0U;
+        playheadMs_.store(0);
+        while (!quit_.load() && repeatWatch_.load() == 2 && !seekRequested_.load()) {
+            if (!playing_.load()) {
+                frozen = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (frozen) {
+                origin = clock.elapsed() - playheadMs_.load();
+                frozen = false;
+            }
+            const std::int64_t now = std::max<std::int64_t>(0, clock.elapsed() - origin);
+            while (index < loopFrames_.size() && loopFrames_[index].ptsMs <= now) {
+                publishFrame(loopFrames_[index].image, loopFrames_[index].ptsMs);
+                playheadMs_.store(loopFrames_[index].ptsMs);
+                ++index;
+            }
+            if (now >= span) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+}
+
 void PlayerWindow::feedAudio() {
     AudioSink* sink = audioSinkAtomic_.load();
     if (sink == nullptr) {
@@ -1364,6 +1639,7 @@ void PlayerWindow::feedAudio() {
     }
     auto samples = decoder_.take_audio_samples();
     if (!samples.empty()) {
+        noteLoopAudio(samples.data(), samples.size());
         sink->append(samples.data(), samples.size());
     }
     // Backpressure: never let the sink buffer more than ~1 s of audio while
@@ -1413,7 +1689,7 @@ void PlayerWindow::togglePlayPause() {
     playing_.store(!playing_.load());
     playIconPlaying_ = playing_.load();
     playButton_->setIcon(makePlayerIcon(
-        playing_.load() ? PlayerIcon::Pause : PlayerIcon::Play, 22, Qt::white));
+        playing_.load() ? PlayerIcon::Pause : PlayerIcon::Play, 26, Qt::white));
     updateCenterButton();
     if (playing_.load()) {
         rebaseRequested_.store(true);
@@ -1510,8 +1786,11 @@ void PlayerWindow::layoutChrome() {
     const int w = surface_->width();
     const int h = surface_->height();
     topOverlay_->setGeometry(0, 0, w, 56);
-    const int controlsHeight = imageMode_ ? 132 : 108;
-    controlsOverlay_->setGeometry(0, std::max(0, h - controlsHeight), w, controlsHeight);
+    const int controlsHeight = imageMode_ ? 64 : 96;
+    const int cardWidth = std::min(std::max(320, w - 32), 820);
+    const int cardX = std::max(0, (w - cardWidth) / 2);
+    const int cardY = std::max(8, h - controlsHeight - 16);
+    controlsOverlay_->setGeometry(cardX, cardY, std::min(cardWidth, w), controlsHeight);
     centerPlayButton_->move((w - centerPlayButton_->width()) / 2,
         (h - centerPlayButton_->height()) / 2);
 }
@@ -1523,8 +1802,7 @@ void PlayerWindow::updateCenterButton() {
         centerPlayButton_->hide();
         return;
     }
-    const bool show = !playing_.load() || ended_.load();
-    centerPlayButton_->setVisible(show && chromeVisible_);
+    centerPlayButton_->hide();
 }
 
 // Switches the chrome to the image viewer: playback controls hidden, zoom
@@ -1533,12 +1811,21 @@ void PlayerWindow::enterImageMode() {
     imageMode_ = true;
     positionSlider_->hide();
     positionLabel_->hide();
+    timeLeftLabel_->hide();
     playButton_->hide();
+    previousButton_->hide();
+    nextButton_->hide();
     backButton_->hide();
     forwardButton_->hide();
     muteButton_->hide();
     volumeSlider_->hide();
     cacheCombo_->hide();
+    if (repeatButton_ != nullptr) {
+        repeatButton_->hide();
+    }
+    if (shuffleButton_ != nullptr) {
+        shuffleButton_->hide();
+    }
     zoomOutButton_->show();
     zoomLabel_->show();
     zoomInButton_->show();
@@ -1665,7 +1952,7 @@ void PlayerWindow::tick() {
         if (playing != playIconPlaying_) {
             playIconPlaying_ = playing;
             playButton_->setIcon(makePlayerIcon(
-                playing ? PlayerIcon::Pause : PlayerIcon::Play, 22, Qt::white));
+                playing ? PlayerIcon::Pause : PlayerIcon::Play, 26, Qt::white));
         }
     }
 
@@ -1766,7 +2053,8 @@ void PlayerWindow::tick() {
         if (!advanceArmed_ && !imageMode_ && !imageModeFlag_.load()) {
             advanceArmed_ = true;
             const int epoch = playbackEpoch_;
-            QTimer::singleShot(500, this, [this, epoch] {
+            const int waitMs = repeatMode_ == 1 ? 0 : 500;
+            QTimer::singleShot(waitMs, this, [this, epoch] {
                 if (epoch != playbackEpoch_ || !ended_.load() || imageMode_) {
                     return;
                 }
@@ -1796,12 +2084,9 @@ void PlayerWindow::presentClip(
             indexLabel_->hide();
         }
     }
-    if (previousButton_ != nullptr) {
-        previousButton_->setEnabled(hasPrevious);
-    }
-    if (nextButton_ != nullptr) {
-        nextButton_->setEnabled(hasNext);
-    }
+    clipHasPrevious_ = hasPrevious;
+    clipHasNext_ = hasNext;
+    refreshTransportIcons();
 }
 
 QString PlayerWindow::formatTime(const std::int64_t ms) const {
@@ -1821,8 +2106,11 @@ QString PlayerWindow::formatTime(const std::int64_t ms) const {
 }
 
 void PlayerWindow::updatePositionLabel() {
-    positionLabel_->setText(QStringLiteral("%1 / %2")
-        .arg(formatTime(playheadMs_.load()), formatTime(durationMs_.load())));
+    const auto position = playheadMs_.load();
+    const auto duration = durationMs_.load();
+    positionLabel_->setText(formatTime(position));
+    const auto left = std::max<std::int64_t>(0, duration - position);
+    timeLeftLabel_->setText(QString(QChar(0x2212)) + formatTime(left));
 }
 
 } // namespace videovault::app

@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -20,13 +22,16 @@
 #include <QAction>
 #include <QAbstractButton>
 #include <QButtonGroup>
+#include <QBuffer>
 #include <QApplication>
 #include <QImage>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSignalBlocker>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -35,6 +40,7 @@
 #include <QDropEvent>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QFormLayout>
@@ -49,6 +55,8 @@
 #include <QKeyEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QLineEdit>
 #include <QDateTime>
 #include <QListView>
@@ -76,6 +84,8 @@
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QTimer>
+#include <QRandomGenerator>
+#include <QAbstractSlider>
 #include <QUrl>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -108,6 +118,8 @@ struct MainWindow::GalleryCache {
     std::unordered_map<std::int64_t, QPixmap> thumbs;
     std::unordered_map<std::int64_t, core::MediaInfo> media;
     std::unordered_map<std::int64_t, FileIdentity> kinds;
+    // PDFs whose first page was already read or saved this session.
+    std::unordered_set<std::int64_t> pdfThumbs;
 };
 
 namespace {
@@ -305,14 +317,21 @@ FileIdentity identityFromBytes(const unsigned char* data, const std::size_t size
         return named(data[1] == 0xF1 || data[1] == 0xF9 ? "Aac" : "Mp3", 2);
     }
     if (size >= 12U && bytesAt(data, size, 4, "ftyp")) {
-        const QString brand = QString::fromLatin1(reinterpret_cast<const char*>(data + 8), 4).trimmed();
-        const QString audioBrands = QStringLiteral("M4A M4B M4P F4A F4B");
-        if (audioBrands.contains(brand, Qt::CaseInsensitive)) {
-            FileIdentity identity;
-            identity.label = QStringLiteral("M4a");
-            identity.route = 2;
-            return identity;
+        const auto audioBrand = [](const unsigned char* brand) {
+            return std::memcmp(brand, "M4A ", 4) == 0 || std::memcmp(brand, "M4B ", 4) == 0
+                || std::memcmp(brand, "M4P ", 4) == 0 || std::memcmp(brand, "F4A ", 4) == 0
+                || std::memcmp(brand, "F4B ", 4) == 0;
+        };
+        if (audioBrand(data + 8)) {
+            return named("M4a", 2);
         }
+        const std::size_t brandEnd = std::min(size, static_cast<std::size_t>(80));
+        for (std::size_t i = 16; i + 4 <= brandEnd; i += 4) {
+            if (audioBrand(data + i)) {
+                return named("M4a", 2);
+            }
+        }
+        const QString brand = QString::fromLatin1(reinterpret_cast<const char*>(data + 8), 4).trimmed();
         FileIdentity identity;
         identity.label = brand.isEmpty() ? QStringLiteral("Mp4") : brand.left(1).toUpper() + brand.mid(1).toLower();
         identity.route = 1;
@@ -410,7 +429,37 @@ bool isTextFileName(const QString& name) {
     return kText.contains(suffix);
 }
 
+QString noteFileName(QString name) {
+    name = name.trimmed();
+    name.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("_"));
+    while (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' '))) {
+        name.chop(1);
+    }
+    if (name.isEmpty() || name == QLatin1String("..")) {
+        name = QStringLiteral("Note.txt");
+    }
+    if (QFileInfo(name).suffix().isEmpty()) {
+        name += QStringLiteral(".txt");
+    }
+    return name;
+}
+
+struct LoadedText {
+    QString body;
+    bool truncated{false};
+};
+
+struct TextSaveOutcome {
+    bool ok{false};
+    bool already{false};
+    bool removed{false};
+    std::int64_t id{0};
+    qlonglong size{0};
+    QString error;
+};
+
 FileIdentity identityFromName(const QString& name);
+bool isAudioFileName(const QString& name);
 
 FileIdentity identityForVideo(
     const std::shared_ptr<core::Vault>& vault,
@@ -421,6 +470,11 @@ FileIdentity identityForVideo(
     auto bytes = vault->read_video_range(video_id, 0U, 560U);
     if (bytes && !bytes.value().empty()) {
         identity = identityFromBytes(bytes.value().data(), bytes.value().size());
+    }
+    // An .m4a (and the other audio names) often carries a generic MP4 brand.
+    // The extension is what puts it in the music player.
+    if (isAudioFileName(name)) {
+        return identityFromName(name);
     }
     // Magic wins when it recognizes the bytes. The name is only the fallback.
     if (identity.label == QStringLiteral("File")) {
@@ -570,6 +624,16 @@ QString vaultErrorText(const core::VaultError& error) {
         return QString::fromStdString(error.technical_detail);
     }
     return QString::fromUtf8(core::user_message(error.code).data());
+}
+
+qlonglong pixelCount(const std::uint32_t width, const std::uint32_t height) {
+    const auto product =
+        static_cast<unsigned long long>(width) * static_cast<unsigned long long>(height);
+    constexpr auto limit = static_cast<unsigned long long>(std::numeric_limits<qlonglong>::max());
+    if (product > limit) {
+        return std::numeric_limits<qlonglong>::max();
+    }
+    return static_cast<qlonglong>(product);
 }
 
 void addLibraryEntry(
@@ -797,11 +861,15 @@ public:
             painter->restore();
             return;
         }
-        if (route == 3 || isPdfFileName(fileName)) {
+        const bool pdfFile = route == 3 || isPdfFileName(fileName);
+        const bool textFile = route == 4 || isTextFileName(fileName);
+        if (pdfFile || textFile) {
             QString title = fileName;
-            const int dot = title.lastIndexOf(QLatin1Char('.'));
-            if (dot > 0) {
-                title = title.left(dot);
+            if (pdfFile) {
+                const int dot = title.lastIndexOf(QLatin1Char('.'));
+                if (dot > 0) {
+                    title = title.left(dot);
+                }
             }
             const QRect shade(tile.left(), tile.bottom() - 36, tile.width(), 36);
             QLinearGradient fade(shade.topLeft(), shade.bottomLeft());
@@ -1121,10 +1189,18 @@ public:
         bar->addWidget(back_);
         bar->addSpacing(8);
         bar->addWidget(title_, 1);
+        save_ = new QPushButton(QStringLiteral("Save"), this);
+        save_->setCursor(Qt::PointingHandCursor);
+        save_->setStyleSheet(QStringLiteral(
+            "QPushButton { color: white; background: #3390ec; border: none; border-radius: 8px;"
+            " font: 600 13px \"Segoe UI\"; padding: 6px 14px; }"
+            "QPushButton:disabled { background: #2c2c2e; color: #8e8e93; }"));
+        bar->addWidget(save_);
         column->addLayout(bar);
         editor_ = new QPlainTextEdit(this);
         editor_->setReadOnly(true);
-        editor_->setUndoRedoEnabled(false);
+        editor_->setUndoRedoEnabled(true);
+        editor_->setPlaceholderText(QStringLiteral("Start writing…"));
         editor_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
         editor_->setStyleSheet(QStringLiteral(
             "QPlainTextEdit { background: #161618; color: #f2f2f7; border: none; border-radius: 12px;"
@@ -1135,20 +1211,40 @@ public:
 
     QPushButton* backButton() const { return back_; }
 
+    QPushButton* saveButton() const { return save_; }
+
     int bump() { return ++generation_; }
 
     int generation() const { return generation_; }
 
-    void showDocument(const QString& title, const QString& body) {
+    void showDocument(const QString& title, const QString& body, const bool editable) {
         title_->setText(title);
+        saved_ = body;
+        editor_->setReadOnly(!editable);
+        editor_->setUndoRedoEnabled(editable);
+        save_->setVisible(editable);
+        save_->setEnabled(editable);
         editor_->setPlainText(body);
         editor_->moveCursor(QTextCursor::Start);
     }
 
+    QString documentText() const { return editor_->toPlainText(); }
+
+    bool dirty() const { return editor_->toPlainText() != saved_; }
+
+    void markSaved() { saved_ = editor_->toPlainText(); }
+
+    void setBusy(const bool busy) {
+        save_->setEnabled(!busy && save_->isVisible());
+        editor_->setReadOnly(busy || !save_->isVisible());
+    }
+
 private:
     QPushButton* back_{nullptr};
+    QPushButton* save_{nullptr};
     QLabel* title_{nullptr};
     QPlainTextEdit* editor_{nullptr};
+    QString saved_;
     int generation_{0};
 };
 
@@ -1246,6 +1342,32 @@ MainWindow::MainWindow(QWidget* parent)
             finishBatch(ok, message, count);
         });
     batchThread_->start();
+    importServer_ = new QLocalServer(this);
+    connect(importServer_, &QLocalServer::newConnection, this, [this] {
+        while (QLocalSocket* socket = importServer_->nextPendingConnection()) {
+            connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
+                const QString text = QString::fromUtf8(socket->readAll());
+                socket->deleteLater();
+                QStringList paths;
+                const auto lines = text.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+                for (const QString& line : lines) {
+                    if (line != QStringLiteral("ACTIVATE")) {
+                        paths.push_back(line);
+                    }
+                }
+                if (paths.isEmpty()) {
+                    showNormal();
+                    raise();
+                    activateWindow();
+                } else {
+                    acceptExternalPaths(paths);
+                }
+            });
+        }
+    });
+    const QString inbox = QStringLiteral("MegaVaultProtect.inbox");
+    QLocalServer::removeServer(inbox);
+    importServer_->listen(inbox);
     qApp->installEventFilter(this);
 
     buildInterface();
@@ -1301,6 +1423,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (galleryStack_ != nullptr && watched == galleryStack_->parentWidget()
         && event->type() == QEvent::Resize) {
         layoutLibraryChrome();
+    }
+    if (event->type() == QEvent::Resize
+        && ((iconList_ != nullptr && watched == iconList_->viewport())
+            || (detailsTree_ != nullptr && watched == detailsTree_->viewport()))) {
+        decorateVisible();
     }
     if (event->type() == QEvent::KeyPress && vault_ && vault_->is_unlocked()) {
         const auto* key = static_cast<QKeyEvent*>(event);
@@ -1790,7 +1917,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     importFolderButton_ = new QPushButton(QStringLiteral("Folder"), toolbar);
     importFolderButton_->setProperty("quiet", true);
     importFolderButton_->setToolTip(QStringLiteral(
-        "Import every media file from a folder. You can also drop files on the library."));
+        "Import a folder, including the folders inside it. You can also drop a folder on the library, "
+        "or use Send to → Mega Vault Protect in Explorer."));
+    auto* newNoteButton = new QPushButton(QStringLiteral("New note"), toolbar);
+    newNoteButton->setProperty("quiet", true);
+    newNoteButton->setToolTip(QStringLiteral("Create a text note in this folder"));
     newFolderButton_ = new QPushButton(QStringLiteral("New folder"), toolbar);
     newFolderButton_->setProperty("quiet", true);
     newFolderButton_->setToolTip(QStringLiteral(
@@ -1820,7 +1951,13 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addStretch(1);
     titleRow->addWidget(importButton_);
     titleRow->addWidget(importFolderButton_);
+    titleRow->addWidget(newNoteButton);
+    auto* packageButton = new QPushButton(QStringLiteral("Package"), toolbar);
+    packageButton->setProperty("quiet", true);
+    packageButton->setToolTip(QStringLiteral(
+        "Export items or a folder as an encrypted package, or import one"));
     titleRow->addWidget(newFolderButton_);
+    titleRow->addWidget(packageButton);
     titleRow->addWidget(shareButton_);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
@@ -1891,7 +2028,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     detailsTree_->viewport()->installEventFilter(this);
     detailsTree_->installEventFilter(this);
     detailsTree_->header()->setStretchLastSection(true);
-    detailsTree_->setSortingEnabled(true);
+    detailsTree_->setSortingEnabled(false);
+    detailsTree_->header()->setSectionsClickable(true);
+    detailsTree_->header()->setSortIndicatorShown(true);
+    connect(detailsTree_->header(), &QHeaderView::sectionClicked, this, [this](const int section) {
+        if (section >= 0 && section <= 6) {
+            applyGallerySort(section);
+        }
+    });
     iconList_ = new IconGrid(page);
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setItemDelegate(new InstagramDelegate(iconList_));
@@ -1909,6 +2053,12 @@ QWidget* MainWindow::buildUnlockedPage() {
     iconList_->setDefaultDropAction(Qt::TargetMoveAction);
     iconList_->viewport()->installEventFilter(this);
     iconList_->installEventFilter(this);
+    connect(iconList_->verticalScrollBar(), &QAbstractSlider::valueChanged, this, [this](int) {
+        decorateVisible();
+    });
+    connect(detailsTree_->verticalScrollBar(), &QAbstractSlider::valueChanged, this, [this](int) {
+        decorateVisible();
+    });
 
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
@@ -1957,7 +2107,21 @@ QWidget* MainWindow::buildUnlockedPage() {
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
     connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
     connect(importFolderButton_, &QPushButton::clicked, this, [this] { beginImportFolder(); });
+    connect(newNoteButton, &QPushButton::clicked, this, [this] { beginNewNote(); });
     connect(newFolderButton_, &QPushButton::clicked, this, [this] { beginNewFolder(); });
+    connect(packageButton, &QPushButton::clicked, this, [this, packageButton] {
+        QMenu menu(this);
+        menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+        menu.setAttribute(Qt::WA_TranslucentBackground);
+        QAction* importAction = menu.addAction(QStringLiteral("Import package…"));
+        QAction* exportAction = menu.addAction(QStringLiteral("Export package…"));
+        QAction* chosen = menu.exec(packageButton->mapToGlobal(QPoint(0, packageButton->height())));
+        if (chosen == importAction) {
+            beginImportPackage();
+        } else if (chosen == exportAction) {
+            beginExportPackage(0);
+        }
+    });
     connect(shareButton_, &QPushButton::clicked, this, [this] { openShare(); });
     connect(settingsButton_, &QPushButton::clicked, this, [this] { openSettings(); });
     connect(viewModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -2131,6 +2295,7 @@ void MainWindow::setViewMode(const int index) {
     iconList_->scrollToTop();
     iconList_->doItemsLayout();
     layoutLibraryChrome();
+    decorateVisible();
     if (isVisible() && galleryStack_ != nullptr) {
         fadeInWidget(galleryStack_->currentWidget());
     }
@@ -2165,103 +2330,219 @@ void MainWindow::applyGallerySort(const int key) {
     sortGalleryItems();
 }
 
-void MainWindow::sortGalleryItems() {
-    if (iconList_ == nullptr) {
+void MainWindow::showGallerySortIndicator() {
+    if (detailsTree_ == nullptr) {
         return;
     }
-    QList<qlonglong> selected;
-    for (auto* item : iconList_->selectedItems()) {
-        selected.append(item->data(Qt::UserRole).toLongLong());
+    auto* header = detailsTree_->header();
+    header->setSectionsClickable(true);
+    header->setSortIndicatorShown(true);
+    const int column = std::clamp(sortKey_, 0, std::max(0, detailsTree_->columnCount() - 1));
+    header->blockSignals(true);
+    header->setSortIndicator(column, sortAscending_ ? Qt::AscendingOrder : Qt::DescendingOrder);
+    header->blockSignals(false);
+}
+
+void MainWindow::scheduleGallerySort() {
+    if (gallerySortQueued_) {
+        return;
     }
-    const qlonglong currentId = iconList_->currentItem() == nullptr
-        ? -1
-        : iconList_->currentItem()->data(Qt::UserRole).toLongLong();
-    QList<QListWidgetItem*> items;
-    while (iconList_->count() > 0) {
-        items.append(iconList_->takeItem(0));
-    }
-    const int key = sortKey_;
-    const bool ascending = sortAscending_;
-    std::stable_sort(items.begin(), items.end(), [key, ascending](QListWidgetItem* left, QListWidgetItem* right) {
-        auto rank = [](QListWidgetItem* item) {
-            const int kind = item->data(Qt::UserRole + 12).toInt();
-            if (kind == 2 || kind == kKindPhone) {
-                return 0;
-            }
-            return kind == 1 ? 1 : 2;
-        };
-        const int leftRank = rank(left);
-        const int rightRank = rank(right);
-        if (leftRank != rightRank) {
-            return leftRank < rightRank;
-        }
-        auto textCompare = [](const QString& a, const QString& b) {
-            return a.compare(b, Qt::CaseInsensitive);
-        };
-        auto numberCompare = [](const qlonglong a, const qlonglong b) {
-            return a < b ? -1 : (a > b ? 1 : 0);
-        };
-        int compared = 0;
-        switch (key) {
-        case 1:
-            compared = numberCompare(
-                left->data(Qt::UserRole + 6).toLongLong(),
-                right->data(Qt::UserRole + 6).toLongLong());
-            break;
-        case 2:
-            compared = numberCompare(
-                left->data(Qt::UserRole + 7).toLongLong(),
-                right->data(Qt::UserRole + 7).toLongLong());
-            break;
-        case 3:
-            compared = numberCompare(
-                left->data(Qt::UserRole + 8).toLongLong(),
-                right->data(Qt::UserRole + 8).toLongLong());
-            break;
-        case 4:
-            compared = textCompare(
-                left->data(Qt::UserRole + 11).toString(),
-                right->data(Qt::UserRole + 11).toString());
-            break;
-        case 5:
-            compared = textCompare(
-                left->data(Qt::UserRole + 2).toString(),
-                right->data(Qt::UserRole + 2).toString());
-            break;
-        case 6:
-            compared = numberCompare(
-                left->data(Qt::UserRole + 9).toLongLong(),
-                right->data(Qt::UserRole + 9).toLongLong());
-            break;
-        default:
-            compared = textCompare(
-                left->data(Qt::UserRole + 1).toString(),
-                right->data(Qt::UserRole + 1).toString());
-            break;
-        }
-        if (compared == 0) {
-            compared = numberCompare(
-                left->data(Qt::UserRole).toLongLong(),
-                right->data(Qt::UserRole).toLongLong());
-        }
-        if (!ascending) {
-            compared = -compared;
-        }
-        return compared < 0;
+    gallerySortQueued_ = true;
+    QTimer::singleShot(60, this, [this] {
+        gallerySortQueued_ = false;
+        sortGalleryItems();
     });
-    QListWidgetItem* currentItem = nullptr;
-    for (auto* item : items) {
-        iconList_->addItem(item);
-        const qlonglong id = item->data(Qt::UserRole).toLongLong();
-        if (selected.contains(id)) {
-            item->setSelected(true);
+}
+
+void MainWindow::sortGalleryItems() {
+    if (iconList_ == nullptr || detailsTree_ == nullptr) {
+        return;
+    }
+    if (sortingGallery_) {
+        gallerySortAgain_ = true;
+        return;
+    }
+    sortingGallery_ = true;
+    const bool iconUpdates = iconList_->updatesEnabled();
+    const bool treeUpdates = detailsTree_->updatesEnabled();
+    iconList_->setUpdatesEnabled(false);
+    detailsTree_->setUpdatesEnabled(false);
+    detailsTree_->setSortingEnabled(false);
+
+    {
+        QSignalBlocker blockList(iconList_);
+        QSignalBlocker blockListSelection(iconList_->selectionModel());
+        QSignalBlocker blockTree(detailsTree_);
+        QSignalBlocker blockTreeSelection(detailsTree_->selectionModel());
+
+        QList<qlonglong> selected;
+        for (auto* item : iconList_->selectedItems()) {
+            if (item != nullptr) {
+                selected.append(item->data(Qt::UserRole).toLongLong());
+            }
         }
-        if (id == currentId) {
-            currentItem = item;
+        const qlonglong currentId = iconList_->currentItem() == nullptr
+            ? -1
+            : iconList_->currentItem()->data(Qt::UserRole).toLongLong();
+        iconList_->setCurrentItem(nullptr);
+        detailsTree_->setCurrentItem(nullptr);
+
+        QList<QListWidgetItem*> items;
+        items.reserve(iconList_->count());
+        while (iconList_->count() > 0) {
+            items.append(iconList_->takeItem(iconList_->count() - 1));
+        }
+        std::reverse(items.begin(), items.end());
+
+        const int key = sortKey_;
+        const bool ascending = sortAscending_;
+        std::stable_sort(items.begin(), items.end(), [key, ascending](QListWidgetItem* left, QListWidgetItem* right) {
+            if (left == nullptr || right == nullptr) {
+                return left == nullptr && right != nullptr;
+            }
+            auto rank = [](QListWidgetItem* item) {
+                const int kind = item->data(Qt::UserRole + 12).toInt();
+                if (kind == 2 || kind == kKindPhone) {
+                    return 0;
+                }
+                return kind == 1 ? 1 : 2;
+            };
+            const int leftRank = rank(left);
+            const int rightRank = rank(right);
+            if (leftRank != rightRank) {
+                return leftRank < rightRank;
+            }
+            auto textCompare = [](const QString& a, const QString& b) {
+                return a.compare(b, Qt::CaseInsensitive);
+            };
+            auto numberCompare = [](const qlonglong a, const qlonglong b) {
+                return a < b ? -1 : (a > b ? 1 : 0);
+            };
+            int compared = 0;
+            switch (key) {
+            case 1:
+                compared = numberCompare(
+                    left->data(Qt::UserRole + 6).toLongLong(),
+                    right->data(Qt::UserRole + 6).toLongLong());
+                break;
+            case 2:
+                compared = numberCompare(
+                    left->data(Qt::UserRole + 7).toLongLong(),
+                    right->data(Qt::UserRole + 7).toLongLong());
+                break;
+            case 3:
+                compared = numberCompare(
+                    left->data(Qt::UserRole + 8).toLongLong(),
+                    right->data(Qt::UserRole + 8).toLongLong());
+                break;
+            case 4:
+                compared = textCompare(
+                    left->data(Qt::UserRole + 11).toString(),
+                    right->data(Qt::UserRole + 11).toString());
+                break;
+            case 5:
+                compared = textCompare(
+                    left->data(Qt::UserRole + 2).toString(),
+                    right->data(Qt::UserRole + 2).toString());
+                break;
+            case 6:
+                compared = numberCompare(
+                    left->data(Qt::UserRole + 9).toLongLong(),
+                    right->data(Qt::UserRole + 9).toLongLong());
+                break;
+            default:
+                compared = textCompare(
+                    left->data(Qt::UserRole + 1).toString(),
+                    right->data(Qt::UserRole + 1).toString());
+                break;
+            }
+            if (compared == 0) {
+                compared = numberCompare(
+                    left->data(Qt::UserRole).toLongLong(),
+                    right->data(Qt::UserRole).toLongLong());
+            }
+            if (!ascending) {
+                compared = -compared;
+            }
+            return compared < 0;
+        });
+
+        struct RowKey {
+            int kind{0};
+            qlonglong id{0};
+            bool operator==(const RowKey& other) const {
+                return kind == other.kind && id == other.id;
+            }
+        };
+        struct RowKeyHash {
+            std::size_t operator()(const RowKey& key) const {
+                return std::hash<qlonglong>{}(key.id) ^ (static_cast<std::size_t>(key.kind) << 1);
+            }
+        };
+        std::unordered_map<RowKey, QTreeWidgetItem*, RowKeyHash> treeById;
+        QList<QTreeWidgetItem*> treeExtras;
+        treeById.reserve(static_cast<std::size_t>(std::max(0, detailsTree_->topLevelItemCount())));
+        while (detailsTree_->topLevelItemCount() > 0) {
+            auto* treeItem = detailsTree_->takeTopLevelItem(detailsTree_->topLevelItemCount() - 1);
+            if (treeItem == nullptr) {
+                continue;
+            }
+            const RowKey row{
+                treeItem->data(0, Qt::UserRole + 12).toInt(),
+                treeItem->data(0, Qt::UserRole).toLongLong()};
+            const auto inserted = treeById.emplace(row, treeItem);
+            if (!inserted.second) {
+                treeExtras.append(treeItem);
+            }
+        }
+
+        QListWidgetItem* currentItem = nullptr;
+        QTreeWidgetItem* currentTree = nullptr;
+        for (auto* item : items) {
+            if (item == nullptr) {
+                continue;
+            }
+            iconList_->addItem(item);
+            const qlonglong id = item->data(Qt::UserRole).toLongLong();
+            QTreeWidgetItem* treeItem = nullptr;
+            const auto found = treeById.find(RowKey{item->data(Qt::UserRole + 12).toInt(), id});
+            if (found != treeById.end()) {
+                treeItem = found->second;
+                treeById.erase(found);
+                detailsTree_->addTopLevelItem(treeItem);
+            }
+            if (selected.contains(id)) {
+                item->setSelected(true);
+                if (treeItem != nullptr) {
+                    treeItem->setSelected(true);
+                }
+            }
+            if (id == currentId) {
+                currentItem = item;
+                currentTree = treeItem;
+            }
+        }
+        for (auto& entry : treeById) {
+            detailsTree_->addTopLevelItem(entry.second);
+        }
+        for (auto* extra : treeExtras) {
+            detailsTree_->addTopLevelItem(extra);
+        }
+        if (currentItem != nullptr) {
+            iconList_->setCurrentItem(currentItem);
+        }
+        if (currentTree != nullptr) {
+            detailsTree_->setCurrentItem(currentTree);
         }
     }
-    if (currentItem != nullptr) {
-        iconList_->setCurrentItem(currentItem);
+
+    iconList_->setUpdatesEnabled(iconUpdates);
+    detailsTree_->setUpdatesEnabled(treeUpdates);
+    showGallerySortIndicator();
+    sortingGallery_ = false;
+    if (gallerySortAgain_) {
+        gallerySortAgain_ = false;
+        sortGalleryItems();
     }
 }
 
@@ -2548,9 +2829,21 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     }
     if (!on_item || kind == 2) {
         menu.addCommand(QStringLiteral("New folder"), 1);
+        menu.addCommand(QStringLiteral("New note"), 2);
+        menu.addCommand(QStringLiteral("Import package…"), 3);
         placePopup(&menu, global_position);
-        if (menu.exec() == 1) {
+        switch (menu.exec()) {
+        case 1:
             beginNewFolder();
+            break;
+        case 2:
+            beginNewNote();
+            break;
+        case 3:
+            beginImportPackage();
+            break;
+        default:
+            break;
         }
         return;
     }
@@ -2559,6 +2852,7 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         menu.addCommand(QStringLiteral("Open"), 1);
         menu.addCommand(QStringLiteral("Rename"), 2);
         menu.addCommand(QStringLiteral("Move to…"), 3);
+        menu.addCommand(QStringLiteral("Export as package…"), 5);
         menu.addCommand(QStringLiteral("Remove folder"), 4, true);
         placePopup(&menu, global_position);
         switch (menu.exec()) {
@@ -2573,6 +2867,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
             break;
         case 4:
             beginRemoveFolder(folder_id);
+            break;
+        case 5:
+            beginExportPackage(folder_id);
             break;
         default:
             break;
@@ -2599,6 +2896,7 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     menu.addCommand(count > 1
         ? QStringLiteral("Restore") + countText
         : QStringLiteral("Restore to folder…"), 5);
+    menu.addCommand(QStringLiteral("Export as package…"), 7);
     menu.addCommand(count > 1
         ? QStringLiteral("Remove") + countText
         : QStringLiteral("Remove"), 6, true);
@@ -2623,6 +2921,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         break;
     case 5:
         beginRestoreSelected();
+        break;
+    case 7:
+        beginExportPackage(0);
         break;
     case 6:
         beginRemoveSelected();
@@ -2787,28 +3088,77 @@ void MainWindow::beginImport() {
 }
 
 void MainWindow::beginImportFolder() {
-    if (!vault_ || !vault_->is_unlocked()) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
     setError(galleryStatus_, {});
     const QString selected = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Import every file from a folder"), {},
+        this, QStringLiteral("Import a folder"), {},
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (selected.isEmpty()) {
         return;
     }
-    QDir directory(selected);
-    const QStringList names = directory.entryList(QDir::Files | QDir::Readable, QDir::Name);
-    if (names.isEmpty()) {
-        setError(galleryStatus_, QStringLiteral("That folder has no files."));
+    beginImportTree({pathFromText(selected)}, currentFolderId_);
+}
+
+void MainWindow::beginImportTree(
+    std::vector<std::filesystem::path> sources, const std::int64_t folder_id) {
+    if (sources.empty()) {
         return;
     }
-    std::vector<std::filesystem::path> sources;
-    sources.reserve(static_cast<std::size_t>(names.size()));
-    for (const auto& name : names) {
-        sources.push_back(pathFromText(directory.filePath(name)));
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        pendingExternal_.insert(pendingExternal_.end(), sources.begin(), sources.end());
+        return;
     }
-    beginImportMany(std::move(sources), currentFolderId_);
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Importing");
+    setError(galleryStatus_, {});
+    const auto vault = vault_;
+    const auto shared_sources =
+        std::make_shared<std::vector<std::filesystem::path>>(std::move(sources));
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    showStatus(QStringLiteral("Importing…"), false);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    const auto folderId = folder_id;
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, sources = std::move(shared_sources), folderId] {
+            worker->importTree(sources, vault, folderId);
+        },
+        Qt::QueuedConnection);
+}
+
+void MainWindow::acceptExternalPaths(const QStringList& paths) {
+    showNormal();
+    raise();
+    activateWindow();
+    for (const QString& path : paths) {
+        if (QFileInfo::exists(path)) {
+            pendingExternal_.push_back(pathFromText(path));
+        }
+    }
+    if (pendingExternal_.empty()) {
+        return;
+    }
+    if (!vault_ || !vault_->is_unlocked()) {
+        if (loginError_ != nullptr) {
+            setError(loginError_, QStringLiteral("Unlock the vault to import what you sent."));
+        }
+        return;
+    }
+    flushExternalImports();
+}
+
+void MainWindow::flushExternalImports() {
+    if (pendingExternal_.empty() || !vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    auto paths = std::move(pendingExternal_);
+    pendingExternal_.clear();
+    beginImportTree(std::move(paths), currentFolderId_);
 }
 
 void MainWindow::beginImportMany(
@@ -2855,22 +3205,26 @@ void MainWindow::finishBatch(const bool ok, const QString& message, const int co
             setError(galleryStatus_, message);
         }
         pumpPeerCopies();
+        flushExternalImports();
         return;
     }
     progressBar_->hide();
     if (!ok) {
         setError(galleryStatus_, message);
         pumpPeerCopies();
+        flushExternalImports();
         return;
     }
     showStatus(message, false);
     // Imports appear one file at a time. Rebuilding the library here would
     // throw away the scroll position and redraw every row that is already shown.
-    if (batchLabel_ != QStringLiteral("Importing")) {
+    if (batchLabel_ != QStringLiteral("Importing")
+        && batchLabel_ != QStringLiteral("Exporting")) {
         refreshTagFilter();
         refreshGallery();
     }
     pumpPeerCopies();
+    flushExternalImports();
 }
 
 void MainWindow::openSettings() {
@@ -2923,6 +3277,415 @@ void MainWindow::beginRestoreSelected() {
     QMetaObject::invokeMethod(batchWorker_,
         [worker = batchWorker_, vault, ids = std::move(shared_ids), dir = std::move(shared_dir)] {
             worker->restoreVideos(ids, dir, vault);
+        },
+        Qt::QueuedConnection);
+}
+
+namespace {
+
+QString packageSegment(QString name) {
+    name.replace(QRegularExpression(QStringLiteral(R"([\\/:*?"<>|\x00-\x1F\x7F])")),
+        QStringLiteral("_"));
+    name = name.trimmed();
+    while (!name.isEmpty()
+        && (name.endsWith(QLatin1Char(' ')) || name.endsWith(QLatin1Char('.')))) {
+        name.chop(1);
+    }
+    if (name.isEmpty() || name == QStringLiteral(".") || name == QStringLiteral("..")) {
+        name = QStringLiteral("_");
+    }
+    const QString upper = name.toUpper();
+    if (upper == QStringLiteral("CON") || upper == QStringLiteral("PRN")
+        || upper == QStringLiteral("AUX") || upper == QStringLiteral("NUL")
+        || QRegularExpression(QStringLiteral("^(COM|LPT)[1-9]$")).match(upper).hasMatch()) {
+        name += QLatin1Char('_');
+    }
+    if (name.size() > 120) {
+        name.truncate(120);
+        while (!name.isEmpty()
+            && (name.endsWith(QLatin1Char(' ')) || name.endsWith(QLatin1Char('.')))) {
+            name.chop(1);
+        }
+        if (name.isEmpty()) {
+            name = QStringLiteral("_");
+        }
+    }
+    return name;
+}
+
+std::string claimPackagePath(std::unordered_set<std::string>& used, const QString& relative) {
+    QString candidate = relative;
+    const int slash = relative.lastIndexOf(QLatin1Char('/'));
+    const int dot = relative.lastIndexOf(QLatin1Char('.'));
+    const bool hasExtension = dot > slash;
+    const QString stem = hasExtension ? relative.left(dot) : relative;
+    const QString extension = hasExtension ? relative.mid(dot) : QString();
+    for (int suffix = 2; suffix < 500; ++suffix) {
+        const std::string key = candidate.toUtf8().toStdString();
+        if (used.count(key) == 0U) {
+            used.insert(key);
+            return key;
+        }
+        candidate = stem + QStringLiteral(" (") + QString::number(suffix) + QLatin1Char(')') + extension;
+    }
+    const std::string fallback = candidate.toUtf8().toStdString();
+    used.insert(fallback);
+    return fallback;
+}
+
+struct PackagePassword {
+    bool accepted{false};
+    QString password;
+    bool compress{true};
+};
+
+PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle(exporting
+        ? QStringLiteral("Export package")
+        : QStringLiteral("Import package"));
+    dialog.setStyleSheet(QStringLiteral(
+        "QDialog { background: #101014; }"
+        "QLabel { color: white; }"
+        "QLineEdit { color: white; background: #1c1c22; border: 1px solid #3a3a44;"
+        " border-radius: 6px; padding: 6px 8px; min-width: 260px; }"
+        "QCheckBox { color: white; }"
+        "QPushButton { color: white; background: #2a2a32; border: none;"
+        " border-radius: 8px; min-height: 32px; padding: 0 14px; }"
+        "QPushButton:default { background: #3390ec; }"));
+    auto* layout = new QFormLayout(&dialog);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->setSpacing(10);
+    auto* hint = new QLabel(exporting
+        ? QStringLiteral("This password locks the package. It is separate from the vault password.")
+        : QStringLiteral("Enter the password that was set when this package was created."),
+        &dialog);
+    hint->setWordWrap(true);
+    layout->addRow(hint);
+    auto* password = new QLineEdit(&dialog);
+    password->setEchoMode(QLineEdit::Password);
+    password->setPlaceholderText(QStringLiteral("Package password"));
+    layout->addRow(QStringLiteral("Password"), password);
+    QLineEdit* confirm = nullptr;
+    QCheckBox* compress = nullptr;
+    if (exporting) {
+        confirm = new QLineEdit(&dialog);
+        confirm->setEchoMode(QLineEdit::Password);
+        layout->addRow(QStringLiteral("Confirm"), confirm);
+        compress = new QCheckBox(QStringLiteral("Compress the files"), &dialog);
+        compress->setChecked(true);
+        layout->addRow(compress);
+    }
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addRow(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    password->setFocus();
+    PackagePassword result;
+    if (dialog.exec() != QDialog::Accepted) {
+        return result;
+    }
+    if (password->text().isEmpty()) {
+        QMessageBox::warning(parent, dialog.windowTitle(), QStringLiteral("Enter a password."));
+        return result;
+    }
+    if (confirm != nullptr && password->text() != confirm->text()) {
+        QMessageBox::warning(parent, dialog.windowTitle(),
+            QStringLiteral("The password confirmation does not match."));
+        password->clear();
+        confirm->clear();
+        return result;
+    }
+    result.accepted = true;
+    result.password = password->text();
+    result.compress = compress == nullptr || compress->isChecked();
+    password->clear();
+    if (confirm != nullptr) {
+        confirm->clear();
+    }
+    return result;
+}
+
+} // namespace
+
+void MainWindow::beginExportPackage(const std::int64_t only_folder_id) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    auto listed_folders = vault_->list_folders();
+    if (!listed_folders) {
+        setError(galleryStatus_, vaultErrorText(listed_folders.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    folders_ = std::move(listed_folders.value());
+    auto listed_videos = vault_->list_videos();
+    if (!listed_videos) {
+        setError(galleryStatus_, vaultErrorText(listed_videos.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    const auto& videos = listed_videos.value();
+
+    struct Picked {
+        int kind{0};
+        qlonglong role{0};
+    };
+    std::vector<Picked> picked;
+    if (only_folder_id <= 0) {
+        const auto take = [&picked](const int kind, const qlonglong role) {
+            if ((kind == 0 && role > 0) || (kind == 1 && role < 0)) {
+                picked.push_back(Picked{kind, role});
+            }
+        };
+        if (galleryStack_->currentWidget() == detailsTree_) {
+            for (auto* item : detailsTree_->selectedItems()) {
+                take(item->data(0, Qt::UserRole + 12).toInt(),
+                    item->data(0, Qt::UserRole).toLongLong());
+            }
+        } else {
+            for (auto* item : iconList_->selectedItems()) {
+                take(item->data(Qt::UserRole + 12).toInt(),
+                    item->data(Qt::UserRole).toLongLong());
+            }
+        }
+    }
+
+    const auto parentOf = [this](const std::int64_t id) {
+        for (const auto& folder : folders_) {
+            if (folder.id == id) {
+                return folder.parent_id;
+            }
+        }
+        return std::int64_t{0};
+    };
+    const auto inside = [&parentOf](const std::int64_t ancestor, std::int64_t node) {
+        for (int guard = 0; guard < 64 && node != 0; ++guard) {
+            const auto parent = parentOf(node);
+            if (parent == ancestor) {
+                return true;
+            }
+            if (parent == node) {
+                return false;
+            }
+            node = parent;
+        }
+        return false;
+    };
+
+    auto files = std::make_shared<std::vector<core::Vault::PackageItem>>();
+    auto directories = std::make_shared<std::vector<std::string>>();
+    std::unordered_set<std::string> used;
+    QString problem;
+    QString suggestion = QStringLiteral("package");
+    std::function<bool(std::int64_t, const QString&)> addFolder;
+    addFolder = [&](const std::int64_t folderId, const QString& relative) -> bool {
+        if (relative.toUtf8().size() > 1024) {
+            problem = QStringLiteral("A folder path in this package is too long.");
+            return false;
+        }
+        const auto dir = claimPackagePath(used, relative);
+        directories->push_back(dir);
+        for (const auto& folder : folders_) {
+            if (folder.parent_id != folderId) {
+                continue;
+            }
+            const QString child = QString::fromUtf8(dir.c_str())
+                + QLatin1Char('/')
+                + packageSegment(QString::fromStdString(folder.name));
+            if (!addFolder(folder.id, child)) {
+                return false;
+            }
+        }
+        for (const auto& video : videos) {
+            if (video.folder_id != folderId) {
+                continue;
+            }
+            const QString filePath = QString::fromUtf8(dir.c_str())
+                + QLatin1Char('/')
+                + packageSegment(QString::fromStdString(video.display_name));
+            if (filePath.toUtf8().size() > 1024) {
+                problem = QStringLiteral("A file path in this package is too long.");
+                return false;
+            }
+            core::Vault::PackageItem item;
+            item.video_id = video.id;
+            item.relative_path = claimPackagePath(used, filePath);
+            files->push_back(std::move(item));
+        }
+        return true;
+    };
+
+    if (only_folder_id > 0) {
+        QString folderName;
+        for (const auto& folder : folders_) {
+            if (folder.id == only_folder_id) {
+                folderName = QString::fromStdString(folder.name);
+                break;
+            }
+        }
+        if (folderName.isEmpty()) {
+            setError(galleryStatus_, QStringLiteral("That folder is no longer in the library."));
+            galleryStatus_->setVisible(true);
+            return;
+        }
+        suggestion = packageSegment(folderName);
+        if (!addFolder(only_folder_id, suggestion)) {
+            setError(galleryStatus_, problem);
+            galleryStatus_->setVisible(true);
+            return;
+        }
+    } else {
+        std::vector<std::int64_t> chosenFolders;
+        for (const auto& item : picked) {
+            if (item.kind == 1) {
+                chosenFolders.push_back(-item.role);
+            }
+        }
+        bool named = false;
+        for (const auto folderId : chosenFolders) {
+            bool nested = false;
+            for (const auto other : chosenFolders) {
+                if (other != folderId && inside(other, folderId)) {
+                    nested = true;
+                    break;
+                }
+            }
+            if (nested) {
+                continue;
+            }
+            QString folderName;
+            for (const auto& folder : folders_) {
+                if (folder.id == folderId) {
+                    folderName = QString::fromStdString(folder.name);
+                    break;
+                }
+            }
+            if (folderName.isEmpty()) {
+                continue;
+            }
+            if (!named) {
+                suggestion = packageSegment(folderName);
+                named = true;
+            }
+            if (!addFolder(folderId, packageSegment(folderName))) {
+                setError(galleryStatus_, problem);
+                galleryStatus_->setVisible(true);
+                return;
+            }
+        }
+        for (const auto& item : picked) {
+            if (item.kind != 0) {
+                continue;
+            }
+            const core::VideoInfo* video = nullptr;
+            for (const auto& row : videos) {
+                if (row.id == item.role) {
+                    video = &row;
+                    break;
+                }
+            }
+            if (video == nullptr) {
+                continue;
+            }
+            const QString filePath = packageSegment(QString::fromStdString(video->display_name));
+            if (!named) {
+                suggestion = filePath;
+                const int dot = suggestion.lastIndexOf(QLatin1Char('.'));
+                if (dot > 0) {
+                    suggestion.truncate(dot);
+                }
+                named = true;
+            }
+            core::Vault::PackageItem entry;
+            entry.video_id = video->id;
+            entry.relative_path = claimPackagePath(used, filePath);
+            files->push_back(std::move(entry));
+        }
+    }
+
+    if (!problem.isEmpty()) {
+        setError(galleryStatus_, problem);
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    if (files->empty() && directories->empty()) {
+        setError(galleryStatus_, QStringLiteral("Select items or a folder to export."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+
+    PackagePassword prompt = askPackagePassword(this, true);
+    if (!prompt.accepted) {
+        return;
+    }
+    QString destination = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Export package"),
+        suggestion + QStringLiteral(".mvpk"),
+        QStringLiteral("Mega Vault package (*.mvpk)"));
+    if (destination.isEmpty()) {
+        return;
+    }
+    if (!destination.endsWith(QStringLiteral(".mvpk"), Qt::CaseInsensitive)) {
+        destination += QStringLiteral(".mvpk");
+    }
+
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Exporting");
+    setError(galleryStatus_, {});
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    showStatus(QStringLiteral("Exporting package…"), false);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    const auto vault = vault_;
+    const auto path = std::make_shared<std::filesystem::path>(pathFromText(destination));
+    auto password = std::make_shared<std::string>(prompt.password.toUtf8().constData());
+    prompt.password.fill(QLatin1Char('\0'));
+    prompt.password.clear();
+    const bool compress = prompt.compress;
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, path, password, files, directories, compress] {
+            worker->exportPackage(vault, path, password, files, directories, compress);
+        },
+        Qt::QueuedConnection);
+}
+
+void MainWindow::beginImportPackage() {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    const QString selected = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import package"), {},
+        QStringLiteral("Mega Vault package (*.mvpk)"));
+    if (selected.isEmpty()) {
+        return;
+    }
+    PackagePassword prompt = askPackagePassword(this, false);
+    if (!prompt.accepted) {
+        return;
+    }
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Importing");
+    setError(galleryStatus_, {});
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    showStatus(QStringLiteral("Importing package…"), false);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    const auto vault = vault_;
+    const auto path = std::make_shared<std::filesystem::path>(pathFromText(selected));
+    auto password = std::make_shared<std::string>(prompt.password.toUtf8().constData());
+    prompt.password.fill(QLatin1Char('\0'));
+    prompt.password.clear();
+    const auto folderId = currentFolderId_;
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, path, password, folderId] {
+            worker->importPackage(vault, path, password, folderId);
         },
         Qt::QueuedConnection);
 }
@@ -3194,7 +3957,7 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
             }
         }
         if (!sources.empty()) {
-            beginImportMany(std::move(sources), destination);
+            beginImportTree(std::move(sources), destination);
         }
     }
     drop->accept();
@@ -3224,7 +3987,7 @@ void MainWindow::dropEvent(QDropEvent* event) {
     }
     if (!sources.empty()) {
         event->acceptProposedAction();
-        beginImportMany(std::move(sources), currentFolderId_);
+        beginImportTree(std::move(sources), currentFolderId_);
         return;
     }
     QMainWindow::dropEvent(event);
@@ -3743,6 +4506,8 @@ void MainWindow::placeVideoRow(const qlonglong id, const QString& name, const ql
     treeItem->setText(0, name);
     treeItem->setText(1, sizeText);
     treeItem->setText(2, QStringLiteral("…"));
+    treeItem->setText(3, QString());
+    treeItem->setData(3, Qt::UserRole, static_cast<qlonglong>(0));
     treeItem->setText(6, QDateTime::fromSecsSinceEpoch(importedAt).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"));
     treeItem->setData(0, Qt::UserRole, id);
     treeItem->setData(0, Qt::UserRole + 12, 0);
@@ -3842,6 +4607,83 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             treeItem->setText(2, QString());
             treeItem->setText(4, QStringLiteral("PDF"));
         }
+        if (pdfFile) {
+            const auto cachedThumb = galleryCache_->thumbs.find(video_id);
+            if (cachedThumb != galleryCache_->thumbs.end()) {
+                applyThumb(iconItem, treeItem, cachedThumb->second);
+                return;
+            }
+            applyThumb(iconItem, treeItem, pdfDocumentPixmap(320));
+            if (galleryCache_->pdfThumbs.count(video_id) != 0U || !vault) {
+                return;
+            }
+            galleryCache_->pdfThumbs.insert(video_id);
+            auto* thumbWatcher = new QFutureWatcher<QByteArray>(this);
+            connect(thumbWatcher, &QFutureWatcherBase::finished, this,
+                [this, video_id, thumbWatcher, applyThumb] {
+                    const QByteArray jpeg = thumbWatcher->result();
+                    thumbWatcher->deleteLater();
+                    if (jpeg.isEmpty()) {
+                        return;
+                    }
+                    QPixmap pixmap;
+                    if (!pixmap.loadFromData(jpeg, "JPEG")) {
+                        return;
+                    }
+                    const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
+                        ? pixmap
+                        : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
+                    galleryCache_->thumbs[video_id] = tile;
+                    auto* iconItem = findListItemById(iconList_, video_id);
+                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    applyThumb(iconItem, treeItem, tile);
+                });
+            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+                auto stored = vault->thumbnail(video_id);
+                if (stored && stored.value().mime == "image/jpeg"
+                    && stored.value().width >= 16U && !stored.value().bytes.empty()) {
+                    return QByteArray(reinterpret_cast<const char*>(stored.value().bytes.data()),
+                        static_cast<int>(stored.value().bytes.size()));
+                }
+                std::vector<unsigned char> plain;
+                std::uint64_t offset = 0;
+                constexpr std::size_t kChunk = 1024U * 1024U;
+                constexpr std::size_t kMaxPdf = 80U * 1024U * 1024U;
+                for (;;) {
+                    auto chunk = vault->read_video_range(video_id, offset, kChunk);
+                    if (!chunk || chunk.value().empty()) {
+                        break;
+                    }
+                    if (plain.size() + chunk.value().size() > kMaxPdf) {
+                        return QByteArray();
+                    }
+                    plain.insert(plain.end(), chunk.value().begin(), chunk.value().end());
+                    offset += static_cast<std::uint64_t>(chunk.value().size());
+                    if (chunk.value().size() < kChunk) {
+                        break;
+                    }
+                }
+                const QImage page = renderPdfFirstPage(plain, 480);
+                if (page.isNull()) {
+                    return QByteArray();
+                }
+                QByteArray encoded;
+                QBuffer buffer(&encoded);
+                buffer.open(QIODevice::WriteOnly);
+                if (!page.save(&buffer, "JPEG", 82) || encoded.size() < 32) {
+                    return QByteArray();
+                }
+                std::vector<unsigned char> jpeg(
+                    reinterpret_cast<const unsigned char*>(encoded.constData()),
+                    reinterpret_cast<const unsigned char*>(encoded.constData()) + encoded.size());
+                (void)vault->store_thumbnail(
+                    video_id, jpeg,
+                    static_cast<std::uint32_t>(page.width()),
+                    static_cast<std::uint32_t>(page.height()));
+                return encoded;
+            }));
+            return;
+        }
         if (identity.route == 4) {
             if (treeItem != nullptr) {
                 treeItem->setText(2, QString());
@@ -3853,13 +4695,8 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             return;
         }
         const auto cachedThumb = galleryCache_->thumbs.find(video_id);
-        if (cachedThumb != galleryCache_->thumbs.end()
-            && !(pdfFile && cachedThumb->second.width() < 8)) {
+        if (cachedThumb != galleryCache_->thumbs.end()) {
             applyThumb(iconItem, treeItem, cachedThumb->second);
-        } else if (pdfFile) {
-            const QPixmap badge = pdfDocumentPixmap(320);
-            galleryCache_->thumbs[video_id] = badge;
-            applyThumb(iconItem, treeItem, badge);
         } else if (vault) {
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
@@ -3896,7 +4733,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 return std::make_shared<core::Result<core::ThumbnailInfo>>(std::move(stored));
             }));
         }
-        if (pdfFile || !vault) {
+        if (!vault) {
             return;
         }
         auto applyMedia = [](QListWidgetItem* iconItem, QTreeWidgetItem* treeItem, const core::MediaInfo& info) {
@@ -3909,9 +4746,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     iconItem->setData(Qt::UserRole + 3, durationText);
                 }
                 iconItem->setData(Qt::UserRole + 7, static_cast<qlonglong>(duration));
-                iconItem->setData(
-                    Qt::UserRole + 8,
-                    static_cast<qlonglong>(info.width) * static_cast<qlonglong>(info.height));
+                iconItem->setData(Qt::UserRole + 8, pixelCount(info.width, info.height));
                 iconItem->setData(Qt::UserRole + 11, QString::fromStdString(info.codec_name));
                 if (!info.artist.empty()) {
                     iconItem->setData(Qt::UserRole + 13, QString::fromStdString(info.artist));
@@ -3923,6 +4758,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             if (treeItem != nullptr) {
                 treeItem->setText(2, durationText);
                 treeItem->setText(3, QStringLiteral("%1 × %2").arg(info.width).arg(info.height));
+                treeItem->setData(3, Qt::UserRole, pixelCount(info.width, info.height));
                 treeItem->setText(4, QString::fromStdString(info.codec_name));
             }
         };
@@ -3947,7 +4783,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 }
                 applyMedia(iconItem, treeItem, outcome.value());
                 if (iconItem != nullptr && (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4)) {
-                    sortGalleryItems();
+                    scheduleGallerySort();
                 }
             });
         mediaWatcher->setFuture(QtConcurrent::run([vault, video_id] {
@@ -3970,8 +4806,207 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
     }));
 }
 
+void MainWindow::paintGalleryBatch() {
+    if (iconList_ == nullptr || detailsTree_ == nullptr
+        || galleryPaintGeneration_ != galleryGeneration_) {
+        return;
+    }
+    iconList_->setUpdatesEnabled(false);
+    detailsTree_->setUpdatesEnabled(false);
+    constexpr int kBatch = 48;
+    int made = 0;
+    while (made < kBatch && galleryQueueIndex_ < galleryQueue_.size()) {
+        const PendingGalleryVideo& video = galleryQueue_[galleryQueueIndex_++];
+        const QString sizeText = QStringLiteral("%1 MB").arg(
+            static_cast<double>(video.size) / (1024.0 * 1024.0), 0, 'f', 2);
+        const QString created = QDateTime::fromSecsSinceEpoch(video.importedAt)
+            .toLocalTime()
+            .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        const QString tip = QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4")
+            .arg(video.name, sizeText, video.tags, created);
+
+        auto* iconItem = new QListWidgetItem(iconList_);
+        iconItem->setData(Qt::UserRole, static_cast<qlonglong>(video.id));
+        iconItem->setData(Qt::UserRole + 1, video.name);
+        iconItem->setData(Qt::UserRole + 2, video.tags);
+        iconItem->setData(Qt::UserRole + 5, sizeText);
+        iconItem->setData(Qt::UserRole + 6, static_cast<qlonglong>(video.size));
+        iconItem->setData(Qt::UserRole + 9, static_cast<qlonglong>(video.importedAt));
+        iconItem->setData(Qt::UserRole + 12, 0);
+        iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        if (isAudioFileName(video.name)) {
+            const auto label = songLabel(video.name);
+            iconItem->setData(Qt::UserRole + 13, label.first);
+            iconItem->setData(Qt::UserRole + 14, label.second);
+        }
+        iconItem->setToolTip(tip);
+        updateIconItemText(iconItem);
+
+        auto* treeItem = new QTreeWidgetItem(detailsTree_);
+        treeItem->setText(0, video.name);
+        treeItem->setText(1, sizeText);
+        treeItem->setText(2, QStringLiteral("…"));
+        treeItem->setText(3, QString());
+        treeItem->setData(3, Qt::UserRole, static_cast<qlonglong>(0));
+        treeItem->setText(5, video.tags);
+        treeItem->setText(6, created);
+        treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video.id));
+        treeItem->setData(0, Qt::UserRole + 12, 0);
+        treeItem->setToolTip(0, tip);
+        ++made;
+    }
+    const bool more = galleryQueueIndex_ < galleryQueue_.size();
+    if (!more) {
+        galleryQueue_.clear();
+        galleryQueueIndex_ = 0;
+        sortGalleryItems();
+        showGallerySortIndicator();
+        galleryListing_ = false;
+    }
+    iconList_->setUpdatesEnabled(true);
+    detailsTree_->setUpdatesEnabled(true);
+    if (!more) {
+        const auto videos = pendingVideos_;
+        const auto folders = pendingFolders_;
+        pendingVideos_.clear();
+        pendingFolders_.clear();
+        for (const auto& folder : folders) {
+            revealFolder(folder.id, folder.parentId, folder.name);
+        }
+        for (const auto& video : videos) {
+            revealVideo(video.id, video.name, video.size, video.folderId, video.importedAt);
+        }
+    }
+    const auto generation = galleryPaintGeneration_;
+    QTimer::singleShot(0, this, [this, generation, more] {
+        if (generation != galleryPaintGeneration_) {
+            return;
+        }
+        decorateVisible();
+        if (more) {
+            paintGalleryBatch();
+        }
+    });
+}
+
+void MainWindow::decorateVisible() {
+    if (iconList_ == nullptr || detailsTree_ == nullptr || galleryStack_ == nullptr) {
+        return;
+    }
+    const bool details = galleryStack_->currentWidget() == detailsTree_;
+    QAbstractItemView* view = details
+        ? static_cast<QAbstractItemView*>(detailsTree_)
+        : static_cast<QAbstractItemView*>(iconList_);
+    if (view->viewport() == nullptr) {
+        return;
+    }
+    const int count = details ? detailsTree_->topLevelItemCount() : iconList_->count();
+    if (count <= 0) {
+        return;
+    }
+    int columns = 1;
+    if (!details && iconList_->viewMode() == QListView::IconMode) {
+        const int gridWidth = std::max(1, iconList_->gridSize().width());
+        columns = std::max(1, view->viewport()->width() / gridWidth);
+    }
+    const QModelIndex top = view->indexAt(QPoint(4, 4));
+    const QModelIndex bottom = view->indexAt(
+        QPoint(4, std::max(0, view->viewport()->height() - 4)));
+    int first = top.isValid() ? top.row() : 0;
+    int last = bottom.isValid() ? bottom.row() : first;
+    if (!top.isValid()) {
+        first = 0;
+        const int rowHeight = details
+            ? std::max(1, detailsTree_->sizeHintForRow(0))
+            : std::max(1, iconList_->gridSize().height());
+        const int rows = std::max(1, view->viewport()->height() / rowHeight);
+        last = std::min(count - 1, rows * columns + columns);
+    } else {
+        if (last < first) {
+            last = first;
+        }
+        if (!bottom.isValid()) {
+            const int rowHeight = details
+                ? std::max(1, detailsTree_->sizeHintForRow(0))
+                : std::max(1, iconList_->gridSize().height());
+            const int rows = std::max(1, view->viewport()->height() / rowHeight);
+            last = std::min(count - 1, first + rows * columns);
+        }
+        first = std::max(0, first - columns);
+        last = std::min(count - 1, last + columns * 2);
+    }
+
+    int started = 0;
+    constexpr int kCap = 16;
+    auto consider = [&](const qlonglong id, const QString& name, const quint64 size, const int kind) {
+        if (started >= kCap || kind != 0 || id <= 0) {
+            return;
+        }
+        if (!decoratedIds_.insert(static_cast<std::int64_t>(id)).second) {
+            return;
+        }
+        decorateVideo(id, name, size);
+        ++started;
+    };
+    for (int index = first; index <= last && started < kCap; ++index) {
+        if (details) {
+            auto* item = detailsTree_->topLevelItem(index);
+            if (item == nullptr) {
+                continue;
+            }
+            const qlonglong id = item->data(0, Qt::UserRole).toLongLong();
+            quint64 size = 0;
+            if (auto* icon = findListItemById(iconList_, id)) {
+                size = static_cast<quint64>(icon->data(Qt::UserRole + 6).toULongLong());
+            }
+            consider(id, item->text(0), size, item->data(0, Qt::UserRole + 12).toInt());
+        } else {
+            auto* item = iconList_->item(index);
+            if (item == nullptr) {
+                continue;
+            }
+            consider(
+                item->data(Qt::UserRole).toLongLong(),
+                item->data(Qt::UserRole + 1).toString(),
+                static_cast<quint64>(item->data(Qt::UserRole + 6).toULongLong()),
+                item->data(Qt::UserRole + 12).toInt());
+        }
+    }
+    const bool probeLibrary = sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4;
+    const bool moreVisible = last > first && started >= kCap;
+    if (probeLibrary && started < kCap) {
+        const int libraryCount = iconList_->count();
+        int scanned = 0;
+        while (started < kCap && libraryCount > 0 && scanned < libraryCount) {
+            const int index = sortProbeCursor_ % libraryCount;
+            ++sortProbeCursor_;
+            ++scanned;
+            auto* item = iconList_->item(index);
+            if (item == nullptr) {
+                continue;
+            }
+            consider(
+                item->data(Qt::UserRole).toLongLong(),
+                item->data(Qt::UserRole + 1).toString(),
+                static_cast<quint64>(item->data(Qt::UserRole + 6).toULongLong()),
+                item->data(Qt::UserRole + 12).toInt());
+        }
+    }
+    if (moreVisible || (probeLibrary && started > 0)) {
+        const auto generation = galleryPaintGeneration_;
+        QTimer::singleShot(probeLibrary ? 30 : 0, this, [this, generation] {
+            if (generation != galleryPaintGeneration_) {
+                return;
+            }
+            decorateVisible();
+        });
+    }
+}
+
 void MainWindow::refreshGallery() {
     galleryListing_ = true;
+    galleryQueue_.clear();
+    galleryQueueIndex_ = 0;
     detailsTree_->clear();
     iconList_->clear();
     if (emptyState_ != nullptr) {
@@ -4025,6 +5060,11 @@ void MainWindow::refreshGallery() {
             || !vault_->is_unlocked()) {
             // A newer refresh superseded this snapshot (e.g. a delete landed
             // mid-list); publishing it would resurrect removed videos.
+            if (generation == galleryGeneration_) {
+                galleryListing_ = false;
+                galleryQueue_.clear();
+                galleryQueueIndex_ = 0;
+            }
             watcher->deleteLater();
             return;
         }
@@ -4114,231 +5154,60 @@ void MainWindow::refreshGallery() {
         std::uint64_t total_bytes = 0U;
         for (const auto& video : visible) {
             total_bytes += video.original_size;
-            const auto video_id = video.id;
-            const QString name = QString::fromStdString(video.display_name);
-            const QString size_text = QStringLiteral("%1 MB").arg(
-                static_cast<double>(video.original_size) / (1024.0 * 1024.0), 0, 'f', 2);
-            QString tags_text;
+        }
+        const int sortKey = sortKey_;
+        const bool ascending = sortAscending_;
+        std::stable_sort(visible.begin(), visible.end(), [sortKey, ascending](const core::VideoInfo& left, const core::VideoInfo& right) {
+            int compared = 0;
+            switch (sortKey) {
+            case 1:
+                compared = left.original_size < right.original_size
+                    ? -1
+                    : (left.original_size > right.original_size ? 1 : 0);
+                break;
+            case 5: {
+                const QString a = QString::fromStdString(left.tags.empty() ? std::string() : left.tags.front());
+                const QString b = QString::fromStdString(right.tags.empty() ? std::string() : right.tags.front());
+                compared = a.compare(b, Qt::CaseInsensitive);
+                break;
+            }
+            case 6:
+                compared = left.imported_at < right.imported_at
+                    ? -1
+                    : (left.imported_at > right.imported_at ? 1 : 0);
+                break;
+            default:
+                compared = QString::fromStdString(left.display_name).compare(
+                    QString::fromStdString(right.display_name), Qt::CaseInsensitive);
+                break;
+            }
+            if (compared == 0) {
+                compared = left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
+            }
+            return ascending ? compared < 0 : compared > 0;
+        });
+        galleryQueue_.clear();
+        galleryQueueIndex_ = 0;
+        galleryQueue_.reserve(visible.size());
+        for (const auto& video : visible) {
+            PendingGalleryVideo row;
+            row.id = video.id;
+            row.name = QString::fromStdString(video.display_name);
+            row.size = video.original_size;
+            row.importedAt = static_cast<std::int64_t>(video.imported_at);
             for (std::size_t i = 0U; i < video.tags.size(); ++i) {
                 if (i > 0U) {
-                    tags_text += QStringLiteral(", ");
+                    row.tags += QStringLiteral(", ");
                 }
-                tags_text += QString::fromStdString(video.tags[i]);
+                row.tags += QString::fromStdString(video.tags[i]);
             }
-            const QString imported_text = QString::fromStdString(
-                std::to_string(video.imported_at));
-
-            // Icon/list view item.
-            auto* iconItem = new QListWidgetItem(iconList_);
-            iconItem->setData(Qt::UserRole, static_cast<qlonglong>(video_id));
-            iconItem->setData(Qt::UserRole + 1, name);
-            iconItem->setData(Qt::UserRole + 2, tags_text);
-            iconItem->setData(Qt::UserRole + 5, size_text);
-            iconItem->setData(Qt::UserRole + 6, static_cast<qlonglong>(video.original_size));
-            iconItem->setData(Qt::UserRole + 9, static_cast<qlonglong>(video.imported_at));
-            iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
-            if (isAudioFileName(name)) {
-                const auto label = songLabel(name);
-                iconItem->setData(Qt::UserRole + 13, label.first);
-                iconItem->setData(Qt::UserRole + 14, label.second);
-            }
-            iconItem->setToolTip(QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
-            arg(name).
-            arg(size_text).
-            arg(tags_text).
-            arg(QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss")));
-            updateIconItemText(iconItem);
-
-            // Details view item.
-            QTreeWidgetItem* treeItem = new QTreeWidgetItem(detailsTree_);
-            treeItem->setText(0, name);
-            treeItem->setText(1, size_text);
-            treeItem->setText(2, QStringLiteral("…"));
-            treeItem->setText(5, tags_text);
-            treeItem->setText(6, QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"));
-            treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video_id));
-
-            treeItem->setToolTip(0, QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
-            arg(name).
-            arg(size_text).
-            arg(tags_text).
-            arg(QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss")));
-            auto applyThumb = [](QListWidgetItem* iconItem, QTreeWidgetItem* treeItem, const QPixmap& source) {
-                if (source.isNull()) {
-                    return;
-                }
-                const QPixmap tile = source.width() <= 320 && source.height() <= 320
-                    ? source
-                    : source.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                const QPixmap tiny = tile.scaled(32, 32, Qt::KeepAspectRatio, Qt::FastTransformation);
-                if (iconItem != nullptr) {
-                    iconItem->setData(Qt::UserRole + 4, tile);
-                    iconItem->setIcon(QIcon(tiny));
-                }
-                if (treeItem != nullptr) {
-                    treeItem->setIcon(0, QIcon(tiny));
-                }
-            };
-            const auto originalSize = video.original_size;
-            auto presentIdentity = [this, vault, video_id, originalSize, applyThumb](const FileIdentity& identity) {
-                galleryCache_->kinds[video_id] = identity;
-                auto* iconItem = findListItemById(iconList_, video_id);
-                auto* treeItem = findTreeItemById(detailsTree_, video_id);
-                if (iconItem == nullptr && treeItem == nullptr) {
-                    return;
-                }
-                if (iconItem != nullptr) {
-                    iconItem->setData(Qt::UserRole + 15, identity.label);
-                    iconItem->setData(Qt::UserRole + 16, identity.route);
-                }
-                if (identity.route == 0) {
-                    const QPixmap badge = kindBadge(identity.label, compactSize(originalSize), 320);
-                    galleryCache_->thumbs[video_id] = badge;
-                    applyThumb(iconItem, treeItem, badge);
-                    if (treeItem != nullptr) {
-                        treeItem->setText(2, QString());
-                        treeItem->setText(3, QString());
-                        treeItem->setText(4, identity.label);
-                    }
-                    return;
-                }
-            const bool pdfFile = identity.route == 3;
-            if (pdfFile && treeItem != nullptr) {
-                treeItem->setText(2, QString());
-                treeItem->setText(4, QStringLiteral("PDF"));
-            }
-            if (identity.route == 4) {
-                if (treeItem != nullptr) {
-                    treeItem->setText(2, QString());
-                    treeItem->setText(4, identity.label);
-                }
-                const QPixmap badge = textDocumentPixmap(identity.label, 320);
-                galleryCache_->thumbs[video_id] = badge;
-                applyThumb(iconItem, treeItem, badge);
-                return;
-            }
-            const auto cachedThumb = galleryCache_->thumbs.find(video_id);
-            if (cachedThumb != galleryCache_->thumbs.end()
-                && !(pdfFile && cachedThumb->second.width() < 8)) {
-                applyThumb(iconItem, treeItem, cachedThumb->second);
-            } else if (pdfFile) {
-                const QPixmap badge = pdfDocumentPixmap(320);
-                galleryCache_->thumbs[video_id] = badge;
-                applyThumb(iconItem, treeItem, badge);
-            } else {
-            auto* thumbWatcher =
-                new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
-            connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, thumbWatcher, applyThumb] {
-                    const auto outcome = *thumbWatcher->result();
-                    thumbWatcher->deleteLater();
-                    if (!outcome || outcome.value().bytes.empty()) {
-                        return;
-                    }
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
-                    if (iconItem == nullptr && treeItem == nullptr) {
-                        return;
-                    }
-                    if (outcome.value().mime == "image/x-mvp-note"
-                        || outcome.value().mime == "image/x-mvp-empty") {
-                        applyThumb(iconItem, treeItem, musicPlaceholder(96));
-                        return;
-                    }
-                    QPixmap pixmap;
-                    if (!pixmap.loadFromData(outcome.value().bytes.data(),
-                            static_cast<int>(outcome.value().bytes.size()))) {
-                        return;
-                    }
-                    const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
-                        ? pixmap
-                        : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    galleryCache_->thumbs[video_id] = tile;
-                    applyThumb(iconItem, treeItem, tile);
-                });
-            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
-                auto stored = vault->display_thumbnail(video_id, 320U);
-                return std::make_shared<core::Result<core::ThumbnailInfo>>(
-                    std::move(stored));
-            }));
-            }
-
-            auto applyMedia = [](QListWidgetItem* iconItem, QTreeWidgetItem* treeItem, const core::MediaInfo& info) {
-                const std::int64_t duration = static_cast<std::int64_t>(info.duration_ms);
-                const QString durationText = QStringLiteral("%1:%2")
-                    .arg(duration / 60000)
-                    .arg((duration / 1000) % 60, 2, 10, QLatin1Char('0'));
-                if (iconItem != nullptr) {
-                    if (duration > 500) {
-                        iconItem->setData(Qt::UserRole + 3, durationText);
-                    }
-                    iconItem->setData(Qt::UserRole + 7, static_cast<qlonglong>(duration));
-                    iconItem->setData(
-                        Qt::UserRole + 8,
-                        static_cast<qlonglong>(info.width) * static_cast<qlonglong>(info.height));
-                    iconItem->setData(Qt::UserRole + 11, QString::fromStdString(info.codec_name));
-                    if (!info.artist.empty()) {
-                        iconItem->setData(Qt::UserRole + 13, QString::fromStdString(info.artist));
-                    }
-                    if (!info.title.empty()) {
-                        iconItem->setData(Qt::UserRole + 14, QString::fromStdString(info.title));
-                    }
-                }
-                if (treeItem != nullptr) {
-                    treeItem->setText(2, durationText);
-                    treeItem->setText(3, QStringLiteral("%1 × %2")
-                        .arg(info.width).arg(info.height));
-                    treeItem->setText(4, QString::fromStdString(info.codec_name));
-                }
-            };
-            if (!pdfFile) {
-            const auto cachedMedia = galleryCache_->media.find(video_id);
-            if (cachedMedia != galleryCache_->media.end()) {
-                applyMedia(iconItem, treeItem, cachedMedia->second);
-            } else {
-            auto* mediaWatcher =
-                new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
-            connect(mediaWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, mediaWatcher, applyMedia] {
-                    const auto outcome = *mediaWatcher->result();
-                    mediaWatcher->deleteLater();
-                    if (!outcome) {
-                        return;
-                    }
-                    galleryCache_->media[video_id] = outcome.value();
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
-                    if (iconItem == nullptr && treeItem == nullptr) {
-                        return;
-                    }
-                    applyMedia(iconItem, treeItem, outcome.value());
-                    if ((iconItem != nullptr) && (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4)) {
-                        sortGalleryItems();
-                    }
-                });
-            mediaWatcher->setFuture(QtConcurrent::run([vault, video_id] {
-                return std::make_shared<core::Result<core::MediaInfo>>(
-                    vault->media_info(video_id));
-            }));
-            }
-            }
-            };
-            const auto knownKind = galleryCache_->kinds.find(video_id);
-            if (knownKind != galleryCache_->kinds.end()) {
-                presentIdentity(knownKind->second);
-            } else {
-                auto* sniffWatcher = new QFutureWatcher<FileIdentity>(this);
-                connect(sniffWatcher, &QFutureWatcherBase::finished, this,
-                    [sniffWatcher, presentIdentity] {
-                        const FileIdentity identity = sniffWatcher->result();
-                        sniffWatcher->deleteLater();
-                        presentIdentity(identity);
-                    });
-                sniffWatcher->setFuture(QtConcurrent::run([vault, video_id, name] {
-                    return identityForVideo(vault, video_id, name);
-                }));
-            }
+            galleryQueue_.push_back(std::move(row));
         }
+        decoratedIds_.clear();
+        sortProbeCursor_ = 0;
+        galleryPaintGeneration_ = generation;
+        detailsTree_->setSortingEnabled(false);
+        showGallerySortIndicator();
         const bool libraryEmpty = visible.empty() && realFolders == 0;
         if (emptyState_ != nullptr) {
             if (libraryEmpty) {
@@ -4356,12 +5225,11 @@ void MainWindow::refreshGallery() {
                 emptyState_->hide();
             }
         }
-        sortGalleryItems();
         statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
             .arg(visible.size() + realFolders)
             .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
-        galleryListing_ = false;
         watcher->deleteLater();
+        paintGalleryBatch();
     });
     watcher->setFuture(QtConcurrent::run([vault] {
         auto videos = vault->list_videos();
@@ -4486,7 +5354,9 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         showNotice(QStringLiteral("this format currently not supported"));
         return;
     }
-    closeText();
+    if (!closeText()) {
+        return;
+    }
     const bool stillImage = identity.route == 1 && (
         identity.label.compare(QStringLiteral("Jpeg"), Qt::CaseInsensitive) == 0
         || identity.label.compare(QStringLiteral("Jpg"), Qt::CaseInsensitive) == 0
@@ -4524,7 +5394,8 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
                 }
                 if (contentStack_ != nullptr
                     && ((pdfWindow_ != nullptr && contentStack_->currentWidget() == pdfWindow_)
-                        || (textPage_ != nullptr && contentStack_->currentWidget() == textPage_))) {
+                        || (textPage_ != nullptr && contentStack_->currentWidget() == textPage_)
+                        || (peerBrowser_ != nullptr && contentStack_->currentWidget() == peerBrowser_))) {
                     return;
                 }
                 if (contentStack_ != nullptr && pages_ != nullptr) {
@@ -4579,7 +5450,8 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
             }
             if (contentStack_ != nullptr
                 && ((pdfWindow_ != nullptr && contentStack_->currentWidget() == pdfWindow_)
-                    || (textPage_ != nullptr && contentStack_->currentWidget() == textPage_))) {
+                    || (textPage_ != nullptr && contentStack_->currentWidget() == textPage_)
+                    || (peerBrowser_ != nullptr && contentStack_->currentWidget() == peerBrowser_))) {
                 return;
             }
             if (contentStack_ != nullptr && pages_ != nullptr) {
@@ -4686,8 +5558,8 @@ void MainWindow::beginMusic(const std::int64_t video_id) {
         const QString name = details
             ? detailsTree_->topLevelItem(i)->text(0)
             : iconList_->item(i)->data(Qt::UserRole + 1).toString();
-        bool audio = false;
-        if (galleryCache_ != nullptr) {
+        bool audio = isAudioFileName(name);
+        if (!audio && galleryCache_ != nullptr) {
             const auto knownKind = galleryCache_->kinds.find(static_cast<std::int64_t>(id));
             audio = knownKind != galleryCache_->kinds.end() && knownKind->second.route == 2;
         }
@@ -4739,23 +5611,49 @@ void MainWindow::stepPlayback(const int delta) {
     const int items = details
         ? (detailsTree_ != nullptr ? detailsTree_->topLevelItemCount() : 0)
         : (iconList_ != nullptr ? iconList_->count() : 0);
+    QVector<qlonglong> files;
     int found = -1;
     for (int i = 0; i < items; ++i) {
+        const int kind = details
+            ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole + 12).toInt()
+            : iconList_->item(i)->data(Qt::UserRole + 12).toInt();
         const qlonglong id = details
             ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole).toLongLong()
             : iconList_->item(i)->data(Qt::UserRole).toLongLong();
-        if (id == current) {
-            found = i;
-            break;
+        if (kind != 0 || id <= 0) {
+            continue;
         }
+        if (id == current) {
+            found = files.size();
+        }
+        files.append(id);
     }
-    const int target = found + delta;
-    if (found < 0 || target < 0 || target >= items) {
+    if (files.isEmpty() || found < 0) {
         return;
     }
-    const qlonglong nextId = details
-        ? detailsTree_->topLevelItem(target)->data(0, Qt::UserRole).toLongLong()
-        : iconList_->item(target)->data(Qt::UserRole).toLongLong();
+    const bool shuffle = playerWindow_ != nullptr && playerWindow_->shuffleOn();
+    const bool repeatAll = playerWindow_ != nullptr && playerWindow_->repeatMode() == 1;
+    int target = found;
+    if (shuffle && files.size() > 1) {
+        int pick = QRandomGenerator::global()->bounded(files.size() - 1);
+        if (pick >= found) {
+            ++pick;
+        }
+        target = pick;
+    } else {
+        target = found + (delta > 0 ? 1 : -1);
+        if (target < 0 || target >= files.size()) {
+            if (!repeatAll) {
+                return;
+            }
+            target = delta > 0 ? 0 : files.size() - 1;
+        }
+    }
+    const qlonglong nextId = files.at(target);
+    if (nextId == current && playerWindow_ != nullptr) {
+        playerWindow_->restartFromStart();
+        return;
+    }
     beginPlayback(nextId);
 }
 
@@ -4920,6 +5818,7 @@ void MainWindow::showUnlocked() {
     searchEdit_->clear();
     refreshTagFilter();
     refreshGallery();
+    flushExternalImports();
 }
 
 void MainWindow::ensureShareServer() {
@@ -4943,26 +5842,75 @@ void MainWindow::approvePeer(const QString& phone, std::function<void(bool)> ans
         answer(false);
         return;
     }
-    auto* box = new QMessageBox(QMessageBox::Question, QStringLiteral("Swap libraries"),
-        QStringLiteral("\"%1\" wants to swap libraries with this PC.").arg(phone),
-        QMessageBox::NoButton, this);
-    box->setInformativeText(QStringLiteral(
-        "The phone will see your library and can copy anything from it. Its library shows up "
-        "here as a folder you can copy from. Nobody can change or remove the other's files."));
-    auto* allow = box->addButton(QStringLiteral("Allow"), QMessageBox::AcceptRole);
-    box->addButton(QStringLiteral("Decline"), QMessageBox::RejectRole);
-    box->setAttribute(Qt::WA_DeleteOnClose);
-    auto reply = std::make_shared<std::function<void(bool)>>(std::move(answer));
-    connect(box, &QMessageBox::finished, this, [box, allow, reply](int) {
-        if (*reply) {
-            (*reply)(box->clickedButton() == allow);
-            *reply = nullptr;
-        }
-    });
-    // The phone gives up after a minute; an answer after that would be lost.
-    QTimer::singleShot(55000, box, [box] { box->reject(); });
-    box->open();
+    if (pendingPeerAnswer_) {
+        answer(false);
+        return;
+    }
+    pendingPeerAnswer_ = std::move(answer);
+    auto* veil = new QWidget(this);
+    veil->setObjectName(QStringLiteral("approvalVeil"));
+    veil->setAttribute(Qt::WA_StyledBackground, true);
+    veil->setStyleSheet(QStringLiteral(
+        "QWidget#approvalVeil { background: rgba(0, 0, 0, 150); }"
+        "QFrame#approvalCard { background: #161618; border-radius: 16px; }"
+        "QLabel { color: white; background: transparent; }"
+        "QLabel#approvalBody { color: #8e8e93; }"
+        "QPushButton#approvalAllow { background: #3390ec; color: white; border: none;"
+        "  border-radius: 12px; min-height: 36px; padding: 0 18px; font-weight: 600; }"
+        "QPushButton#approvalDecline { background: transparent; color: #ff6b6b; border: none;"
+        "  min-height: 36px; padding: 0 12px; }"));
+    veil->setGeometry(rect());
+    auto* outer = new QVBoxLayout(veil);
+    outer->addStretch(1);
+    auto* card = new QFrame(veil);
+    card->setObjectName(QStringLiteral("approvalCard"));
+    card->setFixedWidth(440);
+    auto* column = new QVBoxLayout(card);
+    column->setContentsMargins(22, 18, 22, 18);
+    column->setSpacing(12);
+    auto* title = new QLabel(QStringLiteral("Accept connection"), card);
+    title->setStyleSheet(QStringLiteral("font: 600 16px \"Segoe UI\";"));
+    auto* body = new QLabel(QStringLiteral(
+        "\"%1\" wants to swap libraries with this PC.\n\n"
+        "The phone will see your library and can copy from it. Its library opens here, "
+        "in this window. Nobody can change or remove the other's files.").arg(phone), card);
+    body->setObjectName(QStringLiteral("approvalBody"));
+    body->setWordWrap(true);
+    auto* row = new QHBoxLayout();
+    auto* decline = new QPushButton(QStringLiteral("Decline"), card);
+    decline->setObjectName(QStringLiteral("approvalDecline"));
+    decline->setCursor(Qt::PointingHandCursor);
+    auto* allow = new QPushButton(QStringLiteral("Allow"), card);
+    allow->setObjectName(QStringLiteral("approvalAllow"));
+    allow->setCursor(Qt::PointingHandCursor);
+    row->addStretch(1);
+    row->addWidget(decline);
+    row->addWidget(allow);
+    column->addWidget(title);
+    column->addWidget(body);
+    column->addLayout(row);
+    outer->addWidget(card, 0, Qt::AlignHCenter);
+    outer->addStretch(1);
+    connect(allow, &QPushButton::clicked, this, [this] { finishPeerApproval(true); });
+    connect(decline, &QPushButton::clicked, this, [this] { finishPeerApproval(false); });
+    QTimer::singleShot(55000, veil, [this] { finishPeerApproval(false); });
+    approvalVeil_ = veil;
+    veil->show();
+    veil->raise();
     QApplication::alert(this);
+}
+
+void MainWindow::finishPeerApproval(const bool allow) {
+    if (pendingPeerAnswer_) {
+        auto answer = std::move(pendingPeerAnswer_);
+        pendingPeerAnswer_ = nullptr;
+        answer(allow);
+    }
+    if (approvalVeil_ != nullptr) {
+        auto* veil = approvalVeil_;
+        approvalVeil_ = nullptr;
+        veil->deleteLater();
+    }
 }
 
 bool MainWindow::peerLinked() const {
@@ -4971,10 +5919,8 @@ bool MainWindow::peerLinked() const {
 
 void MainWindow::peerChanged() {
     const bool linked = peerLinked();
-    if (!linked && peerBrowser_ != nullptr) {
-        auto* closing = peerBrowser_;
-        peerBrowser_ = nullptr;
-        closing->close();
+    if (!linked) {
+        dismissPeerBrowser();
     }
     // The lock screen was only hiding the library. With the swap gone, lock for real.
     if (!linked && pages_ != nullptr && pages_->currentIndex() == kLoginPage
@@ -5002,33 +5948,59 @@ void MainWindow::peerChanged() {
 }
 
 void MainWindow::openPeerBrowser() {
-    if (!peerLinked()) {
+    if (!peerLinked() || contentStack_ == nullptr) {
         setError(galleryStatus_, QStringLiteral("The phone is no longer connected."));
         galleryStatus_->setVisible(true);
         refreshGallery();
         return;
     }
-    if (peerBrowser_ != nullptr) {
-        peerBrowser_->raise();
-        peerBrowser_->activateWindow();
+    if (peerBrowser_ == nullptr) {
+        peerBrowser_ = new PeerBrowser(shareServer_->peer(), contentStack_);
+        peerBrowser_->setOnCopy([this](std::shared_ptr<PeerCopyPlan> plan) {
+            beginCopyFromPeer(std::move(plan));
+        });
+        peerBrowser_->setOnUnlink([this] {
+            if (shareServer_) {
+                shareServer_->unlinkPeer();
+            }
+        });
+        peerBrowser_->setOnBack([this] { closePeerBrowser(); });
+        auto* opened = peerBrowser_;
+        connect(opened, &QObject::destroyed, this, [this, opened] {
+            if (peerBrowser_ == opened) {
+                peerBrowser_ = nullptr;
+            }
+        });
+    }
+    if (contentStack_->indexOf(peerBrowser_) < 0) {
+        contentStack_->addWidget(peerBrowser_);
+    }
+    fadeStack(contentStack_, peerBrowser_);
+}
+
+void MainWindow::closePeerBrowser() {
+    if (peerBrowser_ == nullptr || contentStack_ == nullptr || pages_ == nullptr) {
         return;
     }
-    peerBrowser_ = new PeerBrowser(shareServer_->peer(), this);
-    peerBrowser_->setOnCopy([this](std::shared_ptr<PeerCopyPlan> plan) {
-        beginCopyFromPeer(std::move(plan));
-    });
-    peerBrowser_->setOnUnlink([this] {
-        if (shareServer_) {
-            shareServer_->unlinkPeer();
+    if (contentStack_->currentWidget() == peerBrowser_) {
+        fadeStack(contentStack_, pages_);
+    }
+}
+
+void MainWindow::dismissPeerBrowser() {
+    if (peerBrowser_ == nullptr) {
+        return;
+    }
+    auto* closing = peerBrowser_;
+    peerBrowser_ = nullptr;
+    if (contentStack_ != nullptr) {
+        const bool showing = contentStack_->currentWidget() == closing;
+        contentStack_->removeWidget(closing);
+        if (showing && pages_ != nullptr) {
+            fadeStack(contentStack_, pages_);
         }
-    });
-    auto* opened = peerBrowser_;
-    connect(opened, &QObject::destroyed, this, [this, opened] {
-        if (peerBrowser_ == opened) {
-            peerBrowser_ = nullptr;
-        }
-    });
-    peerBrowser_->show();
+    }
+    closing->close();
 }
 
 void MainWindow::beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan) {
@@ -5184,12 +6156,29 @@ void MainWindow::placeTransferPanel() {
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     placeTransferPanel();
+    if (approvalVeil_ != nullptr) {
+        approvalVeil_->setGeometry(rect());
+        approvalVeil_->raise();
+    }
 }
 
-void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
-    if (!vault_ || !vault_->is_unlocked() || video_id <= 0 || contentStack_ == nullptr) {
+void MainWindow::beginNewNote() {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_ || contentStack_ == nullptr) {
         return;
     }
+    if (textPage_ != nullptr && contentStack_->currentWidget() == textPage_) {
+        if (!closeText()) {
+            return;
+        }
+    }
+    bool accepted = false;
+    const QString entered = QInputDialog::getText(
+        this, QStringLiteral("New note"), QStringLiteral("Name"),
+        QLineEdit::Normal, QStringLiteral("Note.txt"), &accepted);
+    if (!accepted) {
+        return;
+    }
+    const QString name = noteFileName(entered);
     closePdf();
     if (playerWindow_ != nullptr) {
         auto* dying = playerWindow_;
@@ -5201,26 +6190,85 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
     if (page == nullptr) {
         page = new TextPage(contentStack_);
         connect(page->backButton(), &QPushButton::clicked, this, [this] { closeText(); });
+        connect(page->saveButton(), &QPushButton::clicked, this, [this] { saveOpenText(false); });
         textPage_ = page;
     }
-    page->showDocument(title, QStringLiteral("Opening…"));
+    openTextId_ = 0;
+    openTextFolderId_ = currentFolderId_;
+    openTextTitle_ = name;
+    openTextTruncated_ = false;
+    openTextBusy_ = false;
+    closeTextAfterSave_ = false;
+    page->showDocument(name, QString(), true);
+    if (contentStack_->indexOf(page) < 0) {
+        contentStack_->addWidget(page);
+    }
+    fadeStack(contentStack_, page);
+    page->setFocus();
+}
+
+void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
+    if (!vault_ || !vault_->is_unlocked() || video_id <= 0 || contentStack_ == nullptr) {
+        return;
+    }
+    auto* page = static_cast<TextPage*>(textPage_);
+    if (page != nullptr && contentStack_->currentWidget() == page && openTextId_ == video_id) {
+        return;
+    }
+    if (page != nullptr && contentStack_->currentWidget() == page) {
+        if (!closeText()) {
+            return;
+        }
+    }
+    closePdf();
+    if (playerWindow_ != nullptr) {
+        auto* dying = playerWindow_;
+        playerWindow_ = nullptr;
+        contentStack_->removeWidget(dying);
+        dying->close();
+    }
+    if (page == nullptr) {
+        page = new TextPage(contentStack_);
+        connect(page->backButton(), &QPushButton::clicked, this, [this] { closeText(); });
+        connect(page->saveButton(), &QPushButton::clicked, this, [this] { saveOpenText(false); });
+        textPage_ = page;
+    }
+    const auto folderId = currentFolderId_;
+    openTextId_ = video_id;
+    openTextFolderId_ = folderId;
+    openTextTitle_ = title;
+    openTextTruncated_ = false;
+    openTextBusy_ = true;
+    closeTextAfterSave_ = false;
+    page->showDocument(title, QString(), false);
     if (contentStack_->indexOf(page) < 0) {
         contentStack_->addWidget(page);
     }
     fadeStack(contentStack_, page);
     const auto vault = vault_;
     const int generation = page->bump();
-    auto* watcher = new QFutureWatcher<QString>(page);
-    connect(watcher, &QFutureWatcherBase::finished, page, [page, watcher, title, generation] {
-        if (page->generation() == generation) {
-            page->showDocument(title, watcher->result());
-        }
+    auto* watcher = new QFutureWatcher<LoadedText>(page);
+    connect(watcher, &QFutureWatcherBase::finished, page, [this, page, watcher, title, generation, video_id, folderId] {
+        const LoadedText loaded = watcher->result();
         watcher->deleteLater();
+        if (page->generation() != generation) {
+            return;
+        }
+        openTextId_ = video_id;
+        openTextFolderId_ = folderId;
+        openTextTitle_ = title;
+        openTextTruncated_ = loaded.truncated;
+        openTextBusy_ = false;
+        QString body = loaded.body;
+        if (loaded.truncated) {
+            body += QStringLiteral("\n\n— This file is longer than the editor can change. —");
+        }
+        page->showDocument(title, body, !loaded.truncated);
     });
     watcher->setFuture(QtConcurrent::run([vault, video_id] {
         constexpr std::uint64_t cap = 2U * 1024U * 1024U;
+        LoadedText loaded;
         QByteArray data;
-        bool truncated = false;
         std::uint64_t offset = 0U;
         while (static_cast<std::uint64_t>(data.size()) < cap) {
             const auto room = cap - static_cast<std::uint64_t>(data.size());
@@ -5234,34 +6282,185 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
             data.append(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(take));
             offset += take;
             if (take < bytes.size()) {
-                truncated = true;
+                loaded.truncated = true;
                 break;
             }
             if (bytes.size() < want) {
                 break;
             }
         }
-        QString text = QString::fromUtf8(data);
-        if (text.startsWith(QChar(0xFEFF))) {
-            text.remove(0, 1);
+        loaded.body = QString::fromUtf8(data);
+        if (loaded.body.startsWith(QChar(0xFEFF))) {
+            loaded.body.remove(0, 1);
         }
-        if (truncated) {
-            text += QStringLiteral("\n\n— This file is longer than the reader shows. —");
-        }
-        if (text.isEmpty()) {
-            text = QStringLiteral("This file is empty.");
-        }
-        return text;
+        return loaded;
     }));
 }
 
-void MainWindow::closeText() {
+bool MainWindow::closeText(const bool force) {
     if (textPage_ == nullptr || contentStack_ == nullptr) {
-        return;
+        return true;
     }
-    if (contentStack_->currentWidget() == textPage_ && pages_ != nullptr) {
+    if (contentStack_->currentWidget() != textPage_) {
+        return true;
+    }
+    auto* page = static_cast<TextPage*>(textPage_);
+    if (!force && openTextBusy_ && page != nullptr && page->dirty()) {
+        return false;
+    }
+    if (!force && page != nullptr && !openTextTruncated_ && page->dirty()) {
+        const auto answer = QMessageBox::question(
+            this,
+            QStringLiteral("Save note"),
+            QStringLiteral("Save changes to %1?").arg(openTextTitle_),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (answer == QMessageBox::Cancel) {
+            return false;
+        }
+        if (answer == QMessageBox::Save) {
+            saveOpenText(true);
+            return false;
+        }
+    }
+    if (page != nullptr) {
+        page->bump();
+    }
+    openTextId_ = 0;
+    openTextTitle_.clear();
+    openTextTruncated_ = false;
+    openTextBusy_ = false;
+    closeTextAfterSave_ = false;
+    if (pages_ != nullptr) {
         fadeStack(contentStack_, pages_);
     }
+    return true;
+}
+
+void MainWindow::saveOpenText(const bool closeAfter) {
+    auto* page = static_cast<TextPage*>(textPage_);
+    if (page == nullptr || !vault_ || !vault_->is_unlocked() || openTextTruncated_ || openTextBusy_) {
+        return;
+    }
+    const QString body = page->documentText();
+    const QByteArray utf8 = body.toUtf8();
+    const QString title = openTextTitle_.isEmpty() ? QStringLiteral("Note.txt") : openTextTitle_;
+    const std::int64_t previous = openTextId_;
+    const std::int64_t folderId = openTextFolderId_;
+    const int generation = page->generation();
+    closeTextAfterSave_ = closeAfter;
+    openTextBusy_ = true;
+    page->setBusy(true);
+    const auto vault = vault_;
+    auto* watcher = new QFutureWatcher<TextSaveOutcome>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, page, generation, previous, folderId, title] {
+        const TextSaveOutcome outcome = watcher->result();
+        watcher->deleteLater();
+        const bool current = page->generation() == generation;
+        if (current) {
+            openTextBusy_ = false;
+            page->setBusy(false);
+        }
+        if (!outcome.ok) {
+            closeTextAfterSave_ = false;
+            lockAfterTextSave_ = false;
+            if (current) {
+                setError(galleryStatus_, outcome.error.isEmpty()
+                    ? QStringLiteral("The note could not be saved.")
+                    : outcome.error);
+                galleryStatus_->setVisible(true);
+            }
+            resetAutoLock();
+            return;
+        }
+        if (outcome.removed) {
+            if (auto* icon = findListItemById(iconList_, previous)) {
+                delete iconList_->takeItem(iconList_->row(icon));
+            }
+            if (auto* tree = findTreeItemById(detailsTree_, previous)) {
+                delete detailsTree_->takeTopLevelItem(detailsTree_->indexOfTopLevelItem(tree));
+            }
+            if (galleryCache_ != nullptr) {
+                galleryCache_->thumbs.erase(previous);
+                galleryCache_->media.erase(previous);
+                galleryCache_->kinds.erase(previous);
+            }
+            decoratedIds_.erase(previous);
+        }
+        const bool collapsed = outcome.already && outcome.id != previous;
+        if (current) {
+            page->markSaved();
+            if (collapsed) {
+                openTextId_ = 0;
+            } else {
+                openTextId_ = outcome.id;
+                openTextFolderId_ = folderId;
+                openTextTitle_ = title;
+            }
+        }
+        if (!collapsed && findListItemById(iconList_, outcome.id) == nullptr) {
+            revealVideo(
+                outcome.id,
+                title,
+                outcome.size,
+                folderId,
+                QDateTime::currentSecsSinceEpoch());
+        } else {
+            recountLibrary();
+        }
+        showStatus(collapsed
+            ? QStringLiteral("That text is already in the library.")
+            : QStringLiteral("Saved"), false);
+        if (closeTextAfterSave_) {
+            closeTextAfterSave_ = false;
+            closeText(true);
+        }
+        if (lockAfterTextSave_) {
+            lockAfterTextSave_ = false;
+            lockVault();
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([vault, title, utf8, previous, folderId] {
+        TextSaveOutcome outcome;
+        try {
+        const QString safe = noteFileName(title);
+        std::error_code mkdirError;
+        const auto directory = std::filesystem::temp_directory_path() / "mvp-notes";
+        std::filesystem::create_directories(directory, mkdirError);
+        const auto source = directory / safe.toStdWString();
+        QFile file(QString::fromStdWString(source.wstring()));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            outcome.error = QStringLiteral("The note could not be saved.");
+            return outcome;
+        }
+        if (file.write(utf8) != utf8.size()) {
+            file.close();
+            std::filesystem::remove(source, mkdirError);
+            outcome.error = QStringLiteral("The note could not be saved.");
+            return outcome;
+        }
+        file.close();
+        bool already = false;
+        auto imported = vault->import_file(source, {}, folderId, &already);
+        std::filesystem::remove(source, mkdirError);
+        if (!imported) {
+            outcome.error = vaultErrorText(imported.error());
+            return outcome;
+        }
+        outcome.ok = true;
+        outcome.already = already;
+        outcome.id = imported.value();
+        outcome.size = utf8.size();
+        if (previous > 0 && outcome.id != previous) {
+            auto gone = vault->remove_video(previous);
+            outcome.removed = static_cast<bool>(gone);
+        }
+        } catch (const std::exception&) {
+            outcome = {};
+            outcome.error = QStringLiteral("The note could not be saved.");
+        }
+        return outcome;
+    }));
 }
 
 void MainWindow::refreshTransfers() {
@@ -5353,15 +6552,19 @@ void MainWindow::openShare() {
 
 void MainWindow::lockVault() {
     autoLockTimer_->stop();
+    if (!closeText()) {
+        if (closeTextAfterSave_) {
+            lockAfterTextSave_ = true;
+        } else {
+            resetAutoLock();
+        }
+        return;
+    }
     // Sharing stays up until Stop sharing, including a swap. The lock screen
     // only hides this library; the other side can still look and copy.
-    if (peerBrowser_ != nullptr) {
-        auto* closing = peerBrowser_;
-        peerBrowser_ = nullptr;
-        closing->close();
-    }
+    finishPeerApproval(false);
+    dismissPeerBrowser();
     std::filesystem::path root;
-    closeText();
     if (transferPanel_ != nullptr) {
         transferPanel_->hide();
     }

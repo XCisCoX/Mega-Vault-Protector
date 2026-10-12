@@ -2,12 +2,86 @@
 #include "videovault/app/theme.hpp"
 #include "videovault/core/version.hpp"
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#endif
+
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QFont>
 #include <QIcon>
+#include <QLocalSocket>
 #include <QSettings>
 #include <QString>
+
+#include <string>
+
+namespace {
+
+const QString kImportInbox = QStringLiteral("MegaVaultProtect.inbox");
+
+bool forwardToRunning(const QStringList& paths) {
+    QLocalSocket socket;
+    socket.connectToServer(kImportInbox);
+    if (!socket.waitForConnected(400)) {
+        return false;
+    }
+    QByteArray body;
+    if (paths.isEmpty()) {
+        body = "ACTIVATE\n";
+    } else {
+        for (const QString& path : paths) {
+            body += path.toUtf8();
+            body += '\n';
+        }
+    }
+    socket.write(body);
+    socket.flush();
+    socket.waitForBytesWritten(3000);
+    socket.disconnectFromServer();
+    socket.waitForDisconnected(1000);
+    return true;
+}
+
+void installSendToShortcut() {
+#ifdef Q_OS_WIN
+    wchar_t send_to[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_SENDTO, nullptr, SHGFP_TYPE_CURRENT, send_to))) {
+        return;
+    }
+    const std::wstring link = std::wstring(send_to) + L"\\Mega Vault Protect.lnk";
+    const QString exe = QCoreApplication::applicationFilePath();
+    const std::wstring target = exe.toStdWString();
+    const std::wstring work = QFileInfo(exe).absolutePath().toStdWString();
+    // Qt has already initialized COM. A second successful init must not be
+    // torn down, or the rest of the process loses it.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    IShellLinkW* shell = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&shell))) || shell == nullptr) {
+        return;
+    }
+    shell->SetPath(target.c_str());
+    shell->SetDescription(L"Import into Mega Vault Protect");
+    shell->SetWorkingDirectory(work.c_str());
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(shell->QueryInterface(IID_PPV_ARGS(&file))) && file != nullptr) {
+        file->Save(link.c_str(), TRUE);
+        file->Release();
+    }
+    shell->Release();
+#else
+    (void)0;
+#endif
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -40,7 +114,23 @@ int main(int argc, char* argv[]) {
     application.setPalette(videovault::app::darkPalette());
     application.setStyleSheet(videovault::app::appStyleSheet());
 
+    QStringList incoming;
+    const QStringList arguments = QCoreApplication::arguments();
+    for (int index = 1; index < arguments.size(); ++index) {
+        const QFileInfo info(arguments.at(index));
+        if (info.exists()) {
+            incoming.push_back(info.absoluteFilePath());
+        }
+    }
+    installSendToShortcut();
+    if (forwardToRunning(incoming)) {
+        return 0;
+    }
+
     videovault::app::MainWindow window;
+    if (!incoming.isEmpty()) {
+        window.acceptExternalPaths(incoming);
+    }
     window.show();
     return application.exec();
 }

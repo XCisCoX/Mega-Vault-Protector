@@ -305,7 +305,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
-            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
+            || screen is Screen.Music || screen is Screen.Peer
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }

@@ -4,6 +4,17 @@
 #include <QElapsedTimer>
 #include <QRandomGenerator>
 #include <QTcpSocket>
+#if !defined(_WIN32)
+#include <QSslCertificate>
+#include <QSslKey>
+#include <QSslSocket>
+
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -270,6 +281,108 @@ struct ShareTlsIdentity::Impl {
         haveCredentials = true;
         return true;
     }
+#else
+    QSslCertificate certificate;
+    QSslKey key;
+    QString fingerprint;
+
+    bool generate(const QStringList& addresses, QString* error) {
+        Q_UNUSED(addresses)
+        const auto fail = [error] {
+            if (error != nullptr) {
+                *error = QStringLiteral("Could not start the encrypted connection.");
+            }
+            return false;
+        };
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+        if (ctx == nullptr || EVP_PKEY_keygen_init(ctx) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return fail();
+        }
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return fail();
+        }
+        EVP_PKEY* pkey = nullptr;
+        if (EVP_PKEY_keygen(ctx, &pkey) <= 0 || pkey == nullptr) {
+            EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY_free(pkey);
+            return fail();
+        }
+        EVP_PKEY_CTX_free(ctx);
+
+        X509* cert = X509_new();
+        if (cert == nullptr) {
+            EVP_PKEY_free(pkey);
+            return fail();
+        }
+        X509_set_version(cert, 2);
+        ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+        X509_gmtime_adj(X509_getm_notBefore(cert), -24L * 60L * 60L);
+        X509_gmtime_adj(X509_getm_notAfter(cert), 2L * 24L * 60L * 60L);
+        if (X509_set_pubkey(cert, pkey) != 1) {
+            X509_free(cert);
+            EVP_PKEY_free(pkey);
+            return fail();
+        }
+        X509_NAME* name = X509_get_subject_name(cert);
+        if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                reinterpret_cast<const unsigned char*>("MegaVaultProtect"), -1, -1, 0) != 1
+            || X509_set_issuer_name(cert, name) != 1
+            || X509_sign(cert, pkey, EVP_sha256()) == 0) {
+            X509_free(cert);
+            EVP_PKEY_free(pkey);
+            return fail();
+        }
+
+        unsigned char* der = nullptr;
+        const int derSize = i2d_X509(cert, &der);
+        if (derSize <= 0 || der == nullptr) {
+            X509_free(cert);
+            EVP_PKEY_free(pkey);
+            return fail();
+        }
+        const QByteArray derBytes(reinterpret_cast<const char*>(der), derSize);
+        OPENSSL_free(der);
+        fingerprint = QString::fromLatin1(
+            QCryptographicHash::hash(derBytes, QCryptographicHash::Sha256).toHex());
+
+        auto readPem = [](BIO* bio) {
+            QByteArray pem;
+            BUF_MEM* memory = nullptr;
+            BIO_get_mem_ptr(bio, &memory);
+            if (memory != nullptr && memory->data != nullptr && memory->length > 0) {
+                pem = QByteArray(memory->data, static_cast<int>(memory->length));
+            }
+            return pem;
+        };
+        BIO* certBio = BIO_new(BIO_s_mem());
+        QByteArray certPem;
+        if (certBio != nullptr && PEM_write_bio_X509(certBio, cert) == 1) {
+            certPem = readPem(certBio);
+        }
+        BIO_free(certBio);
+        BIO* keyBio = BIO_new(BIO_s_mem());
+        QByteArray keyPem;
+        RSA* rsa = EVP_PKEY_get1_RSA(pkey);
+        if (keyBio != nullptr && rsa != nullptr && PEM_write_bio_RSAPrivateKey(
+                keyBio, rsa, nullptr, nullptr, 0, nullptr, nullptr) == 1) {
+            keyPem = readPem(keyBio);
+        }
+        RSA_free(rsa);
+        BIO_free(keyBio);
+        X509_free(cert);
+        EVP_PKEY_free(pkey);
+        if (certPem.isEmpty() || keyPem.isEmpty()) {
+            return fail();
+        }
+        certificate = QSslCertificate(certPem, QSsl::Pem);
+        key = QSslKey(keyPem, QSsl::Rsa, QSsl::Pem, QSsl::PrivateKey);
+        if (certificate.isNull() || key.isNull()) {
+            return fail();
+        }
+        return true;
+    }
 #endif
 };
 
@@ -285,17 +398,19 @@ std::shared_ptr<ShareTlsIdentity> ShareTlsIdentity::create(
     if (fingerprint != nullptr) *fingerprint = impl->fingerprint;
     return std::shared_ptr<ShareTlsIdentity>(new ShareTlsIdentity(std::move(impl)));
 #else
-    Q_UNUSED(addresses)
-    Q_UNUSED(fingerprint)
-    if (error != nullptr) {
-        *error = QStringLiteral("Encrypted sharing is not available on this system.");
-    }
-    return nullptr;
+    auto impl = std::make_unique<Impl>();
+    if (!impl->generate(addresses, error)) return nullptr;
+    if (fingerprint != nullptr) *fingerprint = impl->fingerprint;
+    return std::shared_ptr<ShareTlsIdentity>(new ShareTlsIdentity(std::move(impl)));
 #endif
 }
 
 struct TlsChannel::Impl {
+#if defined(_WIN32)
     QTcpSocket socket;
+#else
+    QSslSocket socket;
+#endif
     std::shared_ptr<ShareTlsIdentity> identity;
     QByteArray pending;
     QByteArray plain;
@@ -408,9 +523,19 @@ TlsChannel::~TlsChannel() = default;
 
 bool TlsChannel::accept(const qintptr descriptor, const std::shared_ptr<ShareTlsIdentity>& identity) {
 #if !defined(_WIN32)
-    Q_UNUSED(descriptor)
-    Q_UNUSED(identity)
-    return false;
+    if (!identity || identity->impl_->certificate.isNull() || identity->impl_->key.isNull()) return false;
+    if (!QSslSocket::supportsSsl()) return false;
+    impl_->identity = identity;
+    impl_->socket.setPeerVerifyMode(QSslSocket::VerifyNone);
+    impl_->socket.setProtocol(QSsl::TlsV1_2OrLater);
+    impl_->socket.setLocalCertificate(identity->impl_->certificate);
+    impl_->socket.setPrivateKey(identity->impl_->key);
+    impl_->socket.setSocketOption(QAbstractSocket::LowDelayOption, 1);
+    if (!impl_->socket.setSocketDescriptor(descriptor)) return false;
+    impl_->socket.startServerEncryption();
+    if (!impl_->socket.waitForEncrypted(kHandshakeMs)) return false;
+    impl_->open = true;
+    return true;
 #else
     if (!identity || !identity->impl_->haveCredentials) return false;
     impl_->identity = identity;
@@ -495,9 +620,15 @@ bool TlsChannel::accept(const qintptr descriptor, const std::shared_ptr<ShareTls
 
 qint64 TlsChannel::write(const char* data, const qint64 size) {
 #if !defined(_WIN32)
-    Q_UNUSED(data)
-    Q_UNUSED(size)
-    return -1;
+    if (!impl_->open || data == nullptr || size < 0) return -1;
+    qint64 off = 0;
+    while (off < size) {
+        const qint64 wrote = impl_->socket.write(data + off, size - off);
+        if (wrote <= 0) return -1;
+        off += wrote;
+        if (!impl_->socket.waitForBytesWritten(20000)) return -1;
+    }
+    return size;
 #else
     if (!impl_->open || data == nullptr || size < 0) return -1;
     if (!impl_->sendEncrypted(data, static_cast<int>(size))) return -1;
@@ -515,8 +646,9 @@ bool TlsChannel::waitForBytesWritten(const int timeoutMs) {
 
 bool TlsChannel::waitForReadyRead(const int timeoutMs) {
 #if !defined(_WIN32)
-    Q_UNUSED(timeoutMs)
-    return false;
+    if (!impl_->open) return false;
+    if (impl_->socket.bytesAvailable() > 0) return true;
+    return impl_->socket.waitForReadyRead(timeoutMs);
 #else
     if (!impl_->open) return false;
     if (!impl_->plain.isEmpty()) return true;
@@ -525,9 +657,13 @@ bool TlsChannel::waitForReadyRead(const int timeoutMs) {
 }
 
 QByteArray TlsChannel::readAll() {
+#if !defined(_WIN32)
+    return impl_->socket.readAll();
+#else
     QByteArray out;
     out.swap(impl_->plain);
     return out;
+#endif
 }
 
 void TlsChannel::flush() {

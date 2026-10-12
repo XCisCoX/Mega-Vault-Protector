@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/MVP-logo.png" alt="Mega Vault Protect" width="130" height="130" />
+<img src="docs/MVP-logo.png" alt="Mega Vault Protect" width="360" />
 
 # Mega Vault Protect
 
