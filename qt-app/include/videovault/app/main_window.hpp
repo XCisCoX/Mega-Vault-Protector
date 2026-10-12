@@ -211,7 +211,6 @@ private:
     QTimer* noticeTimer_{nullptr};
     QPushButton* importButton_{nullptr};
     QPushButton* importFolderButton_{nullptr};
-    QPushButton* newFolderButton_{nullptr};
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};

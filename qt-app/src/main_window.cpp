@@ -601,13 +601,34 @@ QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id
 const QPixmap& folderPixmap() {
     static const QPixmap pix = [] {
         const QPixmap source(":/icons/files_folder.png");
-        const QPixmap tinted = tintedIcon(source, QColor(0x4F, 0xA6, 0xF7));
-        if (!tinted.isNull()) {
-            return tinted.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        QPixmap tinted = tintedIcon(source, QColor(0x4F, 0xA6, 0xF7));
+        if (tinted.isNull()) {
+            QPixmap image(256, 256);
+            image.fill(Qt::transparent);
+            return image;
         }
-        QPixmap image(128, 128);
-        image.fill(Qt::transparent);
-        return image;
+        // The file has a wide empty margin. Crop to the folder itself so a
+        // tile shows a folder, not a small mark in a dark square.
+        const QImage image = tinted.toImage().convertToFormat(QImage::Format_ARGB32);
+        int minX = image.width();
+        int minY = image.height();
+        int maxX = 0;
+        int maxY = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (qAlpha(image.pixel(x, y)) <= 16) {
+                    continue;
+                }
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+            }
+        }
+        if (maxX > minX && maxY > minY) {
+            tinted = QPixmap::fromImage(image.copy(minX, minY, maxX - minX + 1, maxY - minY + 1));
+        }
+        return tinted.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }();
     return pix;
 }
@@ -717,10 +738,12 @@ public:
             const QRect thumb(row.left() + 14, row.top() + (row.height() - 44) / 2, 44, 44);
             painter->fillRect(thumb, QColor(28, 28, 30));
             const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
+            const int rowKind = index.data(Qt::UserRole + 12).toInt();
+            const bool folderRow = rowKind == 1 || rowKind == 2 || rowKind == kKindPhone;
             const bool kindTile = !index.data(Qt::UserRole + 15).toString().isEmpty()
                 && index.data(Qt::UserRole + 16).toInt() == 0;
             if (!source.isNull()) {
-                if (kindTile) {
+                if (folderRow || kindTile) {
                     const QPixmap scaled = source.scaled(
                         thumb.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
                     painter->drawPixmap(
@@ -778,10 +801,21 @@ public:
         const QRect tile = option.rect.adjusted(1, 1, -2, -2);
         painter->fillRect(tile, QColor(22, 22, 24));
         const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
+        const int tileKind = index.data(Qt::UserRole + 12).toInt();
+        const bool folderTile = tileKind == 1 || tileKind == 2 || tileKind == kKindPhone;
         const bool kindTile = !index.data(Qt::UserRole + 15).toString().isEmpty()
             && index.data(Qt::UserRole + 16).toInt() == 0;
         if (!source.isNull()) {
-            if (kindTile) {
+            if (folderTile) {
+                const int pad = std::max(10, tile.width() / 7);
+                const QRect box = tile.adjusted(pad, pad, -pad, -pad);
+                const QPixmap scaled = source.scaled(
+                    box.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                painter->drawPixmap(
+                    box.x() + (box.width() - scaled.width()) / 2,
+                    box.y() + (box.height() - scaled.height()) / 2,
+                    scaled);
+            } else if (kindTile) {
                 const QPixmap scaled = source.scaled(
                     tile.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 painter->drawPixmap(
@@ -814,6 +848,26 @@ public:
             painter->setPen(QPen(QColor(51, 144, 236), 3));
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(tile.adjusted(1, 1, -2, -2));
+        }
+        if (folderTile) {
+            const QString name = index.data(Qt::UserRole + 1).toString();
+            const QRect shade(tile.left(), tile.bottom() - 36, tile.width(), 36);
+            QLinearGradient fade(shade.topLeft(), shade.bottomLeft());
+            fade.setColorAt(0.0, QColor(0, 0, 0, 0));
+            fade.setColorAt(1.0, QColor(0, 0, 0, 190));
+            painter->fillRect(shade, fade);
+            QFont titleFont(QStringLiteral("Segoe UI"));
+            titleFont.setPixelSize(12);
+            titleFont.setWeight(QFont::DemiBold);
+            painter->setFont(titleFont);
+            painter->setPen(Qt::white);
+            const QFontMetrics titleMetrics(titleFont);
+            painter->drawText(
+                QRect(tile.left() + 6, tile.bottom() - titleMetrics.height() - 6, tile.width() - 12, titleMetrics.height()),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                titleMetrics.elidedText(name, Qt::ElideRight, tile.width() - 12));
+            painter->restore();
+            return;
         }
         if (kindTile) {
             painter->restore();
@@ -1911,34 +1965,39 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
-    importButton_ = new QPushButton(QStringLiteral("Import"), toolbar);
-    importButton_->setProperty("primary", true);
-    importButton_->setToolTip(QStringLiteral("Import videos, pictures, songs, or PDFs"));
-    importFolderButton_ = new QPushButton(QStringLiteral("Folder"), toolbar);
-    importFolderButton_->setProperty("quiet", true);
-    importFolderButton_->setToolTip(QStringLiteral(
-        "Import a folder, including the folders inside it. You can also drop a folder on the library, "
-        "or use Send to → Mega Vault Protect in Explorer."));
-    auto* newNoteButton = new QPushButton(QStringLiteral("New note"), toolbar);
-    newNoteButton->setProperty("quiet", true);
-    newNoteButton->setToolTip(QStringLiteral("Create a text note in this folder"));
-    newFolderButton_ = new QPushButton(QStringLiteral("New folder"), toolbar);
-    newFolderButton_->setProperty("quiet", true);
-    newFolderButton_->setToolTip(QStringLiteral(
-        "Create a folder here. Folders are names in the vault — the encrypted files stay put."));
-    shareButton_ = new QPushButton(QStringLiteral("Share"), toolbar);
-    shareButton_->setProperty("quiet", true);
-    shareButton_->setToolTip(QStringLiteral(
-        "Share this vault on Wi-Fi over an encrypted connection. The phone must enter the vault password. "
-        "Locking this PC does not stop sharing."));
-    settingsButton_ = new QPushButton(QStringLiteral("Settings"), toolbar);
-    settingsButton_->setProperty("quiet", true);
-    settingsButton_->setToolTip(QStringLiteral(
-        "Change the password, manage tags, and adjust player settings"));
-    auto* lockButton = new QPushButton(QStringLiteral("Lock"), toolbar);
-    lockButton->setProperty("quiet", true);
-    lockButton->setToolTip(QStringLiteral(
-        "Lock this PC. A phone that already entered the password keeps access until you stop sharing."));
+    const auto makeIconButton = [](QWidget* parent, const QString& iconPath, const QString& tip, const bool filled) {
+        auto* button = new QPushButton(parent);
+        button->setIcon(QIcon(iconPath));
+        button->setIconSize(QSize(22, 22));
+        button->setFixedSize(36, 36);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setToolTip(tip);
+        button->setStyleSheet(filled
+            ? QStringLiteral(
+                "QPushButton { background: #3390ec; border: none; border-radius: 18px; padding: 0; min-height: 36px; max-height: 36px; }"
+                "QPushButton:hover { background: #4ba0f5; }"
+                "QPushButton:disabled { background: rgba(51, 144, 236, 90); }")
+            : QStringLiteral(
+                "QPushButton { background: transparent; border: none; border-radius: 18px; padding: 0; min-height: 36px; max-height: 36px; }"
+                "QPushButton:hover { background: rgba(255, 255, 255, 28); }"
+                "QPushButton:disabled { background: transparent; }"
+                "QPushButton[sharing=\"true\"] { background: rgba(51, 144, 236, 90); }"));
+        return button;
+    };
+    importButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_add.png"),
+        QStringLiteral("Add"), true);
+    // Folder import uses the same button. Both stay in step while a batch runs.
+    importFolderButton_ = importButton_;
+    shareButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_share.png"),
+        QStringLiteral("Share this vault on Wi-Fi over an encrypted connection. "
+                       "The phone must enter the vault password. Locking this PC does not stop sharing."),
+        false);
+    settingsButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_settings.png"),
+        QStringLiteral("Change the password, manage tags, and adjust player settings"), false);
+    auto* lockButton = makeIconButton(toolbar, QStringLiteral(":/icons/bar_lock.png"),
+        QStringLiteral("Lock this PC. A phone that already entered the password keeps access until you stop sharing."),
+        false);
 
     auto* titleRow = new QHBoxLayout();
     titleRow->setSpacing(8);
@@ -1950,14 +2009,6 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addWidget(libraryTitle);
     titleRow->addStretch(1);
     titleRow->addWidget(importButton_);
-    titleRow->addWidget(importFolderButton_);
-    titleRow->addWidget(newNoteButton);
-    auto* packageButton = new QPushButton(QStringLiteral("Package"), toolbar);
-    packageButton->setProperty("quiet", true);
-    packageButton->setToolTip(QStringLiteral(
-        "Export items or a folder as an encrypted package, or import one"));
-    titleRow->addWidget(newFolderButton_);
-    titleRow->addWidget(packageButton);
     titleRow->addWidget(shareButton_);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
@@ -1966,22 +2017,40 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search names or tags"));
     searchEdit_->setToolTip(QStringLiteral("Filter the library by file name or tag"));
     searchEdit_->setMinimumWidth(160);
-    auto* detailsMode = new QPushButton(QStringLiteral("Details"), toolbar);
-    auto* iconsMode = new QPushButton(QStringLiteral("Icons"), toolbar);
-    auto* listMode = new QPushButton(QStringLiteral("List"), toolbar);
+    auto* modeHost = new QWidget(toolbar);
+    modeHost->setObjectName(QStringLiteral("viewModes"));
+    modeHost->setStyleSheet(QStringLiteral(
+        "QWidget#viewModes { background: rgba(255, 255, 255, 14);"
+        " border: 1px solid rgba(255, 255, 255, 28); border-radius: 18px; }"));
+    auto* modeLayout = new QHBoxLayout(modeHost);
+    modeLayout->setContentsMargins(2, 2, 2, 2);
+    modeLayout->setSpacing(0);
+    auto* detailsMode = new QPushButton(modeHost);
+    auto* iconsMode = new QPushButton(modeHost);
+    auto* listMode = new QPushButton(modeHost);
+    detailsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_details.png")));
+    detailsMode->setToolTip(QStringLiteral("Details"));
+    iconsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_icons.png")));
+    iconsMode->setToolTip(QStringLiteral("Icons"));
+    listMode->setIcon(QIcon(QStringLiteral(":/icons/bar_list.png")));
+    listMode->setToolTip(QStringLiteral("List"));
     viewModeGroup_ = new QButtonGroup(toolbar);
     viewModeGroup_->setExclusive(true);
     const QString modeStyle = QStringLiteral(
-        "QPushButton { min-height: 32px; padding: 0 12px; border-radius: 16px;"
-        " background: transparent; border: none; color: #8e8e93; }"
-        "QPushButton:checked { background: rgba(51, 144, 236, 90); color: white; }");
+        "QPushButton { min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px;"
+        " padding: 0; border-radius: 16px; background: transparent; border: none; }"
+        "QPushButton:checked { background: rgba(51, 144, 236, 90); }"
+        "QPushButton:hover { background: rgba(255, 255, 255, 18); }"
+        "QPushButton:checked:hover { background: rgba(51, 144, 236, 120); }");
     int modeId = 0;
     for (auto* button : {detailsMode, iconsMode, listMode}) {
+        button->setIconSize(QSize(18, 18));
         button->setCheckable(true);
         button->setFocusPolicy(Qt::NoFocus);
         button->setCursor(Qt::PointingHandCursor);
         button->setStyleSheet(modeStyle);
         viewModeGroup_->addButton(button, modeId);
+        modeLayout->addWidget(button);
         ++modeId;
     }
     sortButton_ = new QPushButton(toolbar);
@@ -1993,9 +2062,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* filterRow = new QHBoxLayout();
     filterRow->setSpacing(8);
     filterRow->addWidget(searchEdit_, 1);
-    filterRow->addWidget(detailsMode);
-    filterRow->addWidget(iconsMode);
-    filterRow->addWidget(listMode);
+    filterRow->addWidget(modeHost);
     filterRow->addWidget(sortButton_);
     filterRow->addWidget(tagFilterCombo_);
     toolbarLayout->addLayout(filterRow);
@@ -2105,21 +2172,37 @@ QWidget* MainWindow::buildUnlockedPage() {
     statusLayout->addWidget(galleryStatus_);
 
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
-    connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
-    connect(importFolderButton_, &QPushButton::clicked, this, [this] { beginImportFolder(); });
-    connect(newNoteButton, &QPushButton::clicked, this, [this] { beginNewNote(); });
-    connect(newFolderButton_, &QPushButton::clicked, this, [this] { beginNewFolder(); });
-    connect(packageButton, &QPushButton::clicked, this, [this, packageButton] {
-        QMenu menu(this);
-        menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
-        menu.setAttribute(Qt::WA_TranslucentBackground);
-        QAction* importAction = menu.addAction(QStringLiteral("Import package…"));
-        QAction* exportAction = menu.addAction(QStringLiteral("Export package…"));
-        QAction* chosen = menu.exec(packageButton->mapToGlobal(QPoint(0, packageButton->height())));
-        if (chosen == importAction) {
+    connect(importButton_, &QPushButton::clicked, this, [this] {
+        CommandPopup menu(this);
+        menu.addCommand(QStringLiteral("Import files…"), 1);
+        menu.addCommand(QStringLiteral("Import folder…"), 2);
+        menu.addCommand(QStringLiteral("New note"), 3);
+        menu.addCommand(QStringLiteral("New folder"), 4);
+        menu.addCommand(QStringLiteral("Import package…"), 5);
+        menu.addCommand(QStringLiteral("Export package…"), 6);
+        const QPoint origin = importButton_->mapToGlobal(QPoint(0, importButton_->height()));
+        placePopup(&menu, origin);
+        switch (menu.exec()) {
+        case 1:
+            beginImport();
+            break;
+        case 2:
+            beginImportFolder();
+            break;
+        case 3:
+            beginNewNote();
+            break;
+        case 4:
+            beginNewFolder();
+            break;
+        case 5:
             beginImportPackage();
-        } else if (chosen == exportAction) {
+            break;
+        case 6:
             beginExportPackage(0);
+            break;
+        default:
+            break;
         }
     });
     connect(shareButton_, &QPushButton::clicked, this, [this] { openShare(); });
@@ -4580,7 +4663,11 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
         }
     };
     const auto vault = vault_;
-    auto presentIdentity = [this, vault, video_id, originalSize, applyThumb](const FileIdentity& identity) {
+    const auto generation = galleryGeneration_;
+    auto presentIdentity = [this, vault, video_id, originalSize, applyThumb, generation](const FileIdentity& identity) {
+        if (generation != galleryGeneration_) {
+            return;
+        }
         galleryCache_->kinds[video_id] = identity;
         auto* iconItem = findListItemById(iconList_, video_id);
         auto* treeItem = findTreeItemById(detailsTree_, video_id);
@@ -4620,10 +4707,10 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             galleryCache_->pdfThumbs.insert(video_id);
             auto* thumbWatcher = new QFutureWatcher<QByteArray>(this);
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, thumbWatcher, applyThumb] {
+                [this, video_id, thumbWatcher, applyThumb, generation] {
                     const QByteArray jpeg = thumbWatcher->result();
                     thumbWatcher->deleteLater();
-                    if (jpeg.isEmpty()) {
+                    if (generation != galleryGeneration_ || jpeg.isEmpty()) {
                         return;
                     }
                     QPixmap pixmap;
@@ -4701,10 +4788,10 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, thumbWatcher, applyThumb] {
+                [this, video_id, thumbWatcher, applyThumb, generation] {
                     const auto outcome = *thumbWatcher->result();
                     thumbWatcher->deleteLater();
-                    if (!outcome || outcome.value().bytes.empty()) {
+                    if (generation != galleryGeneration_ || !outcome || outcome.value().bytes.empty()) {
                         return;
                     }
                     auto* iconItem = findListItemById(iconList_, video_id);
@@ -4769,10 +4856,10 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
         }
         auto* mediaWatcher = new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
         connect(mediaWatcher, &QFutureWatcherBase::finished, this,
-            [this, video_id, mediaWatcher, applyMedia] {
+            [this, video_id, mediaWatcher, applyMedia, generation] {
                 const auto outcome = *mediaWatcher->result();
                 mediaWatcher->deleteLater();
-                if (!outcome) {
+                if (generation != galleryGeneration_ || !outcome) {
                     return;
                 }
                 galleryCache_->media[video_id] = outcome.value();
@@ -5828,7 +5915,13 @@ void MainWindow::ensureShareServer() {
     shareServer_ = std::make_unique<ShareServer>();
     shareServer_->setOnRunning([this](bool sharing) {
         if (shareButton_ != nullptr) {
-            shareButton_->setText(sharing ? QStringLiteral("Sharing…") : QStringLiteral("Share"));
+            shareButton_->setToolTip(sharing
+                ? QStringLiteral("Sharing…")
+                : QStringLiteral("Share this vault on Wi-Fi over an encrypted connection. "
+                                 "The phone must enter the vault password. Locking this PC does not stop sharing."));
+            shareButton_->setProperty("sharing", sharing);
+            shareButton_->style()->unpolish(shareButton_);
+            shareButton_->style()->polish(shareButton_);
         }
     });
     shareServer_->setLinkApprover(this, [this](const QString& phone, std::function<void(bool)> answer) {
@@ -6578,6 +6671,20 @@ void MainWindow::lockVault() {
         musicWindow_ = nullptr;
         dying->close();
     }
+    // File ids start over in every vault. Thumbnails, durations, and file
+    // types kept from the one being locked would be drawn on the next one.
+    if (galleryCache_ != nullptr) {
+        galleryCache_->thumbs.clear();
+        galleryCache_->media.clear();
+        galleryCache_->kinds.clear();
+        galleryCache_->pdfThumbs.clear();
+    }
+    pendingVideos_.clear();
+    galleryQueue_.clear();
+    galleryQueueIndex_ = 0;
+    decoratedIds_.clear();
+    galleryListing_ = false;
+    ++galleryGeneration_;
     if (vault_) {
         root = vault_->root_path();
         if (peerLinked()) {
