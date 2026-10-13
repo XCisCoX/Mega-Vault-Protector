@@ -121,6 +121,18 @@ public:
         std::int64_t video_id,
         const WrappedVideoKey& key);
 
+    // Phase 8: replaces an item's package metadata and its wrapped file key in
+    // one transaction. The row id, folder and tags are untouched, so an edited
+    // note keeps its place in the library. Used by replace_video_content.
+    [[nodiscard]] Result<bool> update_video_package(
+        std::int64_t video_id,
+        const VideoRow& row,
+        const WrappedVideoKey& key);
+
+    // Phase 8: drops a stored thumbnail. Replacing an item's content discards
+    // any thumbnail tied to the old bytes. A missing row is not an error.
+    [[nodiscard]] Result<bool> delete_thumbnail(std::int64_t video_id);
+
     [[nodiscard]] Result<bool> update_vault_metadata_record(
         const VaultMetadata& metadata);
 

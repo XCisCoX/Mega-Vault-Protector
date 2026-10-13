@@ -52,6 +52,7 @@ struct VaultOperationResult;
 class PlayerWindow;
 class MusicWindow;
 class PdfWindow;
+class RecordWindow;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -137,12 +138,17 @@ private:
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
     void closePdf();
+    // A note is a plain text item, edited in the in-window sheet.
     void beginNewNote();
     void beginText(std::int64_t video_id, const QString& title);
     // Returns false when the reader stays open.
     bool closeText(bool force = false);
     void saveOpenText(bool closeAfter);
     void placeTransferPanel();
+    // A record is a key/value item, edited in its own window.
+    void beginNewRecord();
+    void beginRecord(std::int64_t video_id, const QString& title);
+    void closeRecord();
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
@@ -219,6 +225,7 @@ private:
     QLabel* notice_{nullptr};
     QTimer* noticeTimer_{nullptr};
     QPushButton* importButton_{nullptr};
+    // Folder import is the same button: the Add popup offers both.
     QPushButton* importFolderButton_{nullptr};
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
@@ -246,6 +253,8 @@ private:
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
     PdfWindow* pdfWindow_{nullptr};
+    RecordWindow* recordWindow_{nullptr};
+    // In-window text reader/editor: the page plus the item it belongs to.
     QWidget* textPage_{nullptr};
     std::int64_t openTextId_{0};
     std::int64_t openTextFolderId_{0};

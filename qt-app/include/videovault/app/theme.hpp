@@ -107,6 +107,15 @@ inline QString appStyleSheet() {
             font-weight: 600;
         }
         QPushButton[primary="true"]:hover { background: #4ba0f5; }
+        /* A disabled primary action must not still look clickable. The record
+           editor's Save button is the first primary button that gets disabled
+           (while nothing is unsaved), and without this rule the plain
+           QPushButton:disabled rule above loses to the attribute selector. */
+        QPushButton[primary="true"]:disabled {
+            color: #9a9aa0;
+            background: #1d5b96;
+            border-color: #1d5b96;
+        }
         QPushButton[quiet="true"] {
             color: #d1d1d6;
             background: transparent;

@@ -1057,6 +1057,123 @@ Result<bool> Database::update_video_key(
     return true;
 }
 
+Result<bool> Database::update_video_package(
+    const std::int64_t video_id,
+    const VideoRow& row,
+    const WrappedVideoKey& key) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    auto transaction = run(database_, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [this] { (void)run(database_, "ROLLBACK;"); };
+
+    // imported_at and folder_id are deliberately not touched: replacing content
+    // must not reorder the gallery or move the item out of its folder.
+    Statement update(database_,
+        "UPDATE videos SET display_name = ?2, original_size = ?3,"
+        " package_relative_path = ?4, package_size = ?5, package_sha256 = ?6,"
+        " format_version = ?7, algorithm_id = ?8, chunk_size = ?9,"
+        " package_id = ?10, content_sha256 = ?11 WHERE id = ?1;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 1, video_id) != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 2, row.display_name.c_str(),
+               static_cast<int>(row.display_name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 3,
+               static_cast<sqlite3_int64>(row.original_size)) != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 4, row.package_relative_path.c_str(),
+               static_cast<int>(row.package_relative_path.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 5,
+               static_cast<sqlite3_int64>(row.package_size)) != SQLITE_OK) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare video package update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    const auto bound_sha = bind_blob(update, 6, row.package_sha256);
+    if (!bound_sha
+        || sqlite3_bind_int(update.get(), 7, static_cast<int>(row.format_version)) != SQLITE_OK
+        || sqlite3_bind_int(update.get(), 8, static_cast<int>(row.algorithm_id)) != SQLITE_OK
+        || sqlite3_bind_int(update.get(), 9, static_cast<int>(row.chunk_size)) != SQLITE_OK) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "bind video package update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    const auto bound_package = bind_blob(update, 10, row.package_id);
+    if (!bound_package) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "bind video package update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    if (row.has_content_sha256) {
+        const auto bound_content = bind_blob(update, 11, row.content_sha256);
+        if (!bound_content || sqlite3_step(update.get()) != SQLITE_DONE) {
+            const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+                "execute video package update", sqlite3_extended_errcode(database_));
+            rollback();
+            return error;
+        }
+    } else if (sqlite3_bind_null(update.get(), 11) != SQLITE_OK
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute video package update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    if (sqlite3_changes(database_) == 0) {
+        rollback();
+        return VaultError{VaultErrorCode::InvalidArgument, "no video with the given id"};
+    }
+
+    Statement key_update(database_,
+        "UPDATE video_keys SET wrapped_key = ?2, wrap_nonce = ?3 WHERE video_id = ?1;");
+    if (key_update.status() != SQLITE_OK
+        || sqlite3_bind_int64(key_update.get(), 1, video_id) != SQLITE_OK) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare video key update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    const auto bound_key = bind_blob(key_update, 2, key.wrapped);
+    const auto bound_nonce = bind_blob(key_update, 3, key.nonce);
+    if (!bound_key || !bound_nonce || sqlite3_step(key_update.get()) != SQLITE_DONE) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute video key update", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    if (sqlite3_changes(database_) == 0) {
+        rollback();
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "no wrapped key exists for the given video"};
+    }
+
+    auto committed = run(database_, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
+Result<bool> Database::delete_thumbnail(const std::int64_t video_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement remove(database_, "DELETE FROM thumbnails WHERE video_id = ?1;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, video_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute thumbnail delete", sqlite3_extended_errcode(database_));
+    }
+    return true;
+}
+
 Result<bool> Database::update_vault_metadata_record(const VaultMetadata& metadata) {
     if (database_ == nullptr) {
         return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
