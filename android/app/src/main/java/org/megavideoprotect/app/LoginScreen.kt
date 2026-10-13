@@ -1,6 +1,7 @@
 package org.megavideoprotect.app
 
 import android.Manifest
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -47,6 +48,9 @@ fun LoginScreen(
     var showFolderPicker by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
+    var cloud by remember { mutableStateOf(false) }
+    var cloudAddress by remember { mutableStateOf("") }
+    var cloudFingerprint by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var checkingPc by remember { mutableStateOf(false) }
@@ -73,9 +77,34 @@ fun LoginScreen(
         val code = pcCode
         error = null
         busy = true
-        checkingPc = code != null
+        checkingPc = code != null || cloud
         scope.launch {
-            if (code != null) {
+            if (cloud) {
+                val host = cloudAddress.trim().removePrefix("https://").removePrefix("http://")
+                val publicKey = cloudFingerprint.trim().lowercase()
+                if (!host.contains(':') || publicKey.length != 64) {
+                    busy = false
+                    checkingPc = false
+                    error = "Enter the address as host:port and the server public key."
+                    return@launch
+                }
+                val failure = withContext(Dispatchers.IO) {
+                    RemoteVault.login(
+                        "mvpvault://$host?fp=$publicKey",
+                        password,
+                        Build.MODEL.ifBlank { "phone" },
+                        "phone",
+                    )
+                }
+                busy = false
+                checkingPc = false
+                if (failure == null) {
+                    GalleryCache.clear()
+                    onUnlocked()
+                } else {
+                    error = failure
+                }
+            } else if (code != null) {
                 val failure = withContext(Dispatchers.IO) { RemoteVault.login(code, password) }
                 busy = false
                 checkingPc = false
@@ -121,10 +150,24 @@ fun LoginScreen(
             MvpCard(Modifier.widthIn(max = 420.dp).fillMaxWidth()) {
                 MvpTitle("Unlock")
                 MvpDescription(
-                    if (pcCode == null) "Enter the vault password."
-                    else "PC code ready. This password opens the shared vault."
+                    when {
+                        cloud -> "Unlock the cloud vault with its vault password."
+                        pcCode == null -> "Enter the vault password."
+                        else -> "PC code ready. This password opens the shared vault."
+                    }
                 )
-                if (pcCode != null) {
+                if (cloud) {
+                    MvpInput(
+                        value = cloudAddress,
+                        onValueChange = { cloudAddress = it },
+                        placeholder = "Cloud address (host:port)",
+                    )
+                    MvpInput(
+                        value = cloudFingerprint,
+                        onValueChange = { cloudFingerprint = it },
+                        placeholder = "Server public key",
+                    )
+                } else if (pcCode != null) {
                     Text(
                         "Use this phone",
                         color = Mvp.accent,
@@ -160,20 +203,34 @@ fun LoginScreen(
                     ) {
                         CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
                         Text(
-                            if (checkingPc) "Checking the password with the PC…"
-                            else "Unlocking — deriving the key from your password…",
+                            when {
+                                cloud -> "Connecting to the cloud…"
+                                checkingPc -> "Checking the password with the PC…"
+                                else -> "Unlocking — deriving the key from your password…"
+                            },
                             color = Mvp.description,
                             fontSize = 12.sp,
                         )
                     }
                 }
                 MvpButton(
-                    if (pcCode == null) "Unlock vault" else "Connect",
+                    if (pcCode == null && !cloud) "Unlock vault" else "Connect",
                     onClick = { unlock() },
                     primary = true,
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (pcCode == null) {
+                    MvpButton(
+                        if (cloud) "This phone" else "Cloud login",
+                        onClick = {
+                            cloud = !cloud
+                            error = null
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 MvpButton("Back", onClick = onBack, enabled = !busy, modifier = Modifier.fillMaxWidth())
                 if (showFolderPicker) {
                     FolderPickerDialog(

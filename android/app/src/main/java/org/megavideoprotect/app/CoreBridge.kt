@@ -43,6 +43,16 @@ object CoreBridge {
     /** Short clips only. Null means the video is longer than about 1.5s, so ExoPlayer should play it. */
     external fun nativeLoopClip(id: Long, maxDimension: Int): ByteArray?
     external fun nativeClose()
+    external fun nativePackageProgress(): Double
+    external fun nativeExportPackage(
+        path: String,
+        password: String,
+        ids: LongArray,
+        paths: Array<String>,
+        dirs: Array<String>,
+        compress: Boolean,
+    ): String
+    external fun nativeImportPackage(path: String, password: String, folderId: Long): String
 
     class Result(
         val ok: Boolean,

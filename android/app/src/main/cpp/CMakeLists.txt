@@ -17,6 +17,7 @@ add_library(mvpcore SHARED
     ${CORE_SRC}/src/media.cpp
     ${CORE_SRC}/src/metadata.cpp
     ${CORE_SRC}/src/package.cpp
+    ${CORE_SRC}/src/share_package.cpp
     ${CORE_SRC}/src/vault.cpp
     ${CORE_SRC}/src/version.cpp
 )

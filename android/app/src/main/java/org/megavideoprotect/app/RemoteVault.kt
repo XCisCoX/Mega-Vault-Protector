@@ -32,6 +32,15 @@ object RemoteVault {
     @Volatile var lastFailure: String? = null
         private set
 
+    /** Cloud login uses the same pinned TLS session as PC share, and can delete. */
+    @Volatile var cloud = false
+        private set
+
+    @Volatile var syncSpeed = "normal"
+
+    @Volatile private var cloudModel = ""
+    @Volatile private var cloudKind = ""
+
     @Volatile private var sslFactory: SSLSocketFactory? = null
     @Volatile private var hostVerifier: HostnameVerifier? = null
     private var savedFactory: SSLSocketFactory? = null
@@ -42,7 +51,8 @@ object RemoteVault {
     /** Address shown in the gallery footer, without the session token. */
     fun label(): String? {
         val base = baseUrl ?: return null
-        return "PC · " + base.removePrefix("https://")
+        val prefix = if (cloud) "Cloud · " else "PC · "
+        return prefix + base.removePrefix("https://")
     }
 
     fun fileUrl(id: Long): String {
@@ -59,6 +69,9 @@ object RemoteVault {
     fun disconnect() {
         baseUrl = null
         token = null
+        cloud = false
+        cloudModel = ""
+        cloudKind = ""
         sslFactory = null
         hostVerifier = null
         savedFactory?.let { HttpsURLConnection.setDefaultSSLSocketFactory(it) }
@@ -71,8 +84,11 @@ object RemoteVault {
      * Null when the PC accepted the password. Otherwise a sentence for the
      * login screen. The password is not kept after this returns.
      */
-    fun login(raw: String, password: String): String? {
-        if (password.isEmpty()) return "Enter the PC vault password."
+    fun login(raw: String, password: String, model: String = "", kind: String = ""): String? {
+        cloud = false
+        cloudModel = model.trim().replace("\r", " ").replace("\n", " ").take(64)
+        cloudKind = kind.trim().take(16)
+        if (password.isEmpty()) return "Enter the vault password."
         val text = raw.trim()
         val uri = runCatching { Uri.parse(text) }.getOrNull()
             ?: return "That code is not a PC share."
@@ -94,6 +110,8 @@ object RemoteVault {
             requestMethod = "POST"
             doOutput = true
             setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+            if (cloudModel.isNotEmpty()) setRequestProperty("X-Model", cloudModel)
+            if (cloudKind.isNotEmpty()) setRequestProperty("X-Kind", cloudKind)
             setFixedLengthStreamingMode(body.size)
             connectTimeout = 8000
             readTimeout = 120000
@@ -120,6 +138,7 @@ object RemoteVault {
                         HttpsURLConnection.setDefaultHostnameVerifier(verifier)
                         baseUrl = base
                         token = session
+                        cloud = cloudKind == "phone" || cloudKind == "pc"
                         null
                     }
                 }
@@ -179,6 +198,11 @@ object RemoteVault {
             hostVerifier?.let { hostnameVerifier = it }
             requestMethod = "GET"
             setRequestProperty("Authorization", "Bearer $secret")
+            if (cloudModel.isNotEmpty()) setRequestProperty("X-Model", cloudModel)
+            if (cloudKind.isNotEmpty()) setRequestProperty("X-Kind", cloudKind)
+            if (cloud && (path.contains("/v1/file") || path.contains("/v1/read"))) {
+                setRequestProperty("X-Sync-Speed", syncSpeed)
+            }
             connectTimeout = 20000
             readTimeout = 60000
             instanceFollowRedirects = false
@@ -198,6 +222,40 @@ object RemoteVault {
         } catch (error: Exception) {
             lastFailure = error.message ?: error.javaClass.simpleName
             null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** Null when the cloud vault removed the file. */
+    fun remove(path: String): String? {
+        val base = baseUrl ?: return "Not signed in."
+        val secret = token ?: return "Not signed in."
+        val conn = (URL(base + path).openConnection() as HttpsURLConnection).apply {
+            sslFactory?.let { sslSocketFactory = it }
+            hostVerifier?.let { hostnameVerifier = it }
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer $secret")
+            if (cloudModel.isNotEmpty()) setRequestProperty("X-Model", cloudModel)
+            if (cloudKind.isNotEmpty()) setRequestProperty("X-Kind", cloudKind)
+            setFixedLengthStreamingMode(0)
+            connectTimeout = 20000
+            readTimeout = 60000
+            instanceFollowRedirects = false
+        }
+        return try {
+            val code = conn.responseCode
+            if (code == 200) {
+                lastFailure = null
+                null
+            } else {
+                lastFailure = "Cloud replied $code"
+                lastFailure
+            }
+        } catch (error: Exception) {
+            lastFailure = error.message ?: error.javaClass.simpleName
+            lastFailure
         } finally {
             conn.disconnect()
         }

@@ -81,6 +81,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -121,7 +122,10 @@ import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -148,7 +152,11 @@ object GalleryCache {
     var sortKey by mutableStateOf(SortKey.Name)
     var sortAscending by mutableStateOf(true)
     var mediaVersion by mutableStateOf(0)
+    var generation by mutableStateOf(0)
     val media = HashMap<Long, MediaInfo>()
+    // Ids whose container probe failed. Without this, a duration sort scrolls
+    // the row away, the lazy list recreates it, and the probe starts again.
+    val probeMiss = HashSet<Long>()
     // Scroll position per view mode. The gallery screen is torn down while the
     // player is open, so a scroll state remembered inside it reset to the top:
     // playing something from the middle of the list dropped you back to item 1.
@@ -171,6 +179,8 @@ object GalleryCache {
     }
 
     fun clear() {
+        generation++
+        FileKinds.clear()
         vaultLocation = null
         videos = emptyList()
         tags = emptyList()
@@ -179,6 +189,7 @@ object GalleryCache {
         loaded = false
         thumbs.clear()
         media.clear()
+        probeMiss.clear()
         mediaVersion++
     }
 }
@@ -237,13 +248,21 @@ private fun songLabel(name: String): Pair<String, String> {
     }
 }
 
+// One container probe at a time. Duration sort used to start one per visible
+// row; they piled up in front of playback and a tap never reached the file.
+private val mediaProbe = Semaphore(1)
+
 private fun loadMedia(id: Long): MediaInfo? = runCatching {
+    if (id in GalleryCache.probeMiss) return null
+    val entry = GalleryCache.videos.firstOrNull { it.id == id }
+    val name = entry?.name.orEmpty()
+    val route = FileKinds.peek(id)?.route
     val raw = if (RemoteVault.connected()) {
         RemoteVault.getText("/v1/media?id=$id") ?: "{}"
-    } else if (GalleryCache.videos.any { it.id == id && isImageName(it.name) }) {
-        // A still has no movie duration. Probing it crashes the native reader
-        // on some gallery JPEGs and takes the whole app down.
-        return MediaInfo(0L, 0, 0, "image")
+    } else if (isImageName(name) || isPdfName(name) || route == 0 || route == 3 || route == 4) {
+        // Stills have no movie duration, and probing a JPEG crashes the native
+        // reader. PDFs and notes are not containers either.
+        return MediaInfo(0L, 0, 0, if (isImageName(name)) "image" else "")
     } else {
         CoreBridge.nativeMediaInfo(id)
     }
@@ -261,12 +280,20 @@ private fun loadMedia(id: Long): MediaInfo? = runCatching {
 
 @Composable
 private fun rememberMediaInfo(id: Long): MediaInfo? {
-    var info by remember(id) { mutableStateOf(GalleryCache.media[id]) }
-    LaunchedEffect(id) {
-        if (info != null) return@LaunchedEffect
-        val loaded = withContext(Dispatchers.Default) { loadMedia(id) }
+    val generation = GalleryCache.generation
+    var info by remember(id, generation) { mutableStateOf(GalleryCache.media[id]) }
+    LaunchedEffect(id, generation) {
+        if (info != null || id in GalleryCache.probeMiss) return@LaunchedEffect
+        val loaded = withContext(Dispatchers.IO) {
+            mediaProbe.withPermit { loadMedia(id) }
+        }
+        if (!isActive || generation != GalleryCache.generation) return@LaunchedEffect
+        if (loaded == null) {
+            GalleryCache.probeMiss.add(id)
+            return@LaunchedEffect
+        }
         info = loaded
-        if (loaded != null) GalleryCache.noteMedia(id, loaded)
+        GalleryCache.noteMedia(id, loaded)
     }
     return info
 }
@@ -297,6 +324,9 @@ fun VaultScreen(
     var scanningPc by remember { mutableStateOf(false) }
     var linkingPc by remember { mutableStateOf(false) }
     var videos by remember { mutableStateOf(GalleryCache.videos) }
+    LaunchedEffect(RemoteVault.cloud, videos.map { it.id to it.size }) {
+        if (RemoteVault.cloud) CloudFiles.pull(context.cacheDir, videos)
+    }
     var tags by remember { mutableStateOf(GalleryCache.tags) }
     var folders by remember { mutableStateOf(GalleryCache.folders) }
     var currentFolderId by remember { mutableStateOf(GalleryCache.currentFolderId) }
@@ -480,7 +510,7 @@ fun VaultScreen(
     // Removal is permanent: the core deletes the encrypted package, not just the
     // database row.
     fun removeVideo(target: VideoEntry) {
-        if (RemoteVault.connected()) {
+        if (RemoteVault.connected() && !RemoteVault.cloud) {
             error = "This vault is open on your PC. Remove it on the PC."
             return
         }
@@ -488,8 +518,14 @@ fun VaultScreen(
         actionMessage = null
         scope.launch {
             val res = withContext(Dispatchers.IO) {
-                runCatching { CoreBridge.Result.parse(CoreBridge.nativeRemoveVideo(target.id)) }
-                    .getOrElse { CoreBridge.Result(false, "Remove failed", it.message ?: "") }
+                if (RemoteVault.cloud) {
+                    val failure = RemoteVault.remove("/v1/remove?id=${target.id}")
+                    if (failure == null) CoreBridge.Result(true, "", "")
+                    else CoreBridge.Result(false, failure, failure)
+                } else {
+                    runCatching { CoreBridge.Result.parse(CoreBridge.nativeRemoveVideo(target.id)) }
+                        .getOrElse { CoreBridge.Result(false, "Remove failed", it.message ?: "") }
+                }
             }
             actionBusy = false
             if (res.ok) {
@@ -503,7 +539,7 @@ fun VaultScreen(
     }
 
     fun removeSelected() {
-        if (RemoteVault.connected()) {
+        if (RemoteVault.connected() && !RemoteVault.cloud) {
             error = "This vault is open on your PC. Remove it on the PC."
             return
         }
@@ -518,8 +554,14 @@ fun VaultScreen(
             var failure: String? = null
             for (target in targets) {
                 val res = withContext(Dispatchers.IO) {
-                    runCatching { CoreBridge.Result.parse(CoreBridge.nativeRemoveVideo(target.id)) }
-                        .getOrElse { CoreBridge.Result(false, "Remove failed", it.message ?: "") }
+                    if (RemoteVault.cloud) {
+                        val failure = RemoteVault.remove("/v1/remove?id=${target.id}")
+                        if (failure == null) CoreBridge.Result(true, "", "")
+                        else CoreBridge.Result(false, failure, failure)
+                    } else {
+                        runCatching { CoreBridge.Result.parse(CoreBridge.nativeRemoveVideo(target.id)) }
+                            .getOrElse { CoreBridge.Result(false, "Remove failed", it.message ?: "") }
+                    }
                 }
                 if (!res.ok) {
                     failure = res.error.ifBlank { res.detail }
@@ -668,6 +710,137 @@ fun VaultScreen(
         }
     }
 
+    var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
+    var updateProgress by remember { mutableStateOf<Float?>(null) }
+    var packagePlan by remember { mutableStateOf<PackagePlan?>(null) }
+    var armedPackage by remember { mutableStateOf<PackagePlan?>(null) }
+    var packagePassword by remember { mutableStateOf("") }
+    var packageCompress by remember { mutableStateOf(true) }
+    var packageImportUri by remember { mutableStateOf<Uri?>(null) }
+    LaunchedEffect(Unit) {
+        pendingRelease = withContext(Dispatchers.IO) {
+            runCatching { newerRelease(installedVersion(context)) }.getOrNull()
+        }
+    }
+    fun guardedPackage(): Boolean {
+        if (RemoteVault.connected()) {
+            error = "This vault is open on your PC. Use packages on the PC."
+            return false
+        }
+        if (importProgress != null) return false
+        return true
+    }
+    fun beginPackageExport(fileIds: Set<Long>, folderIds: Set<Long>) {
+        if (!guardedPackage()) return
+        val plan = planPackage(videos, folders, fileIds, folderIds)
+        if (plan.error != null) {
+            error = plan.error
+            return
+        }
+        packageCompress = true
+        packagePlan = plan
+    }
+    fun runPackageExport(plan: PackagePlan, password: String, compress: Boolean, destination: Uri) {
+        importProgress = 0f
+        importLabel = "Exporting package"
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                val staged = File(context.cacheDir, "export.mvpk")
+                try {
+                    val poll = launch {
+                        while (isActive) {
+                            val fraction = CoreBridge.nativePackageProgress()
+                            if (fraction >= 0.0) importProgress = (fraction * 0.9).toFloat()
+                            delay(150)
+                        }
+                    }
+                    val raw = CoreBridge.nativeExportPackage(
+                        staged.absolutePath,
+                        password,
+                        plan.files.map { it.first }.toLongArray(),
+                        plan.files.map { it.second }.toTypedArray(),
+                        plan.directories.toTypedArray(),
+                        compress,
+                    )
+                    poll.cancel()
+                    val parsed = CoreBridge.Result.parse(raw)
+                    if (!parsed.ok) {
+                        parsed.error.ifBlank { parsed.detail.ifBlank { "Export failed" } }
+                    } else {
+                        importLabel = "Saving package"
+                        copyFileToUri(context, staged, destination) { sent, total ->
+                            if (total > 0L) importProgress = 0.9f + 0.1f * sent.toFloat() / total.toFloat()
+                        }
+                        null
+                    }
+                } catch (e: Exception) {
+                    e.message ?: "Export failed"
+                } finally {
+                    staged.delete()
+                }
+            }
+            importProgress = null
+            importLabel = ""
+            packagePassword = ""
+            if (failure != null) error = failure
+        }
+    }
+    fun runPackageImport(uri: Uri, password: String) {
+        importProgress = 0f
+        importLabel = "Importing package"
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                val staged = File(context.cacheDir, "import.mvpk")
+                try {
+                    copyUriToFile(context, uri, staged) { sent, total ->
+                        if (total > 0L) importProgress = 0.15f * sent.toFloat() / total.toFloat()
+                    }
+                    val poll = launch {
+                        while (isActive) {
+                            val fraction = CoreBridge.nativePackageProgress()
+                            if (fraction >= 0.0) importProgress = 0.15f + (fraction * 0.85).toFloat()
+                            delay(150)
+                        }
+                    }
+                    val raw = CoreBridge.nativeImportPackage(staged.absolutePath, password, currentFolderId)
+                    poll.cancel()
+                    val parsed = CoreBridge.Result.parse(raw)
+                    if (!parsed.ok) parsed.error.ifBlank { parsed.detail.ifBlank { "Import failed" } } else null
+                } catch (e: Exception) {
+                    e.message ?: "Import failed"
+                } finally {
+                    staged.delete()
+                }
+            }
+            importProgress = null
+            importLabel = ""
+            packagePassword = ""
+            if (failure != null) error = failure else refresh()
+        }
+    }
+    fun startAppUpdate() {
+        val release = pendingRelease ?: return
+        if (updateProgress != null) return
+        updateProgress = 0f
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                try {
+                    val apk = File(context.cacheDir, "update.apk")
+                    downloadRelease(release, apk) { updateProgress = it }
+                    updateProgress = 1f
+                    installRelease(context, apk)
+                    null
+                } catch (e: Exception) {
+                    e.message ?: "Update failed"
+                }
+            }
+            if (failure != null) {
+                updateProgress = null
+                error = failure
+            }
+        }
+    }
+
     var showAdd by remember { mutableStateOf(false) }
 
     // The system photo picker caps a selection. Ask for its own maximum
@@ -677,13 +850,13 @@ fun VaultScreen(
     ) { uris: List<Uri> -> startImport(uris) }
 
     val musicLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
+        OpenDocumentsAtRoot()
     ) { uris: List<Uri> -> startImport(uris) }
 
     // Documents cover containers the gallery does not index (Matroska, files
     // from another app or a cloud provider).
     val fileLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
+        OpenDocumentsAtRoot()
     ) { uris: List<Uri> -> startImport(uris) }
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -691,6 +864,24 @@ fun VaultScreen(
     ) { uri: Uri? ->
         val target = actionTarget
         if (uri != null && target != null) exportVideo(target, uri)
+    }
+    val savePackageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        val plan = armedPackage
+        val password = packagePassword
+        val compress = packageCompress
+        armedPackage = null
+        if (uri != null && plan != null && password.isNotEmpty()) {
+            runPackageExport(plan, password, compress, uri)
+        } else {
+            packagePassword = ""
+        }
+    }
+    val openPackageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) packageImportUri = uri
     }
 
     val restoreLauncher = rememberLauncherForActivityResult(
@@ -732,8 +923,13 @@ fun VaultScreen(
         selectedIds = emptySet()
     }
 
+    var showMusic by remember { mutableStateOf(false) }
     var lastExitPress by remember { mutableStateOf(0L) }
     BackHandler {
+        if (showMusic) {
+            showMusic = false
+            return@BackHandler
+        }
         if (showSettings) {
             showSettings = false
             return@BackHandler
@@ -866,14 +1062,42 @@ fun VaultScreen(
             )
         }
 
+        val searching = search.isNotBlank()
+        val scope = if (searching) folderSubtree(folders, currentFolderId) else emptySet()
         val filtered = videos.filter { v ->
-            v.folderId == currentFolderId &&
+            val here = if (searching) v.folderId in scope else v.folderId == currentFolderId
+            here &&
                 (filterTagId == 0L || v.tags.any { t -> tags.firstOrNull { it.id == filterTagId }?.name?.equals(t, true) == true }) &&
-                (search.isBlank() || v.name.contains(search, ignoreCase = true))
+                (!searching || v.name.contains(search, ignoreCase = true))
         }
         val childFolders = folders.filter { folder ->
-            folder.parentId == currentFolderId &&
-                (search.isBlank() || folder.name.contains(search, ignoreCase = true))
+            if (!searching) {
+                folder.parentId == currentFolderId
+            } else {
+                folder.id != currentFolderId &&
+                    folder.id in scope &&
+                    folder.name.contains(search, ignoreCase = true)
+            }
+        }
+        val videoPlace = if (!searching) {
+            emptyMap()
+        } else {
+            buildMap {
+                for (v in filtered) {
+                    val place = folderPathFrom(folders, v.folderId, currentFolderId)
+                    if (place.isNotEmpty()) put(v.id, place)
+                }
+            }
+        }
+        val folderPlace = if (!searching) {
+            emptyMap()
+        } else {
+            buildMap {
+                for (folder in childFolders) {
+                    val place = folderPathFrom(folders, folder.parentId, currentFolderId)
+                    if (place.isNotEmpty()) put(folder.id, place)
+                }
+            }
         }
         val copying = importProgress != null || TransferHub.items.any {
             it.state == TransferState.Waiting || it.state == TransferState.Copying
@@ -887,38 +1111,72 @@ fun VaultScreen(
         val sortKey = GalleryCache.sortKey
         val sortAscending = GalleryCache.sortAscending
         val mediaVersion = GalleryCache.mediaVersion
+        val mediaSort = sortKey == SortKey.Duration ||
+            sortKey == SortKey.Resolution ||
+            sortKey == SortKey.Codec
+        // Reordering on every probe made rows fly in and out of the lazy list,
+        // and the click landed on whatever had just moved. Wait until the
+        // burst of probes goes quiet, then place each row once.
+        var sortEpoch by remember { mutableIntStateOf(mediaVersion) }
+        LaunchedEffect(sortKey) {
+            sortEpoch = GalleryCache.mediaVersion
+        }
+        LaunchedEffect(mediaVersion) {
+            if (!mediaSort) {
+                sortEpoch = mediaVersion
+                return@LaunchedEffect
+            }
+            if (sortEpoch == mediaVersion) return@LaunchedEffect
+            delay(450)
+            sortEpoch = GalleryCache.mediaVersion
+        }
         val settling = incomingFiles.isNotEmpty() || incomingFolders.isNotEmpty()
         val shown = remember(
             filtered,
             sortKey,
             sortAscending,
-            if (settling) 0 else mediaVersion,
+            if (settling) 0 else if (mediaSort) sortEpoch else mediaVersion,
             incomingFiles.toList(),
         ) {
+            fun directed(value: Int): Int = if (sortAscending) value else -value
+            // Missing container facts stay at the end in both directions so a
+            // row does not jump from the top the moment its duration arrives.
+            fun unknownLast(aMissing: Boolean, bMissing: Boolean, value: () -> Int): Int = when {
+                aMissing && bMissing -> 0
+                aMissing -> 1
+                bMissing -> -1
+                else -> value()
+            }
             val cmp = Comparator<VideoEntry> { a, b ->
                 val primary = when (sortKey) {
-                    SortKey.Name -> a.name.compareTo(b.name, ignoreCase = true)
-                    SortKey.Size -> a.size.compareTo(b.size)
-                    SortKey.Duration ->
-                        (GalleryCache.media[a.id]?.durationMs ?: 0L)
-                            .compareTo(GalleryCache.media[b.id]?.durationMs ?: 0L)
+                    SortKey.Name -> directed(a.name.compareTo(b.name, ignoreCase = true))
+                    SortKey.Size -> directed(a.size.compareTo(b.size))
+                    SortKey.Duration -> {
+                        val ad = GalleryCache.media[a.id]?.durationMs ?: 0L
+                        val bd = GalleryCache.media[b.id]?.durationMs ?: 0L
+                        unknownLast(ad <= 0L, bd <= 0L) { directed(ad.compareTo(bd)) }
+                    }
                     SortKey.Resolution -> {
                         fun pixels(v: VideoEntry) =
                             GalleryCache.media[v.id]?.let { it.width.toLong() * it.height.toLong() } ?: 0L
-                        pixels(a).compareTo(pixels(b))
+                        val ap = pixels(a)
+                        val bp = pixels(b)
+                        unknownLast(ap <= 0L, bp <= 0L) { directed(ap.compareTo(bp)) }
                     }
-                    SortKey.Codec ->
-                        (GalleryCache.media[a.id]?.codec ?: "").compareTo(
-                            GalleryCache.media[b.id]?.codec ?: "",
-                            ignoreCase = true,
-                        )
+                    SortKey.Codec -> {
+                        val ac = GalleryCache.media[a.id]?.codec.orEmpty()
+                        val bc = GalleryCache.media[b.id]?.codec.orEmpty()
+                        unknownLast(ac.isEmpty(), bc.isEmpty()) {
+                            directed(ac.compareTo(bc, ignoreCase = true))
+                        }
+                    }
                     SortKey.Tags ->
-                        a.tags.joinToString(",").compareTo(b.tags.joinToString(","), ignoreCase = true)
-                    SortKey.Imported -> a.importedAt.compareTo(b.importedAt)
+                        directed(a.tags.joinToString(",").compareTo(b.tags.joinToString(","), ignoreCase = true))
+                    SortKey.Imported -> directed(a.importedAt.compareTo(b.importedAt))
                 }
                 if (primary != 0) primary else a.name.compareTo(b.name, ignoreCase = true)
             }
-            val ranked = if (sortAscending) filtered.sortedWith(cmp) else filtered.sortedWith(cmp.reversed())
+            val ranked = filtered.sortedWith(cmp)
             if (!settling) {
                 ranked
             } else {
@@ -1012,16 +1270,19 @@ fun VaultScreen(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
+                    videoPlace, folderPlace,
                 )
                 1 -> IconGridView(
                     shown, orderedFolders, upParentId, selectedIds,
-                    openItem, pressItem, { openFolder(it) }, { folderMenu = it },
+                    openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
+                    videoPlace, folderPlace,
                 )
                 else -> ListView(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
+                    videoPlace, folderPlace,
                 )
             }
         }
@@ -1057,6 +1318,16 @@ fun VaultScreen(
                     search = text
                     GalleryCache.search = text
                 },
+                onMusic = { showMusic = true },
+                onUpdate = { startAppUpdate() },
+                updateReady = pendingRelease != null && updateProgress == null,
+                onItemMenu = if (selectedIds.size == 1) {
+                    {
+                        videos.firstOrNull { it.id == selectedIds.first() }?.let { openActions(it) }
+                    }
+                } else {
+                    null
+                },
                 onImport = import@{
                     if (RemoteVault.connected()) {
                         error = "This vault is open on your PC. Add it on the PC."
@@ -1074,10 +1345,11 @@ fun VaultScreen(
                     }
                 },
                 onRemove = { confirmRemove = true },
-                onRestore = { restoreLauncher.launch(null) },
+                onRestore = { restoreLauncher.launch(FolderPicker.storageRootUri()) },
                 onTag = { showTags = true },
                 onClearSelection = { selectedIds = emptySet() },
             )
+            CloudBar()
             TelegramMusicBar(onOpen = onOpenMusic)
             FolderBar(
                 folders = folders,
@@ -1122,6 +1394,37 @@ fun VaultScreen(
             Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text("${childFolders.size + filtered.size} items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
         }
+        }
+
+        if (updateProgress != null) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(16.dp)
+                    .background(Color(0xFF1C1C1E), RoundedCornerShape(14.dp))
+                    .padding(14.dp),
+            ) {
+                Text("Updating…", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                LinearProgressIndicator(
+                    progress = { (updateProgress ?: 0f).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    color = Mvp.accent,
+                    trackColor = Mvp.inputBg,
+                )
+            }
+        }
+        if (showMusic) {
+            MusicLibrary(
+                videos = videos,
+                folders = folders,
+                onClose = { showMusic = false },
+                onPlay = { id, name, playlist ->
+                    showMusic = false
+                    onPlay(id, name, playlist)
+                },
+            )
         }
 
         error?.let { message ->
@@ -1268,6 +1571,16 @@ fun VaultScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 MvpButton(
+                    "Export as package…",
+                    onClick = {
+                        val video = target
+                        actionTarget = null
+                        beginPackageExport(setOf(video.id), emptySet())
+                    },
+                    enabled = !actionBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                MvpButton(
                     "Export a plaintext copy…",
                     onClick = { exportLauncher.launch(target.name) },
                     enabled = !actionBusy,
@@ -1312,6 +1625,11 @@ fun VaultScreen(
                     if (RemoteVault.connected()) error = "This vault is open on your PC. Rename the folder on the PC."
                     else namePrompt = NamePrompt.RenameFolder(folder.id, folder.name)
                 }, modifier = Modifier.fillMaxWidth())
+                MvpButton("Export as package…", onClick = {
+                    val folder = folder
+                    folderMenu = null
+                    beginPackageExport(emptySet(), setOf(folder.id))
+                }, modifier = Modifier.fillMaxWidth())
                 MvpButton("Move to…", onClick = {
                     folderMenu = null
                     if (RemoteVault.connected()) error = "This vault is open on your PC. Move the folder on the PC."
@@ -1319,7 +1637,7 @@ fun VaultScreen(
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton("Remove folder", onClick = {
                     folderMenu = null
-                    if (RemoteVault.connected()) {
+                    if (RemoteVault.connected() && !RemoteVault.cloud) {
                         error = "This vault is open on your PC. Remove the folder on the PC."
                     } else {
                         folderDelete = folder
@@ -1348,8 +1666,14 @@ fun VaultScreen(
                     onClick = {
                         scope.launch {
                             actionBusy = true
-                            val result = withContext(Dispatchers.Default) {
-                                CoreBridge.Result.parse(CoreBridge.nativeRemoveFolder(folder.id))
+                            val result = withContext(Dispatchers.IO) {
+                                if (RemoteVault.cloud) {
+                                    val failure = RemoteVault.remove("/v1/remove-folder?id=${folder.id}")
+                                    if (failure == null) CoreBridge.Result(true, "", "")
+                                    else CoreBridge.Result(false, failure, failure)
+                                } else {
+                                    CoreBridge.Result.parse(CoreBridge.nativeRemoveFolder(folder.id))
+                                }
                             }
                             actionBusy = false
                             folderDelete = null
@@ -1393,6 +1717,14 @@ fun VaultScreen(
                 MvpButton("Browse storage", onClick = {
                     showAdd = false
                     fileLauncher.launch(arrayOf("*/*"))
+                }, modifier = Modifier.fillMaxWidth())
+                MvpButton("Import package…", onClick = {
+                    showAdd = false
+                    if (guardedPackage()) openPackageLauncher.launch(arrayOf("*/*"))
+                }, modifier = Modifier.fillMaxWidth())
+                MvpButton("Export package…", onClick = {
+                    showAdd = false
+                    beginPackageExport(selectedIds, emptySet())
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton("New folder", onClick = {
                     showAdd = false
@@ -1447,6 +1779,68 @@ fun VaultScreen(
                         fontSize = 13.sp,
                     )
                 }
+            }
+        }
+    }
+
+    packagePlan?.let { plan ->
+        var password by remember { mutableStateOf("") }
+        var confirm by remember { mutableStateOf("") }
+        var compress by remember { mutableStateOf(true) }
+        var problem by remember { mutableStateOf<String?>(null) }
+        Dialog(onDismissRequest = { packagePlan = null; packagePassword = "" }) {
+            MvpCard(Modifier.fillMaxWidth()) {
+                MvpTitle("Export package")
+                MvpDescription(problem ?: "This password locks the package. It is separate from the vault password.")
+                MvpInput(password, { password = it }, "Package password", isPassword = true)
+                MvpInput(confirm, { confirm = it }, "Confirm password", isPassword = true)
+                Text(
+                    if (compress) "Compress the files  ✓" else "Compress the files",
+                    color = if (compress) Mvp.accent else Mvp.description,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { compress = !compress }
+                        .padding(vertical = 6.dp),
+                )
+                MvpButton("Export", onClick = {
+                    if (password.isEmpty()) {
+                        problem = "Enter a password."
+                        return@MvpButton
+                    }
+                    if (password != confirm) {
+                        problem = "The password confirmation does not match."
+                        return@MvpButton
+                    }
+                    packagePassword = password
+                    packageCompress = compress
+                    armedPackage = plan
+                    packagePlan = null
+                    savePackageLauncher.launch(plan.suggestion + ".mvpk")
+                }, primary = true, modifier = Modifier.fillMaxWidth())
+                MvpButton("Cancel", onClick = { packagePlan = null; packagePassword = "" }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+    packageImportUri?.let { uri ->
+        var password by remember { mutableStateOf("") }
+        var problem by remember { mutableStateOf<String?>(null) }
+        Dialog(onDismissRequest = { packageImportUri = null }) {
+            MvpCard(Modifier.fillMaxWidth()) {
+                MvpTitle("Import package")
+                MvpDescription(problem ?: "Enter the password that was set when this package was created.")
+                MvpInput(password, { password = it }, "Package password", isPassword = true)
+                MvpButton("Import", onClick = {
+                    if (password.isEmpty()) {
+                        problem = "Enter a password."
+                        return@MvpButton
+                    }
+                    val chosen = uri
+                    val typed = password
+                    packageImportUri = null
+                    runPackageImport(chosen, typed)
+                }, primary = true, modifier = Modifier.fillMaxWidth())
+                MvpButton("Cancel", onClick = { packageImportUri = null }, modifier = Modifier.fillMaxWidth())
             }
         }
     }
@@ -1538,6 +1932,152 @@ fun VaultScreen(
     }
 }
 
+/** Every song in the vault, from every folder, with the folder it lives in. */
+@Composable
+private fun MusicLibrary(
+    videos: List<VideoEntry>,
+    folders: List<FolderEntry>,
+    onClose: () -> Unit,
+    onPlay: (Long, String, List<VideoEntry>) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var stamp by remember { mutableIntStateOf(0) }
+    LaunchedEffect(videos) {
+        val pending = videos.filter { FileKinds.peek(it.id) == null && isAudioName(it.name) }
+        for (song in pending) {
+            withContext(Dispatchers.IO) { FileKinds.resolve(song.id, song.name) }
+            stamp++
+        }
+    }
+    val songs = remember(videos, stamp) {
+        videos.filter { song ->
+            val known = FileKinds.peek(song.id)
+            if (known != null) known.route == 2 else isAudioName(song.name)
+        }.sortedBy { songLabel(it.name).second.lowercase() }
+    }
+    val shown = if (query.isBlank()) {
+        songs
+    } else {
+        songs.filter { song ->
+            song.name.contains(query, ignoreCase = true) ||
+                folderPath(folders, song.folderId).contains(query, ignoreCase = true)
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            HeaderIcon("Close", R.drawable.msg_close, onClose)
+            Column(Modifier.weight(1f)) {
+                Text("Music", color = Mvp.title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (songs.isEmpty()) "No songs" else "${songs.size} songs",
+                    color = Mvp.description,
+                    fontSize = 13.sp,
+                )
+            }
+            if (shown.isNotEmpty()) {
+                Text(
+                    "Play",
+                    color = Mvp.accent,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { onPlay(shown.first().id, shown.first().name, shown) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            }
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .height(40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(Mvp.glass)
+                .border(1.dp, Mvp.glassStroke, RoundedCornerShape(20.dp))
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painterResource(R.drawable.outline_header_search),
+                contentDescription = null,
+                tint = Mvp.placeholder,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                textStyle = TextStyle(color = Mvp.title, fontSize = 15.sp),
+                cursorBrush = SolidColor(Mvp.accent),
+                decorationBox = { inner ->
+                    Box {
+                        if (query.isEmpty()) {
+                            Text("Search songs or folders", color = Mvp.placeholder, fontSize = 15.sp)
+                        }
+                        inner()
+                    }
+                },
+            )
+        }
+        if (shown.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (songs.isEmpty()) "No music in this vault yet." else "No matches.",
+                    color = Mvp.description,
+                    fontSize = 15.sp,
+                )
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(shown, key = { it.id }) { song ->
+                    val (artist, title) = songLabel(song.name)
+                    val place = folderPath(folders, song.folderId)
+                    val subtitle = listOf(artist, place).filter { it.isNotBlank() }.joinToString("  ·  ")
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onPlay(song.id, song.name, shown) }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        MusicNote(Modifier.size(44.dp))
+                        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                            Text(
+                                title.ifBlank { song.name },
+                                color = Mvp.text,
+                                fontSize = 15.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (subtitle.isNotEmpty()) {
+                                Text(
+                                    subtitle,
+                                    color = Mvp.description,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Library title, icon actions, search, and a small view switch. */
 @Composable
 private fun GalleryHeader(
@@ -1550,6 +2090,10 @@ private fun GalleryHeader(
     onViewMode: (Int) -> Unit,
     onFilterTag: (Long) -> Unit,
     onSearch: (String) -> Unit,
+    onMusic: () -> Unit,
+    onUpdate: () -> Unit,
+    updateReady: Boolean,
+    onItemMenu: (() -> Unit)?,
     onImport: () -> Unit,
     onSettings: () -> Unit,
     onLock: () -> Unit,
@@ -1580,6 +2124,9 @@ private fun GalleryHeader(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
                 )
+                if (onItemMenu != null) {
+                    HeaderIcon("Actions", R.drawable.ic_ab_other, onItemMenu, enabled = actionsEnabled)
+                }
                 HeaderIcon("Move", R.drawable.msg_forward, onMove, enabled = actionsEnabled)
                 HeaderIcon("Tag", R.drawable.menu_tag_plus, onTag, enabled = actionsEnabled)
                 HeaderIcon("Restore", R.drawable.msg_download, onRestore, enabled = actionsEnabled)
@@ -1596,6 +2143,19 @@ private fun GalleryHeader(
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
+            )
+            if (updateReady) {
+                HeaderIcon("Update", R.drawable.msg_download, onUpdate)
+            }
+            Text(
+                "Music",
+                color = Mvp.accent,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(onClick = onMusic)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             )
             HeaderIcon("Add", R.drawable.msg_add, onImport, filled = true)
             HeaderIcon("Settings", R.drawable.msg_settings, onSettings)
@@ -1833,6 +2393,19 @@ private fun folderPath(folders: List<FolderEntry>, folderId: Long): String {
     return if (parts.isEmpty()) "Library" else parts.joinToString(" / ")
 }
 
+/** Path of [folderId] walking up until [stopAt], which is not included. */
+private fun folderPathFrom(folders: List<FolderEntry>, folderId: Long, stopAt: Long): String {
+    val parts = ArrayList<String>()
+    var cursor = folderId
+    for (guard in 0 until 64) {
+        if (cursor == 0L || cursor == stopAt) break
+        val folder = folders.firstOrNull { it.id == cursor } ?: break
+        parts.add(0, folder.name)
+        cursor = folder.parentId
+    }
+    return parts.joinToString(" / ")
+}
+
 private data class VaultDrag(val videos: List<Long>, val folders: List<Long>)
 
 private fun vaultDragData(drag: VaultDrag): DragAndDropTransferData {
@@ -2058,6 +2631,9 @@ private fun FolderDetailRow(
             Text(name, color = Mvp.text, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(meta, color = Mvp.description, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if (onLongPress != null) {
+            RowActions(onLongPress)
+        }
     }
 }
 
@@ -2083,7 +2659,10 @@ private fun FolderListRow(
         FolderGlyph(Modifier.size(36.dp))
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(meta, color = Mvp.description, fontSize = 11.sp, maxLines = 1)
+            Text(meta, color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (onLongPress != null) {
+            RowActions(onLongPress)
         }
     }
 }
@@ -2096,6 +2675,7 @@ private fun FolderTile(
     onDrop: (DragAndDropEvent) -> Boolean,
     onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    place: String = "",
 ) {
     var hot by remember { mutableStateOf(false) }
     Box(
@@ -2106,15 +2686,49 @@ private fun FolderTile(
             .then(folderModifier(onClick, onLongPress, transfer, onDrop) { hot = it }),
     ) {
         FolderGlyph(Modifier.align(Alignment.Center).fillMaxSize().padding(18.dp))
-        Text(
-            name,
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
-        )
+        Column(
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
+        ) {
+            Text(
+                name,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (place.isNotEmpty()) {
+                Text(
+                    place,
+                    color = Color(0xFFDCDCE0),
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (onLongPress != null) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(2.dp)
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable { onLongPress() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_ab_other),
+                    contentDescription = "Actions",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
         if (hot) {
             Box(Modifier.fillMaxSize().background(Mvp.accent.copy(alpha = 0.35f)))
         }
@@ -2178,11 +2792,65 @@ private suspend fun importBatch(
 }
 
 @Composable
+private fun CloudBar() {
+    if (!RemoteVault.cloud) return
+    var people by remember { mutableStateOf("") }
+    var speed by remember { mutableStateOf(RemoteVault.syncSpeed) }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            val raw = withContext(Dispatchers.IO) { RemoteVault.getText("/v1/sessions") }
+            people = CloudFiles.sessionLine(raw)
+            delay(4000)
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        if (people.isNotBlank()) {
+            Text(people, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, maxLines = 2)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            listOf("slow" to "Slow", "normal" to "Normal", "fast" to "Fast").forEach { (id, label) ->
+                Text(
+                    label,
+                    color = if (speed == id) Mvp.accent else Color.White.copy(alpha = 0.55f),
+                    fontSize = 13.sp,
+                    modifier = Modifier.clickable {
+                        speed = id
+                        RemoteVault.syncSpeed = id
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun FileTile(video: VideoEntry, edge: Int, square: Boolean) {
-    var kind by remember(video.id) { mutableStateOf(FileKinds.peek(video.id)) }
-    LaunchedEffect(video.id, video.name) {
+    val ticks by CloudFiles.synced
+    Box(if (square) Modifier.fillMaxSize() else Modifier) {
+        FileFace(video, edge, square)
+        if (video.id in ticks) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(2.dp)
+                    .size(14.dp)
+                    .background(Color(0xFF107C10), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("✓", color = Color.White, fontSize = 9.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FileFace(video: VideoEntry, edge: Int, square: Boolean) {
+    val generation = GalleryCache.generation
+    var kind by remember(video.id, generation) { mutableStateOf(FileKinds.peek(video.id)) }
+    LaunchedEffect(video.id, video.name, generation) {
         if (kind == null) {
-            kind = withContext(Dispatchers.IO) { FileKinds.resolve(video.id, video.name) }
+            val resolved = withContext(Dispatchers.IO) { FileKinds.resolve(video.id, video.name) }
+            if (generation == GalleryCache.generation) kind = resolved
         }
     }
     val resolved = kind
@@ -2438,6 +3106,8 @@ private fun DetailsView(
     onDrop: (DragAndDropEvent) -> Boolean,
     onDropOn: (DragAndDropEvent, Long) -> Boolean,
     dragOf: (VideoEntry) -> DragAndDropTransferData,
+    videoPlace: Map<Long, String> = emptyMap(),
+    folderPlace: Map<Long, String> = emptyMap(),
 ) {
     LazyColumn(
         state = GalleryCache.detailsScroll,
@@ -2451,9 +3121,10 @@ private fun DetailsView(
             }
         }
         items(folders, key = { "f${it.id}" }) { folder ->
+            val where = folderPlace[folder.id].orEmpty()
             FolderDetailRow(
                 folder.name,
-                "Folder",
+                if (where.isEmpty()) "Folder" else where,
                 { onOpenFolder(folder.id) },
                 { vaultDragData(VaultDrag(emptyList(), listOf(folder.id))) },
                 { onDropOn(it, folder.id) },
@@ -2461,7 +3132,7 @@ private fun DetailsView(
                 Modifier.animateItem(),
             )
         }
-        itemsIndexed(videos, key = { _, v -> v.id }) { index, v ->
+        itemsIndexed(videos, key = { _, v -> "${GalleryCache.generation}:${v.id}" }) { index, v ->
             val media = rememberMediaInfo(v.id)
             val picked = v.id in selected
             val stripe = if (index % 2 == 0) Mvp.inputBg else Mvp.alternateRow
@@ -2472,9 +3143,13 @@ private fun DetailsView(
             )
             val facts = detailLine(v.sizeText, media?.durationText, media?.resolution)
             val extra = detailLine(media?.codecText, v.tags.joinToString(", "), v.importedText)
+            val motion = if (
+                GalleryCache.sortKey == SortKey.Duration ||
+                GalleryCache.sortKey == SortKey.Resolution ||
+                GalleryCache.sortKey == SortKey.Codec
+            ) Modifier else Modifier.animateItem()
             Row(
-                Modifier
-                    .animateItem()
+                motion
                     .fillMaxWidth()
                     .background(rowColor)
                     .vaultDropTarget(onActive = {}, onDrop = onDrop)
@@ -2496,6 +3171,15 @@ private fun DetailsView(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    videoPlace[v.id]?.let { place ->
+                        Text(
+                            place,
+                            color = Mvp.description,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     if (facts.isNotEmpty()) {
                         Text(
                             facts,
@@ -2530,12 +3214,15 @@ private fun IconGridView(
     selected: Set<Long>,
     onOpen: (VideoEntry) -> Unit,
     onLongPress: (VideoEntry) -> Unit,
+    onAction: (VideoEntry) -> Unit,
     onOpenFolder: (Long) -> Unit,
     onFolderMenu: (FolderEntry) -> Unit,
     padding: PaddingValues,
     onDrop: (DragAndDropEvent) -> Boolean,
     onDropOn: (DragAndDropEvent, Long) -> Boolean,
     dragOf: (VideoEntry) -> DragAndDropTransferData,
+    videoPlace: Map<Long, String> = emptyMap(),
+    folderPlace: Map<Long, String> = emptyMap(),
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
@@ -2559,13 +3246,18 @@ private fun IconGridView(
                 { onDropOn(it, folder.id) },
                 { onFolderMenu(folder) },
                 Modifier.animateItem(),
+                folderPlace[folder.id].orEmpty(),
             )
         }
-        items(videos, key = { it.id }) { v ->
+        items(videos, key = { "${GalleryCache.generation}:${it.id}" }) { v ->
             val media = rememberMediaInfo(v.id)
+            val motion = if (
+                GalleryCache.sortKey == SortKey.Duration ||
+                GalleryCache.sortKey == SortKey.Resolution ||
+                GalleryCache.sortKey == SortKey.Codec
+            ) Modifier else Modifier.animateItem()
             Box(
-                Modifier
-                    .animateItem()
+                motion
                     .fillMaxWidth()
                     .aspectRatio(1f)
                     .vaultDropTarget(onActive = {}, onDrop = onDrop)
@@ -2576,6 +3268,39 @@ private fun IconGridView(
                     ),
             ) {
                 FileTile(v, 0, square = true)
+                videoPlace[v.id]?.let { place ->
+                    Text(
+                        place,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                    )
+                }
+                if (v.id !in selected) {
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable { onAction(v) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_ab_other),
+                            contentDescription = "Actions",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
                 val known = FileKinds.peek(v.id)
                 if (known?.route == 3 || (known == null && isPdfName(v.name))) {
                     Box(
@@ -2708,6 +3433,8 @@ private fun ListView(
     onDrop: (DragAndDropEvent) -> Boolean,
     onDropOn: (DragAndDropEvent, Long) -> Boolean,
     dragOf: (VideoEntry) -> DragAndDropTransferData,
+    videoPlace: Map<Long, String> = emptyMap(),
+    folderPlace: Map<Long, String> = emptyMap(),
 ) {
     LazyColumn(
         state = GalleryCache.listScroll,
@@ -2721,9 +3448,10 @@ private fun ListView(
             }
         }
         items(folders, key = { "f${it.id}" }) { folder ->
+            val where = folderPlace[folder.id].orEmpty()
             FolderListRow(
                 folder.name,
-                "Folder",
+                if (where.isEmpty()) "Folder" else where,
                 { onOpenFolder(folder.id) },
                 { vaultDragData(VaultDrag(emptyList(), listOf(folder.id))) },
                 { onDropOn(it, folder.id) },
@@ -2731,7 +3459,7 @@ private fun ListView(
                 Modifier.animateItem(),
             )
         }
-        items(videos, key = { it.id }) { v ->
+        items(videos, key = { "${GalleryCache.generation}:${it.id}" }) { v ->
             val picked = v.id in selected
             val stripe = if (videos.indexOf(v) % 2 == 0) Mvp.inputBg else Mvp.alternateRow
             val rowColor by animateColorAsState(
@@ -2739,9 +3467,13 @@ private fun ListView(
                 tween(180),
                 label = "listRow",
             )
+            val motion = if (
+                GalleryCache.sortKey == SortKey.Duration ||
+                GalleryCache.sortKey == SortKey.Resolution ||
+                GalleryCache.sortKey == SortKey.Codec
+            ) Modifier else Modifier.animateItem()
             Row(
-                Modifier
-                    .animateItem()
+                motion
                     .fillMaxWidth()
                     .background(rowColor)
                     .vaultDropTarget(onActive = {}, onDrop = onDrop)
@@ -2756,6 +3488,9 @@ private fun ListView(
                 FileTile(v, 36, square = false)
                 Column(Modifier.weight(1f).padding(start = 10.dp)) {
                     Text(v.name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    videoPlace[v.id]?.let { place ->
+                        Text(place, color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     Text("${v.sizeText} · ${v.tags.joinToString(", ")}", color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 RowActions { onAction(v) }

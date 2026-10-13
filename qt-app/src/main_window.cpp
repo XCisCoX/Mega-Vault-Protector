@@ -1,4 +1,5 @@
 #include "videovault/app/batch_worker.hpp"
+#include "videovault/app/cloud_browser.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/music_window.hpp"
@@ -1903,13 +1904,28 @@ QWidget* MainWindow::buildLoginPage() {
     layout->addWidget(description(
         QStringLiteral("Enter the vault password to unlock the encrypted database."), card));
 
-    auto* locationRow = new QHBoxLayout();
-    loginLocation_ = new QLineEdit(card);
+    loginLocationRow_ = new QWidget(card);
+    auto* locationRow = new QHBoxLayout(loginLocationRow_);
+    locationRow->setContentsMargins(0, 0, 0, 0);
+    loginLocation_ = new QLineEdit(loginLocationRow_);
     loginLocation_->setPlaceholderText(QStringLiteral("Vault storage folder"));
-    auto* browse = new QPushButton(QStringLiteral("Browse…"), card);
+    auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
-    layout->addLayout(locationRow);
+    layout->addWidget(loginLocationRow_);
+
+    cloudFields_ = new QWidget(card);
+    auto* cloudLayout = new QVBoxLayout(cloudFields_);
+    cloudLayout->setContentsMargins(0, 0, 0, 0);
+    cloudLayout->setSpacing(8);
+    cloudAddress_ = new QLineEdit(cloudFields_);
+    cloudAddress_->setPlaceholderText(QStringLiteral("Cloud address (host:port)"));
+    cloudFingerprint_ = new QLineEdit(cloudFields_);
+    cloudFingerprint_->setPlaceholderText(QStringLiteral("Server public key"));
+    cloudLayout->addWidget(cloudAddress_);
+    cloudLayout->addWidget(cloudFingerprint_);
+    cloudFields_->hide();
+    layout->addWidget(cloudFields_);
 
 #ifdef Q_OS_ANDROID
     // Android has no desktop file dialogs and no user-visible filesystem;
@@ -1932,13 +1948,24 @@ QWidget* MainWindow::buildLoginPage() {
 
     unlockButton_ = new QPushButton(QStringLiteral("Unlock vault"), card);
     unlockButton_->setProperty("primary", true);
+    auto* cloudButton = new QPushButton(QStringLiteral("Cloud login"), card);
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
     layout->addWidget(unlockButton_);
+    layout->addWidget(cloudButton);
     layout->addWidget(newVaultButton);
 
     connect(browse, &QPushButton::clicked, this, [this] { selectLoginLocation(); });
     connect(unlockButton_, &QPushButton::clicked, this, [this] { beginOpen(); });
     connect(loginPassword_, &QLineEdit::returnPressed, this, [this] { beginOpen(); });
+    connect(cloudButton, &QPushButton::clicked, this, [this, cloudButton, newVaultButton] {
+        cloudLogin_ = !cloudLogin_;
+        loginLocationRow_->setVisible(!cloudLogin_);
+        cloudFields_->setVisible(cloudLogin_);
+        newVaultButton->setVisible(!cloudLogin_);
+        unlockButton_->setText(cloudLogin_ ? QStringLiteral("Connect") : QStringLiteral("Unlock vault"));
+        cloudButton->setText(cloudLogin_ ? QStringLiteral("This PC") : QStringLiteral("Cloud login"));
+        setError(loginError_, {});
+    });
     connect(newVaultButton, &QPushButton::clicked, this, [this] { showSetup(); });
 
     placeCard(page, card);
@@ -2433,7 +2460,7 @@ void MainWindow::scheduleGallerySort() {
         return;
     }
     gallerySortQueued_ = true;
-    QTimer::singleShot(60, this, [this] {
+    QTimer::singleShot(400, this, [this] {
         gallerySortQueued_ = false;
         sortGalleryItems();
     });
@@ -2469,15 +2496,11 @@ void MainWindow::sortGalleryItems() {
         const qlonglong currentId = iconList_->currentItem() == nullptr
             ? -1
             : iconList_->currentItem()->data(Qt::UserRole).toLongLong();
-        iconList_->setCurrentItem(nullptr);
-        detailsTree_->setCurrentItem(nullptr);
-
         QList<QListWidgetItem*> items;
         items.reserve(iconList_->count());
-        while (iconList_->count() > 0) {
-            items.append(iconList_->takeItem(iconList_->count() - 1));
+        for (int i = 0; i < iconList_->count(); ++i) {
+            items.append(iconList_->item(i));
         }
-        std::reverse(items.begin(), items.end());
 
         const int key = sortKey_;
         const bool ascending = sortAscending_;
@@ -2504,27 +2527,49 @@ void MainWindow::sortGalleryItems() {
                 return a < b ? -1 : (a > b ? 1 : 0);
             };
             int compared = 0;
+            // Duration, resolution, and codec fill in as probes finish. A zero
+            // or blank value is "not known yet" and stays after known rows, in
+            // both directions, so rows do not leap through the list.
+            bool placedUnknown = false;
             switch (key) {
             case 1:
                 compared = numberCompare(
                     left->data(Qt::UserRole + 6).toLongLong(),
                     right->data(Qt::UserRole + 6).toLongLong());
                 break;
-            case 2:
-                compared = numberCompare(
-                    left->data(Qt::UserRole + 7).toLongLong(),
-                    right->data(Qt::UserRole + 7).toLongLong());
+            case 2: {
+                const qlonglong ld = left->data(Qt::UserRole + 7).toLongLong();
+                const qlonglong rd = right->data(Qt::UserRole + 7).toLongLong();
+                if (ld <= 0 || rd <= 0) {
+                    compared = (ld <= 0 && rd <= 0) ? 0 : (ld <= 0 ? 1 : -1);
+                    placedUnknown = true;
+                } else {
+                    compared = numberCompare(ld, rd);
+                }
                 break;
-            case 3:
-                compared = numberCompare(
-                    left->data(Qt::UserRole + 8).toLongLong(),
-                    right->data(Qt::UserRole + 8).toLongLong());
+            }
+            case 3: {
+                const qlonglong lp = left->data(Qt::UserRole + 8).toLongLong();
+                const qlonglong rp = right->data(Qt::UserRole + 8).toLongLong();
+                if (lp <= 0 || rp <= 0) {
+                    compared = (lp <= 0 && rp <= 0) ? 0 : (lp <= 0 ? 1 : -1);
+                    placedUnknown = true;
+                } else {
+                    compared = numberCompare(lp, rp);
+                }
                 break;
-            case 4:
-                compared = textCompare(
-                    left->data(Qt::UserRole + 11).toString(),
-                    right->data(Qt::UserRole + 11).toString());
+            }
+            case 4: {
+                const QString lc = left->data(Qt::UserRole + 11).toString();
+                const QString rc = right->data(Qt::UserRole + 11).toString();
+                if (lc.isEmpty() || rc.isEmpty()) {
+                    compared = (lc.isEmpty() && rc.isEmpty()) ? 0 : (lc.isEmpty() ? 1 : -1);
+                    placedUnknown = true;
+                } else {
+                    compared = textCompare(lc, rc);
+                }
                 break;
+            }
             case 5:
                 compared = textCompare(
                     left->data(Qt::UserRole + 2).toString(),
@@ -2545,12 +2590,28 @@ void MainWindow::sortGalleryItems() {
                 compared = numberCompare(
                     left->data(Qt::UserRole).toLongLong(),
                     right->data(Qt::UserRole).toLongLong());
+            } else if (placedUnknown) {
+                return compared < 0;
             }
             if (!ascending) {
                 compared = -compared;
             }
             return compared < 0;
         });
+
+        bool orderChanged = false;
+        for (int i = 0; i < items.size(); ++i) {
+            if (iconList_->item(i) != items.at(i)) {
+                orderChanged = true;
+                break;
+            }
+        }
+        if (orderChanged) {
+            iconList_->setCurrentItem(nullptr);
+            detailsTree_->setCurrentItem(nullptr);
+            while (iconList_->count() > 0) {
+                iconList_->takeItem(iconList_->count() - 1);
+            }
 
         struct RowKey {
             int kind{0};
@@ -2618,6 +2679,7 @@ void MainWindow::sortGalleryItems() {
         }
         if (currentTree != nullptr) {
             detailsTree_->setCurrentItem(currentTree);
+        }
         }
     }
 
@@ -3070,7 +3132,46 @@ void MainWindow::beginCreate() {
     }));
 }
 
+void MainWindow::beginCloudLogin() {
+    setError(loginError_, {});
+    const QString address = cloudAddress_->text().trimmed();
+    const QString fingerprint = cloudFingerprint_->text().trimmed();
+    const QString password = loginPassword_->text();
+    if (!address.contains(QLatin1Char(':')) || address.startsWith(QLatin1Char(':'))) {
+        setError(loginError_, QStringLiteral("Enter the cloud address as host:port."));
+        return;
+    }
+    if (fingerprint.size() != 64) {
+        setError(loginError_, QStringLiteral("Paste the cloud server's public key."));
+        return;
+    }
+    if (password.isEmpty()) {
+        setError(loginError_, QStringLiteral("Enter the vault password."));
+        return;
+    }
+    if (cloudPage_ != nullptr) {
+        pages_->removeWidget(cloudPage_);
+        cloudPage_->deleteLater();
+        cloudPage_ = nullptr;
+    }
+    auto* browser = new CloudBrowser(pages_);
+    cloudPage_ = browser;
+    pages_->addWidget(browser);
+    browser->setOnLeave([this] {
+        if (cloudPage_ != nullptr) {
+            pages_->setCurrentWidget(loginPage_);
+        }
+    });
+    loginPassword_->clear();
+    browser->openSession(address, fingerprint, password);
+    pages_->setCurrentWidget(browser);
+}
+
 void MainWindow::beginOpen() {
+    if (cloudLogin_) {
+        beginCloudLogin();
+        return;
+    }
     setError(loginError_, {});
     const auto root = pathFromText(loginLocation_->text());
     const QString passwordText = loginPassword_->text();
@@ -4846,7 +4947,20 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
         };
         const auto cachedMedia = galleryCache_->media.find(video_id);
         if (cachedMedia != galleryCache_->media.end()) {
+            const qlonglong durationBefore = iconItem == nullptr
+                ? 0 : iconItem->data(Qt::UserRole + 7).toLongLong();
+            const qlonglong pixelsBefore = iconItem == nullptr
+                ? 0 : iconItem->data(Qt::UserRole + 8).toLongLong();
+            const QString codecBefore = iconItem == nullptr
+                ? QString() : iconItem->data(Qt::UserRole + 11).toString();
             applyMedia(iconItem, treeItem, cachedMedia->second);
+            const bool changed = iconItem != nullptr && (
+                iconItem->data(Qt::UserRole + 7).toLongLong() != durationBefore
+                || iconItem->data(Qt::UserRole + 8).toLongLong() != pixelsBefore
+                || iconItem->data(Qt::UserRole + 11).toString() != codecBefore);
+            if (changed && (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4)) {
+                scheduleGallerySort();
+            }
             return;
         }
         auto* mediaWatcher = new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
@@ -4863,8 +4977,18 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 if (iconItem == nullptr && treeItem == nullptr) {
                     return;
                 }
+                const qlonglong durationBefore = iconItem == nullptr
+                    ? 0 : iconItem->data(Qt::UserRole + 7).toLongLong();
+                const qlonglong pixelsBefore = iconItem == nullptr
+                    ? 0 : iconItem->data(Qt::UserRole + 8).toLongLong();
+                const QString codecBefore = iconItem == nullptr
+                    ? QString() : iconItem->data(Qt::UserRole + 11).toString();
                 applyMedia(iconItem, treeItem, outcome.value());
-                if (iconItem != nullptr && (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4)) {
+                const bool changed = iconItem != nullptr && (
+                    iconItem->data(Qt::UserRole + 7).toLongLong() != durationBefore
+                    || iconItem->data(Qt::UserRole + 8).toLongLong() != pixelsBefore
+                    || iconItem->data(Qt::UserRole + 11).toString() != codecBefore);
+                if (changed && (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4)) {
                     scheduleGallerySort();
                 }
             });

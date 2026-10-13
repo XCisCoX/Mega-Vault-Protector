@@ -93,6 +93,7 @@ private:
     void selectLoginLocation();
     void beginCreate();
     void beginOpen();
+    void beginCloudLogin();
     void finishOperation();
     void beginImport();
     void beginImportFolder();
@@ -204,6 +205,12 @@ private:
     QLineEdit* loginLocation_{nullptr};
     QLineEdit* loginPassword_{nullptr};
     QLabel* loginError_{nullptr};
+    QWidget* loginLocationRow_{nullptr};
+    QLineEdit* cloudAddress_{nullptr};
+    QLineEdit* cloudFingerprint_{nullptr};
+    QWidget* cloudFields_{nullptr};
+    QWidget* cloudPage_{nullptr};
+    bool cloudLogin_{false};
     QPushButton* unlockButton_{nullptr};
 
     QLabel* unlockedLocation_{nullptr};

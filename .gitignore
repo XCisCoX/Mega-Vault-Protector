@@ -101,3 +101,4 @@ replay_pid*
 /out/android-arm64/appbuild/
 /out/android-arm64/*.log
 
+cloud/config.json

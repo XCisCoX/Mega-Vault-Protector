@@ -30,6 +30,7 @@ set(MVP_APP_SOURCES
     src/share_tls.cpp
     src/peer_link.cpp
     src/peer_browser.cpp
+    src/cloud_browser.cpp
     third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
@@ -119,6 +120,40 @@ if(MSVC)
 endif()
 
 mvp_copy_runtime_dlls(VideoVaultApp)
+
+if(NOT ANDROID)
+    add_executable(MegaVaultCloud
+        src/cloud_server.cpp
+        src/share_tls.cpp
+    )
+    target_include_directories(MegaVaultCloud PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(MegaVaultCloud
+        PRIVATE
+            VideoVault::Core
+            Qt5::Core
+            Qt5::Network
+            ${MVP_SODIUM_LIBS}
+            ${MVP_ARGON2_LIBS}
+            ${MVP_SQLCIPHER_LIBS}
+            ${MVP_FFMPEG_LIBS}
+    )
+    if(WIN32)
+        target_include_directories(MegaVaultCloud PRIVATE "${MVP_VCPKG_PREFIX}/include")
+        target_link_libraries(MegaVaultCloud PRIVATE crypt32 secur32)
+    endif()
+    if(UNIX AND NOT ANDROID)
+        find_package(OpenSSL REQUIRED)
+        target_link_libraries(MegaVaultCloud PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    target_compile_features(MegaVaultCloud PRIVATE cxx_std_20)
+    set_target_properties(MegaVaultCloud PROPERTIES
+        OUTPUT_NAME "MegaVaultCloud"
+        FOLDER "Application"
+    )
+    mvp_copy_runtime_dlls(MegaVaultCloud)
+endif()
 
 # Headless playback test: decodes frames from an imported video through the
 # same MediaDecoder the player window uses, without any GUI.

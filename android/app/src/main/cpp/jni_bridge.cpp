@@ -36,6 +36,8 @@ namespace {
 
 std::mutex g_mutex;
 std::shared_ptr<Vault> g_vault;
+// 0..1 while a package is being written or read. -1 when idle.
+std::atomic<double> g_package_progress{-1.0};
 
 // A copy of the open vault, taken without holding g_mutex across the call.
 // Import encrypts for a long time and drops the vault lock while it does, so
@@ -825,9 +827,8 @@ std::string folders_json() {
     return out;
 }
 
-std::string media_info_json(std::int64_t id) {
-    if (!g_vault) return "{}";
-    auto info = g_vault->media_info(id);
+std::string media_info_json(Vault& vault, std::int64_t id) {
+    auto info = vault.media_info(id);
     if (!info) return "{}";
     const auto& media = info.value();
     return "{\"durationMs\":" + std::to_string(media.duration_ms)
@@ -957,8 +958,12 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeThum
 }
 
 JNI_METHOD(nativeMediaInfo)(JNIEnv* env, jobject, jlong id) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return to_jstring(env, media_info_json(id));
+    // retain_vault copies the shared vault and drops g_mutex. media_info only
+    // holds the vault lock while it opens the package, so a tap can start
+    // playback while a duration probe is still reading.
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, "{}");
+    return to_jstring(env, media_info_json(*vault, id));
 }
 
 JNI_METHOD(nativeRestoreVideo)(JNIEnv* env, jobject, jlong id, jstring dir) {
@@ -1171,6 +1176,65 @@ JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {
     if (g_vault) g_vault->lock();
     g_vault.reset();
     return to_jstring(env, ok_json());
+}
+
+JNIEXPORT jdouble JNICALL Java_org_megavideoprotect_app_CoreBridge_nativePackageProgress(
+    JNIEnv*, jobject) {
+    return g_package_progress.load();
+}
+
+JNI_METHOD(nativeExportPackage)(JNIEnv* env, jobject, jstring path, jstring password,
+    jlongArray ids, jobjectArray paths, jobjectArray dirs, jboolean compress) {
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string dest = jstring_to_string(env, path);
+    const std::string pass = jstring_to_string(env, password);
+    const jsize count = ids == nullptr ? 0 : env->GetArrayLength(ids);
+    const jsize path_count = paths == nullptr ? 0 : env->GetArrayLength(paths);
+    if (count != path_count) return to_jstring(env, err_msg("The package list is invalid."));
+    std::vector<Vault::PackageItem> files;
+    files.reserve(static_cast<std::size_t>(count));
+    jlong* raw = count == 0 ? nullptr : env->GetLongArrayElements(ids, nullptr);
+    for (jsize i = 0; i < count; ++i) {
+        auto* item_path = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+        Vault::PackageItem item;
+        item.video_id = static_cast<std::int64_t>(raw[i]);
+        item.relative_path = jstring_to_string(env, item_path);
+        if (item_path != nullptr) env->DeleteLocalRef(item_path);
+        files.push_back(std::move(item));
+    }
+    if (raw != nullptr) env->ReleaseLongArrayElements(ids, raw, JNI_ABORT);
+    std::vector<std::string> directories;
+    const jsize dir_count = dirs == nullptr ? 0 : env->GetArrayLength(dirs);
+    directories.reserve(static_cast<std::size_t>(dir_count));
+    for (jsize i = 0; i < dir_count; ++i) {
+        auto* dir = static_cast<jstring>(env->GetObjectArrayElement(dirs, i));
+        directories.push_back(jstring_to_string(env, dir));
+        if (dir != nullptr) env->DeleteLocalRef(dir);
+    }
+    g_package_progress.store(0.0);
+    auto result = vault->export_package(
+        dest, pass, files, directories, compress == JNI_TRUE,
+        [](double fraction) { g_package_progress.store(fraction); });
+    g_package_progress.store(result ? 1.0 : -1.0);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeImportPackage)(JNIEnv* env, jobject, jstring path, jstring password, jlong folder_id) {
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string source = jstring_to_string(env, path);
+    const std::string pass = jstring_to_string(env, password);
+    g_package_progress.store(0.0);
+    auto result = vault->import_package(
+        source, pass, static_cast<std::int64_t>(folder_id),
+        [](double fraction) { g_package_progress.store(fraction); });
+    g_package_progress.store(result ? 1.0 : -1.0);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"count\":%d", result.value());
+    return to_jstring(env, ok_json(buf));
 }
 
 }  // extern "C"

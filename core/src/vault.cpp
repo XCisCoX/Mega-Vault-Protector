@@ -56,6 +56,28 @@ bool is_audio_display_name(const std::string& name) {
     return false;
 }
 
+bool is_still_display_name(const std::string& name) {
+    const auto dot = name.find_last_of('.');
+    if (dot == std::string::npos || dot + 1U >= name.size()) {
+        return false;
+    }
+    std::string ext = name.substr(dot + 1U);
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    static constexpr const char* kExtensions[] = {
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff",
+    };
+    for (const char* known : kExtensions) {
+        if (ext == known) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool header_is_pdf(internal::PackageReader& reader) {
     unsigned char head[1024]{};
     const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
@@ -1124,22 +1146,41 @@ Result<std::vector<unsigned char>> Vault::read_video_range(
 }
 
 Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
-    std::lock_guard<std::mutex> guard(*mutex_);
-    if (!impl_) {
-        return locked_error();
+    // Open the package under the vault lock, then probe outside it. A duration
+    // sort asks for this on every visible row; holding the lock across FFmpeg
+    // queued those probes in front of playback and the video never opened.
+    internal::PackageReader reader;
+    std::string display_name;
+    {
+        std::lock_guard<std::mutex> guard(*mutex_);
+        if (!impl_) {
+            return locked_error();
+        }
+        auto row = impl_->database_.query_video(video_id);
+        if (!row) {
+            return row.error();
+        }
+        display_name = row.value().display_name;
+        if (is_still_display_name(display_name)) {
+            MediaInfo info;
+            info.video_id = video_id;
+            return info;
+        }
+        auto opened = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
+        if (!opened) {
+            return opened.error();
+        }
+        reader = std::move(opened).value();
     }
-    auto row = impl_->database_.query_video(video_id);
-    if (!row) {
-        return row.error();
+    if (header_is_pdf(reader)) {
+        MediaInfo info;
+        info.video_id = video_id;
+        return info;
     }
-    auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
-    if (!reader) {
-        return reader.error();
-    }
-    const auto hint = audio_open_hint(row.value().display_name);
-    auto probe = is_audio_display_name(row.value().display_name)
-        ? internal::probe_audio_media(reader.value(), hint.c_str())
-        : internal::probe_media(reader.value());
+    const auto hint = audio_open_hint(display_name);
+    auto probe = is_audio_display_name(display_name)
+        ? internal::probe_audio_media(reader, hint.c_str())
+        : internal::probe_media(reader);
     if (!probe) {
         return probe.error();
     }
