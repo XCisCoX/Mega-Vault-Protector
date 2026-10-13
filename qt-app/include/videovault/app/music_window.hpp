@@ -116,6 +116,8 @@ private:
     void applySong();
     void updateTray();
     void showTrayCard();
+    void syncSystemMedia(bool metadata);
+    void clearSystemMedia();
     void publishTrackInfo(
         std::int64_t id,
         const QString& title,
@@ -185,6 +187,8 @@ private:
     QTimer* clock_{nullptr};
     QTimer* hideTimer_{nullptr};
     bool popupPlaced_{false};
+    struct SystemMediaSession;
+    std::unique_ptr<SystemMediaSession> systemMedia_;
     QSystemTrayIcon* tray_{nullptr};
     NowPlayingCard* trayCard_{nullptr};
     qint64 trayDismissedAt_{0};

@@ -1,15 +1,14 @@
 #pragma once
 
+#include "videovault/core/vault.hpp"
+
 #include <QObject>
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
-
-namespace videovault::core {
-class Vault;
-} // namespace videovault::core
 
 namespace videovault::app {
 
@@ -36,6 +35,13 @@ public slots:
         std::shared_ptr<videovault::core::Vault> vault,
         std::int64_t folder_id);
 
+    // Files land in `folder_id`. Each directory is recreated in the vault,
+    // including the folders inside it, and its files are imported there.
+    void importTree(
+        std::shared_ptr<std::vector<std::filesystem::path>> sources,
+        std::shared_ptr<videovault::core::Vault> vault,
+        std::int64_t folder_id);
+
     void restoreVideos(
         std::shared_ptr<std::vector<std::int64_t>> ids,
         std::shared_ptr<std::filesystem::path> target_dir,
@@ -44,6 +50,20 @@ public slots:
     void removeVideos(
         std::shared_ptr<std::vector<std::int64_t>> ids,
         std::shared_ptr<videovault::core::Vault> vault);
+
+    void exportPackage(
+        std::shared_ptr<videovault::core::Vault> vault,
+        std::shared_ptr<std::filesystem::path> destination,
+        std::shared_ptr<std::string> password,
+        std::shared_ptr<std::vector<videovault::core::Vault::PackageItem>> files,
+        std::shared_ptr<std::vector<std::string>> directories,
+        bool compress);
+
+    void importPackage(
+        std::shared_ptr<videovault::core::Vault> vault,
+        std::shared_ptr<std::filesystem::path> source,
+        std::shared_ptr<std::string> password,
+        std::int64_t folder_id);
 
     // Copies folders and files out of a swapped phone's library, one file at
     // a time, recreating the folder structure under plan->destination.
@@ -59,6 +79,11 @@ signals:
 
     // One more file/video finished.
     void fileFinished(int done_files, int total_files);
+
+    // One new vault file or folder. Delivered as it lands, not at the end of
+    // the batch. Duplicates are not announced.
+    void videoArrived(qlonglong id, QString name, qlonglong size, qlonglong folderId, qlonglong importedAt);
+    void folderArrived(qlonglong id, qlonglong parentId, QString name);
 
     // Emitted once at the end: ok=true with the success count and a summary,
     // or ok=false with the first error message and the partial count.

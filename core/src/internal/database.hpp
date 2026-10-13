@@ -193,10 +193,9 @@ public:
         std::int64_t folder_id,
         std::int64_t parent_id);
 
-    // Moves every video in the folder and its children up to parent_id
-    // (NULL when parent_id is 0), then deletes the folder. Child folders
-    // go with it. Package files are not touched.
-    [[nodiscard]] Result<bool> remove_folder_row(std::int64_t folder_id);
+    // Deletes the folder, every folder under it, and every video row in that
+    // tree. Returns the package paths the caller still has to remove.
+    [[nodiscard]] Result<std::vector<std::string>> remove_folder_row(std::int64_t folder_id);
 
     [[nodiscard]] Result<bool> rename_video_row(
         std::int64_t video_id,

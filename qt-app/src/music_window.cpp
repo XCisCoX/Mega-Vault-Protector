@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "videovault/app/music_window.hpp"
 
 #include "videovault/app/media_decoder.hpp"
@@ -6,6 +10,7 @@
 
 #include <QApplication>
 #include <QAudioFormat>
+#include <QBuffer>
 #include <QAudioOutput>
 #include <QCloseEvent>
 #include <QDateTime>
@@ -38,6 +43,25 @@
 #include <QStyle>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QSystemTrayIcon>
+
+#ifdef Q_OS_WIN
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Media.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <SystemMediaTransportControlsInterop.h>
+
+#include <chrono>
+
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#ifdef small
+#undef small
+#endif
+#endif
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -1007,22 +1031,13 @@ SongTags songFromFileName(const QString& fileName) {
 }
 
 QPixmap paintNotePlate(const int side) {
-    // Same role as Telegram's song button when a file has no album art:
-    // a blue tile and a white play mark. Drawn here, not copied from tdesktop.
-    QPixmap plate(std::max(1, side), std::max(1, side));
-    plate.fill(Qt::transparent);
-    QPainter painter(&plate);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(kAccent);
-    const double s = plate.width();
-    painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.22, s * 0.22);
-    QPolygonF play;
-    play << QPointF(s * 0.40, s * 0.30)
-         << QPointF(s * 0.72, s * 0.50)
-         << QPointF(s * 0.40, s * 0.70);
-    painter.setBrush(Qt::white);
-    painter.drawPolygon(play);
+    const int s = std::max(1, side);
+    const QPixmap cover(QStringLiteral(":/icons/nocover.png"));
+    if (!cover.isNull()) {
+        return cover.scaled(s, s, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    QPixmap plate(s, s);
+    plate.fill(QColor(0x1C, 0x1C, 0x1E));
     return plate;
 }
 
@@ -1316,6 +1331,239 @@ private:
     QPoint dragOffset_{};
 };
 
+struct MusicWindow::SystemMediaSession {
+#ifdef Q_OS_WIN
+    winrt::Windows::Media::SystemMediaTransportControls controls{nullptr};
+    winrt::event_token buttonToken{};
+    winrt::event_token seekToken{};
+    bool seekHooked{false};
+    bool enabled{false};
+    bool playing{false};
+    QString title;
+    QString artist;
+    QString album;
+    std::int64_t coverToken{0};
+    std::int64_t timelinePosition{-1};
+#endif
+};
+
+#ifdef Q_OS_WIN
+namespace {
+
+winrt::hstring mediaText(const QString& text) {
+    return winrt::hstring(text.toStdWString());
+}
+
+void writeCover(
+    const winrt::Windows::Media::SystemMediaTransportControlsDisplayUpdater& updater,
+    const QImage& cover) {
+    if (cover.isNull()) {
+        updater.Thumbnail(nullptr);
+        return;
+    }
+    QByteArray encoded;
+    QBuffer buffer(&encoded);
+    buffer.open(QIODevice::WriteOnly);
+    const QImage plate = cover.scaled(300, 300, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (!plate.save(&buffer, "JPEG", 82) || encoded.isEmpty()) {
+        return;
+    }
+    winrt::Windows::Storage::Streams::InMemoryRandomAccessStream stream;
+    {
+        winrt::Windows::Storage::Streams::DataWriter writer(stream);
+        writer.WriteBytes(winrt::array_view<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(encoded.constData()),
+            static_cast<std::uint32_t>(encoded.size())));
+        writer.StoreAsync().get();
+        writer.DetachStream();
+    }
+    stream.Seek(0);
+    updater.Thumbnail(
+        winrt::Windows::Storage::Streams::RandomAccessStreamReference::CreateFromStream(stream));
+}
+
+} // namespace
+#endif
+
+void MusicWindow::syncSystemMedia(const bool metadata) {
+#ifdef Q_OS_WIN
+    if (systemMedia_ == nullptr) {
+        systemMedia_ = std::make_unique<SystemMediaSession>();
+    }
+    auto& session = *systemMedia_;
+    try {
+        if (session.controls == nullptr) {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            } catch (const winrt::hresult_error& error) {
+                if (error.code() != static_cast<winrt::hresult>(0x80010106)) {
+                    throw;
+                }
+            }
+            QWidget* host = window();
+            if (host == nullptr) {
+                return;
+            }
+            const auto hwnd = reinterpret_cast<HWND>(host->winId());
+            if (hwnd == nullptr) {
+                return;
+            }
+            auto factory = winrt::get_activation_factory<winrt::Windows::Media::SystemMediaTransportControls>();
+            auto interop = factory.as<ISystemMediaTransportControlsInterop>();
+            void* raw = nullptr;
+            winrt::check_hresult(interop->GetForWindow(
+                hwnd,
+                winrt::guid_of<winrt::Windows::Media::ISystemMediaTransportControls>(),
+                &raw));
+            session.controls = winrt::Windows::Media::SystemMediaTransportControls{
+                raw, winrt::take_ownership_from_abi};
+            QPointer<MusicWindow> self(this);
+            session.buttonToken = session.controls.ButtonPressed(
+                [self](const auto&, const winrt::Windows::Media::SystemMediaTransportControlsButtonPressedEventArgs& args) {
+                    if (self.isNull()) {
+                        return;
+                    }
+                    const auto button = args.Button();
+                    QMetaObject::invokeMethod(self.data(), [self, button] {
+                        if (self.isNull() || self->tracks_.empty()) {
+                            return;
+                        }
+                        using Button = winrt::Windows::Media::SystemMediaTransportControlsButton;
+                        if (button == Button::Play) {
+                            if (self->paused_.load() || self->ended_.load()) {
+                                self->togglePlay();
+                            }
+                        } else if (button == Button::Pause || button == Button::Stop) {
+                            if (!self->paused_.load()) {
+                                self->togglePlay();
+                            }
+                        } else if (button == Button::Next) {
+                            self->advance(1);
+                        } else if (button == Button::Previous) {
+                            self->advance(-1);
+                        } else if (button == Button::FastForward) {
+                            self->seekBy(10000);
+                        } else if (button == Button::Rewind) {
+                            self->seekBy(-10000);
+                        }
+                    }, Qt::QueuedConnection);
+                });
+            if (auto extended = session.controls.try_as<winrt::Windows::Media::ISystemMediaTransportControls2>()) {
+                session.seekToken = extended.PlaybackPositionChangeRequested(
+                    [self](const auto&, const winrt::Windows::Media::PlaybackPositionChangeRequestedEventArgs& args) {
+                        if (self.isNull()) {
+                            return;
+                        }
+                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            args.RequestedPlaybackPosition()).count();
+                        QMetaObject::invokeMethod(self.data(), [self, ms] {
+                            if (!self.isNull() && !self->tracks_.empty()) {
+                                self->seekTo(ms);
+                            }
+                        }, Qt::QueuedConnection);
+                    });
+                session.seekHooked = true;
+            }
+        }
+
+        const bool active = !tracks_.empty() && errorText_.isEmpty();
+        const bool playing = active && !paused_.load();
+        const std::int64_t id = tracks_.empty() ? 0 : tracks_[static_cast<std::size_t>(index_)].id;
+        const bool haveCover = coverId_ == id && !cover_.isNull();
+        const std::int64_t coverToken = haveCover ? id : 0;
+        (void)metadata;
+        const bool changed = session.title != songTitle_
+            || session.artist != artistText_
+            || session.album != albumText_
+            || session.playing != playing
+            || session.enabled != active
+            || session.coverToken != coverToken;
+        if (changed) {
+            session.title = songTitle_;
+            session.artist = artistText_;
+            session.album = albumText_;
+            session.playing = playing;
+            session.enabled = active;
+            session.coverToken = coverToken;
+            auto& controls = session.controls;
+            controls.IsEnabled(active);
+            controls.IsPlayEnabled(active);
+            controls.IsPauseEnabled(active);
+            controls.IsNextEnabled(active && nextAvailable());
+            controls.IsPreviousEnabled(active && previousAvailable());
+            controls.IsFastForwardEnabled(active);
+            controls.IsRewindEnabled(active);
+            controls.PlaybackStatus(playing
+                ? winrt::Windows::Media::MediaPlaybackStatus::Playing
+                : active
+                    ? winrt::Windows::Media::MediaPlaybackStatus::Paused
+                    : winrt::Windows::Media::MediaPlaybackStatus::Closed);
+            auto updater = controls.DisplayUpdater();
+            updater.Type(winrt::Windows::Media::MediaPlaybackType::Music);
+            auto music = updater.MusicProperties();
+            const QString title = songTitle_.isEmpty() ? QStringLiteral("Mega Vault Protect") : songTitle_;
+            music.Title(mediaText(title));
+            music.Artist(mediaText(artistText_));
+            music.AlbumTitle(mediaText(albumText_));
+            if (haveCover) {
+                writeCover(updater, cover_);
+            } else if (metadata) {
+                updater.Thumbnail(nullptr);
+            }
+            updater.Update();
+            session.timelinePosition = -1;
+        }
+        if (auto extended = session.controls.try_as<winrt::Windows::Media::ISystemMediaTransportControls2>()) {
+            const auto duration = std::max<std::int64_t>(0, durationMs_.load());
+            const auto position = std::min<std::int64_t>(duration, std::max<std::int64_t>(0, positionMs()));
+            if (session.timelinePosition < 0
+                || std::llabs(position - session.timelinePosition) >= 900) {
+                session.timelinePosition = position;
+                winrt::Windows::Media::SystemMediaTransportControlsTimelineProperties timeline;
+                const auto end = std::chrono::milliseconds(std::max<std::int64_t>(1, duration));
+                timeline.StartTime(std::chrono::milliseconds(0));
+                timeline.MinSeekTime(std::chrono::milliseconds(0));
+                timeline.EndTime(end);
+                timeline.MaxSeekTime(end);
+                timeline.Position(std::chrono::milliseconds(position));
+                extended.UpdateTimelineProperties(timeline);
+            }
+        }
+    } catch (const winrt::hresult_error&) {
+        if (systemMedia_ != nullptr) {
+            systemMedia_->controls = nullptr;
+        }
+    }
+#else
+    (void)metadata;
+#endif
+}
+
+void MusicWindow::clearSystemMedia() {
+#ifdef Q_OS_WIN
+    if (systemMedia_ == nullptr || systemMedia_->controls == nullptr) {
+        return;
+    }
+    auto& session = *systemMedia_;
+    try {
+        session.controls.ButtonPressed(session.buttonToken);
+        if (session.seekHooked) {
+            if (auto extended = session.controls.try_as<winrt::Windows::Media::ISystemMediaTransportControls2>()) {
+                extended.PlaybackPositionChangeRequested(session.seekToken);
+            }
+        }
+        session.controls.PlaybackStatus(winrt::Windows::Media::MediaPlaybackStatus::Closed);
+        session.controls.IsEnabled(false);
+        session.controls.DisplayUpdater().ClearAll();
+    } catch (const winrt::hresult_error&) {
+    }
+    session.controls = nullptr;
+    session.seekHooked = false;
+    session.enabled = false;
+    session.timelinePosition = -1;
+#endif
+}
+
 MusicWindow::MusicWindow(QWidget* parent)
     : QWidget(parent)
     , decoder_(std::make_unique<MediaDecoder>())
@@ -1482,6 +1730,7 @@ MusicWindow::MusicWindow(QWidget* parent)
 }
 
 MusicWindow::~MusicWindow() {
+    clearSystemMedia();
     qApp->removeEventFilter(this);
     hidePopups();
     coverSerial_.fetch_add(1);
@@ -1552,14 +1801,21 @@ void MusicWindow::startWorker() {
     }
     const auto vault = vault_;
     const auto id = tracks_[static_cast<std::size_t>(index_)].id;
-    worker_ = std::thread([this, vault, id] {
+    const QString trackName = tracks_[static_cast<std::size_t>(index_)].title;
+    QByteArray audioHint;
+    const int dot = trackName.lastIndexOf(QLatin1Char('.'));
+    if (dot > 0 && dot + 1 < trackName.size()) {
+        audioHint = QByteArray("audio.") + trackName.mid(dot + 1).toLower().toUtf8();
+    }
+    worker_ = std::thread([this, vault, id, audioHint] {
         QImage cover;
         if (vault) {
             // Read the cover before the decoder opens so the two FFmpeg
             // contexts are not live together, and so a real cover replaces
             // a previously stored note.
             auto stored = vault->display_thumbnail(id, 256U);
-            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            const bool note = stored && (stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty");
             bool retry = !note || !stored;
             if (note && noteProbe_) {
                 std::lock_guard<std::mutex> guard(noteProbe_->mutex);
@@ -1572,6 +1828,7 @@ void MusicWindow::startWorker() {
                 }
             }
             if (stored && stored.value().mime != "image/x-mvp-note"
+                && stored.value().mime != "image/x-mvp-empty"
                 && !stored.value().bytes.empty()) {
                 cover.loadFromData(
                     reinterpret_cast<const uchar*>(stored.value().bytes.data()),
@@ -1581,7 +1838,9 @@ void MusicWindow::startWorker() {
         QString opened;
         decoder_->set_stream_cache_bytes(256U << 10);
         decoder_->prepare_for_audio();
-        if (!decoder_->open(vault, id, &opened) || !decoder_->has_audio()) {
+        if (!decoder_->open(vault, id, &opened,
+                audioHint.isEmpty() ? nullptr : audioHint.constData())
+            || !decoder_->has_audio()) {
             std::lock_guard<std::mutex> guard(errorMutex_);
             error_ = opened.isEmpty()
                 ? std::string("This file has no audio stream.")
@@ -1864,7 +2123,8 @@ void MusicWindow::requestCovers() {
                 return;
             }
             auto stored = vault->display_thumbnail(id, 128U);
-            const bool note = stored && stored.value().mime == "image/x-mvp-note";
+            const bool note = stored && (stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty");
             bool retry = !stored || stored.value().bytes.empty();
             if (note) {
                 std::lock_guard<std::mutex> guard(probe->mutex);
@@ -1877,7 +2137,8 @@ void MusicWindow::requestCovers() {
                 }
             }
             if (self.isNull() || !stored || stored.value().bytes.empty()
-                || stored.value().mime == "image/x-mvp-note") {
+                || stored.value().mime == "image/x-mvp-note"
+                || stored.value().mime == "image/x-mvp-empty") {
                 continue;
             }
             QImage image;
@@ -2047,6 +2308,7 @@ void MusicWindow::refreshClock() {
         timeLabel_->setText(text);
         layoutControls();
     }
+    syncSystemMedia(false);
 }
 
 void MusicWindow::onTrackEnded() {
@@ -2511,6 +2773,7 @@ void MusicWindow::updateTray() {
         muted_.load() ? 0 : volumePercent_.load(),
         previousAvailable(),
         nextAvailable());
+    syncSystemMedia(true);
 }
 
 void MusicWindow::showTrayCard() {
@@ -2551,6 +2814,7 @@ void MusicWindow::showTrayCard() {
 }
 
 void MusicWindow::closeEvent(QCloseEvent* event) {
+    clearSystemMedia();
     hidePopups();
     if (trayCard_ != nullptr) {
         trayCard_->hide();

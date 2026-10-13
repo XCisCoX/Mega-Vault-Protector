@@ -1,3 +1,4 @@
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/settings_dialog.hpp"
 
 #include "videovault/core/vault.hpp"
@@ -9,6 +10,7 @@
 #include <QComboBox>
 #include <QFont>
 #include <QFrame>
+#include <QGraphicsOpacityEffect>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -39,8 +41,8 @@ SettingsDialog::SettingsDialog(
       vault_(vault) {
     setWindowTitle(QStringLiteral("Settings"));
     setModal(true);
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    setAttribute(Qt::WA_TranslucentBackground);
+    // A child of the main window, not a separate Windows dialog.
+    setWindowFlags(Qt::FramelessWindowHint);
 
     outerLayout_ = new QVBoxLayout(this);
     outerLayout_->setSizeConstraint(QLayout::SetNoConstraint);
@@ -257,9 +259,11 @@ SettingsDialog::SettingsDialog(
     outerLayout_->addStretch(1);
     if (parent != nullptr) {
         parent->installEventFilter(this);
-        setFixedSize(parent->size());
+        setGeometry(parent->rect());
     }
-    setWindowOpacity(0.0);
+    auto* fade = new QGraphicsOpacityEffect(this);
+    fade->setOpacity(0.0);
+    setGraphicsEffect(fade);
 
     connect(done, &QPushButton::clicked, this, &QDialog::reject);
 
@@ -299,11 +303,11 @@ void SettingsDialog::paintEvent(QPaintEvent*) {
 void SettingsDialog::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
     if (QWidget* host = parentWidget()) {
-        const QPoint origin = host->mapToGlobal(QPoint(0, 0));
-        setFixedSize(host->size());
-        move(origin);
+        setGeometry(host->rect());
         fitSheet();
-        backdrop_ = frost(host->grab().toImage());
+        if (backdrop_.isNull()) {
+            backdrop_ = frost(host->grab().toImage());
+        }
         update();
     }
     if (!introPlayed_) {
@@ -339,7 +343,9 @@ void SettingsDialog::fitSheet() {
 }
 
 void SettingsDialog::playIntro() {
-    auto* fade = new QPropertyAnimation(this, "windowOpacity", this);
+    auto* effect = qobject_cast<QGraphicsOpacityEffect*>(graphicsEffect());
+    auto* fade = new QPropertyAnimation(effect == nullptr ? static_cast<QObject*>(this) : effect,
+        effect == nullptr ? "windowOpacity" : "opacity", this);
     fade->setDuration(220);
     fade->setStartValue(0.0);
     fade->setEndValue(1.0);
@@ -366,9 +372,11 @@ void SettingsDialog::reject() {
         return;
     }
     closing_ = true;
-    auto* fade = new QPropertyAnimation(this, "windowOpacity", this);
+    auto* effect = qobject_cast<QGraphicsOpacityEffect*>(graphicsEffect());
+    auto* fade = new QPropertyAnimation(effect == nullptr ? static_cast<QObject*>(this) : effect,
+        effect == nullptr ? "windowOpacity" : "opacity", this);
     fade->setDuration(160);
-    fade->setStartValue(windowOpacity());
+    fade->setStartValue(effect == nullptr ? windowOpacity() : effect->opacity());
     fade->setEndValue(0.0);
     fade->setEasingCurve(QEasingCurve::InCubic);
     connect(fade, &QPropertyAnimation::finished, this, [this] { QDialog::reject(); });
@@ -393,10 +401,9 @@ void SettingsDialog::setStatus(const QString& message, const bool error) {
 
 bool SettingsDialog::eventFilter(QObject* watched, QEvent* event) {
     if (watched == parentWidget() && event->type() == QEvent::Resize && !closing_) {
-        const QPoint origin = parentWidget()->mapToGlobal(QPoint(0, 0));
-        setFixedSize(parentWidget()->size());
-        move(origin);
+        setGeometry(parentWidget()->rect());
         fitSheet();
+        raise();
         return false;
     }
     if (watched == newTagEdit_ && event->type() == QEvent::KeyPress) {
@@ -553,14 +560,16 @@ void SettingsDialog::renameSelectedTag() {
         return;
     }
     const auto tag_id = static_cast<std::int64_t>(item->data(Qt::UserRole).toULongLong());
-    bool ok = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("Rename tag"),
-        QStringLiteral("New name:"),
-        QLineEdit::Normal, item->data(Qt::UserRole + 1).toString(), &ok);
-    if (!ok || name.trimmed().isEmpty()) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("Rename tag"));
+    prompt.setMessage(QStringLiteral("New name"));
+    prompt.addTextEntry(QLineEdit::Normal, item->data(Qt::UserRole + 1).toString(), QStringLiteral("Name"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    if (prompt.run() != 1 || prompt.text().trimmed().isEmpty()) {
         return;
     }
+    const QString name = prompt.text();
     const auto result = vault_->rename_tag(tag_id, name.toStdString());
     if (!result) {
         setStatus(QString::fromUtf8(

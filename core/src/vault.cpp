@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -49,6 +51,70 @@ bool is_audio_display_name(const std::string& name) {
     };
     for (const char* known : kExtensions) {
         if (ext == known) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool header_is_pdf(internal::PackageReader& reader) {
+    unsigned char head[1024]{};
+    const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
+    if (count < 5U) {
+        return false;
+    }
+    if (!reader.seek(0U)) {
+        return false;
+    }
+    const auto read = reader.read(std::span<unsigned char>(head, static_cast<std::size_t>(count)));
+    if (!read || read.value() < 5U) {
+        return false;
+    }
+    const char mark[] = "%PDF";
+    const auto limit = read.value();
+    for (std::size_t i = 0; i + 4 <= limit; ++i) {
+        if (std::memcmp(head + i, mark, 4) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool header_is_audio(internal::PackageReader& reader) {
+    unsigned char head[64] = {};
+    const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
+    if (count < 4U) {
+        return false;
+    }
+    const auto sought = reader.seek(0U);
+    if (!sought) {
+        return false;
+    }
+    const auto read = reader.read(std::span<unsigned char>(head, static_cast<std::size_t>(count)));
+    if (!read || read.value() < 4U) {
+        return false;
+    }
+    if (std::memcmp(head, "ID3", 3) == 0 || std::memcmp(head, "fLaC", 4) == 0
+        || std::memcmp(head, "OggS", 4) == 0) {
+        return true;
+    }
+    if (read.value() >= 12U && std::memcmp(head, "RIFF", 4) == 0
+        && std::memcmp(head + 8, "WAVE", 4) == 0) {
+        return true;
+    }
+    if (read.value() < 12U || std::memcmp(head + 4, "ftyp", 4) != 0) {
+        return false;
+    }
+    const auto audio_brand = [](const unsigned char* brand) {
+        return std::memcmp(brand, "M4A ", 4) == 0 || std::memcmp(brand, "M4B ", 4) == 0
+            || std::memcmp(brand, "M4P ", 4) == 0 || std::memcmp(brand, "F4A ", 4) == 0
+            || std::memcmp(brand, "F4B ", 4) == 0;
+    };
+    if (audio_brand(head + 8)) {
+        return true;
+    }
+    for (std::size_t i = 16; i + 4 <= read.value(); i += 4) {
+        if (audio_brand(head + i)) {
             return true;
         }
     }
@@ -243,9 +309,18 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     if (!reader) {
         return reader.error();
     }
+    // FFmpeg has no PDF renderer. Probing one here reads the whole file and
+    // still stores nothing, so leave the page picture to store_thumbnail.
+    if (header_is_pdf(reader.value())) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "A PDF page thumbnail is stored by the library."};
+    }
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
-    const bool audio = is_audio_display_name(row.value().display_name);
+    bool audio = is_audio_display_name(row.value().display_name);
+    if (!audio) {
+        audio = header_is_audio(reader.value());
+    }
     const auto hint = audio_open_hint(row.value().display_name);
     int art_kind = 1;
     auto jpeg = audio
@@ -255,14 +330,15 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     if (!jpeg) {
         return jpeg.error();
     }
-    // A failed read must not replace a thumbnail we already kept. The next
-    // open tries the cover again. A confirmed "no art" is stored as the note
-    // so the gallery does not probe that song on every visit.
+    // A failed read must not replace a thumbnail we already kept. A confirmed
+    // "no art" is stored once. An older note is replaced, so a cover that the
+    // first pass missed is picked up the next time the library opens.
     if (audio && art_kind <= 0) {
         auto existing = database.query_thumbnail(video_id);
-        if (existing && (art_kind < 0
-                || existing.value().mime == "image/x-mvp-note"
-                || existing.value().mime == "image/cover")) {
+        const bool keep = existing && (art_kind < 0
+            || existing.value().mime == "image/cover"
+            || (art_kind == 0 && existing.value().mime == "image/x-mvp-empty"));
+        if (keep) {
             auto thumbnail_key = internal::derive_subkey(
                 master_key, kThumbnailSubkeyId, kThumbnailContext);
             if (!thumbnail_key) {
@@ -292,6 +368,8 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     const auto ad = thumbnail_ad(video_id, row.value());
     internal::ThumbnailRow stored;
     if (audio && art_kind == 0) {
+        stored.mime = "image/x-mvp-empty";
+    } else if (audio && art_kind < 0) {
         stored.mime = "image/x-mvp-note";
     } else if (audio && art_kind > 0) {
         stored.mime = "image/cover";
@@ -731,13 +809,21 @@ struct SealedPackage {
 // ciphertext, and atomically publishes it at
 // vault-data/<h0h1>/<h2h3>/<64-hex>.vvp. Any failure removes the staging file,
 // so a partial package can never be observed. `file_key` is filled with a fresh
-// random 256-bit key. Callers must hold the vault mutex.
+// random 256-bit key.
+//
+// The caller holds the vault mutex in `guard`, but encryption is the slow part
+// and playback reads through the same mutex, so the guard is released for it.
+// `still_pinned` is asked afterwards whether the vault is still the one the
+// caller started with: a lock during the write must discard the staging file
+// instead of publishing a package into a vault that is gone.
 Result<SealedPackage> seal_package(
     const std::filesystem::path& root,
     std::istream& source,
     const std::uint64_t plaintext_size,
     internal::SensitiveBuffer& file_key,
-    const std::function<void(double)>& progress) {
+    const std::function<void(double)>& progress,
+    std::unique_lock<std::mutex>& guard,
+    const std::function<bool()>& still_pinned) {
     const auto data_directory = root / L"vault-data";
     const auto staging_directory = data_directory / L".tmp";
     std::error_code error;
@@ -754,9 +840,16 @@ Result<SealedPackage> seal_package(
 
     internal::random_bytes(std::span(file_key.data(), file_key.size()));
 
+    guard.unlock();
     auto written = internal::write_package_file(
         staging_package, file_key, internal::kDefaultPackageChunkSize, source,
         plaintext_size, progress);
+    guard.lock();
+    if (!still_pinned()) {
+        std::error_code ignored;
+        std::filesystem::remove(staging_package, ignored);
+        return locked_error();
+    }
     if (!written) {
         std::error_code ignored;
         std::filesystem::remove(staging_package, ignored);
@@ -829,6 +922,8 @@ Result<internal::WrappedVideoKey> wrap_file_key(
 // wrapped file key, removing the published package if the commit fails. Returns
 // the new item id. Shared by import_file and import_bytes so the staging,
 // atomic-rename, key-wrap and commit order exists in exactly one place.
+// `guard` and `still_pinned` are handed to seal_package, which releases the
+// vault mutex while it encrypts.
 Result<std::int64_t> seal_and_commit(
     const std::filesystem::path& root,
     internal::Database& database,
@@ -839,10 +934,13 @@ Result<std::int64_t> seal_and_commit(
     const std::string& display_name,
     const std::int64_t folder_id,
     const std::function<void(double)>& progress,
-    bool* already_present) {
+    bool* already_present,
+    std::unique_lock<std::mutex>& guard,
+    const std::function<bool()>& still_pinned) {
     internal::SensitiveBuffer file_key(32U);
 
-    auto sealed = seal_package(root, source, plaintext_size, file_key, progress);
+    auto sealed = seal_package(
+        root, source, plaintext_size, file_key, progress, guard, still_pinned);
     if (!sealed) {
         return sealed.error();
     }
@@ -863,6 +961,20 @@ Result<std::int64_t> seal_and_commit(
         discard();
         note_existing(already_present, progress);
         return duplicate.value()->id;
+    }
+
+    // The mutex was released for the encryption, so another import may have
+    // committed the same bytes in the meantime. Re-check the content hash and
+    // collapse onto that item instead of storing a second copy.
+    auto again = database.query_video_id_by_content_sha256(content_hash);
+    if (!again) {
+        discard();
+        return again.error();
+    }
+    if (again.value()) {
+        discard();
+        note_existing(already_present, progress);
+        return again.value().value();
     }
 
     internal::VideoRow row;
@@ -902,7 +1014,7 @@ Result<std::int64_t> Vault::import_file(
     const std::function<void(double)>& progress,
     const std::int64_t folder_id,
     bool* already_present) {
-    std::lock_guard<std::mutex> guard(*mutex_);
+    std::unique_lock<std::mutex> guard(*mutex_);
     if (already_present != nullptr) {
         *already_present = false;
     }
@@ -910,6 +1022,9 @@ Result<std::int64_t> Vault::import_file(
         return locked_error();
     }
     auto& impl = *impl_;
+    // Playback reads the same mutex. The long hash and encrypt run without
+    // it, then this pointer is checked so a lock in between aborts the import.
+    const void* pinned = impl_.get();
     if (folder_id > 0) {
         auto folder = impl.database_.query_folder(folder_id);
         if (!folder) {
@@ -938,9 +1053,14 @@ Result<std::int64_t> Vault::import_file(
             progress(std::clamp(fraction, 0.0, 1.0) * 0.15);
         }
     };
+    guard.unlock();
     auto content_hash = hash_source_file(source_path, source_size, hash_progress);
+    guard.lock();
     if (!content_hash) {
         return content_hash.error();
+    }
+    if (impl_.get() != pinned) {
+        return locked_error();
     }
     auto known = impl.database_.query_video_id_by_content_sha256(content_hash.value());
     if (!known) {
@@ -988,29 +1108,34 @@ Result<std::int64_t> Vault::import_file(
     const std::string display_name(
         reinterpret_cast<const char*>(name_u8.data()), name_u8.size());
 
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
     auto inserted = seal_and_commit(root_, impl.database_, impl.master_key_, source,
         source_size, content_hash.value(), display_name,
-        folder_id > 0 ? folder_id : 0, package_progress, already_present);
+        folder_id > 0 ? folder_id : 0, package_progress, already_present,
+        guard, still_pinned);
     if (!inserted) {
         return inserted.error();
     }
-    // Best-effort thumbnail at import time so the gallery shows media without
-    // a manual step. Non-video imports and undecodable formats fail quietly.
-    (void)generate_thumbnail_locked(
-        root_, impl.database_, impl.master_key_, inserted.value(),
-        kImportThumbnailDimension);
-    return inserted.value();
+    const auto inserted_id = inserted.value();
+    // The thumbnail decoder takes the lock itself, so a player can read
+    // between the encrypt and the picture.
+    guard.unlock();
+    (void)generate_thumbnail(inserted_id, kImportThumbnailDimension);
+    return inserted_id;
 }
 
 Result<std::int64_t> Vault::import_bytes(
     const std::span<const unsigned char> bytes,
     const std::string_view display_name,
     const std::int64_t folder_id) {
-    std::lock_guard<std::mutex> guard(*mutex_);
+    std::unique_lock<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
     }
     auto& impl = *impl_;
+    // Sealing releases the mutex while it encrypts, so remember which vault
+    // this call belongs to and abort if the vault is locked in between.
+    const void* pinned = impl_.get();
     if (folder_id > 0) {
         auto folder = impl.database_.query_folder(folder_id);
         if (!folder) {
@@ -1038,20 +1163,22 @@ Result<std::int64_t> Vault::import_bytes(
     const auto raw = std::string_view(
         reinterpret_cast<const char*>(bytes.data()), bytes.size());
     std::istringstream source{std::string(raw)};
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
     return seal_and_commit(root_, impl.database_, impl.master_key_, source,
         static_cast<std::uint64_t>(bytes.size()), content_hash, name,
-        folder_id > 0 ? folder_id : 0, {}, nullptr);
+        folder_id > 0 ? folder_id : 0, {}, nullptr, guard, still_pinned);
 }
 
 Result<bool> Vault::replace_video_content(
     const std::int64_t video_id,
     const std::span<const unsigned char> bytes,
     const std::string_view display_name) {
-    std::lock_guard<std::mutex> guard(*mutex_);
+    std::unique_lock<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
     }
     auto& impl = *impl_;
+    const void* pinned = impl_.get();
     auto existing = impl.database_.query_video(video_id);
     if (!existing) {
         return existing.error();
@@ -1067,8 +1194,9 @@ Result<bool> Vault::replace_video_content(
     std::istringstream source{std::string(raw)};
 
     internal::SensitiveBuffer file_key(32U);
-    auto sealed = seal_package(
-        root_, source, static_cast<std::uint64_t>(bytes.size()), file_key, {});
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
+    auto sealed = seal_package(root_, source, static_cast<std::uint64_t>(bytes.size()),
+        file_key, {}, guard, still_pinned);
     if (!sealed) {
         return sealed.error();
     }
@@ -1246,6 +1374,54 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
     return info;
 }
 
+Result<ThumbnailInfo> Vault::store_thumbnail(
+    const std::int64_t video_id,
+    const std::vector<unsigned char>& jpeg,
+    const std::uint32_t width,
+    const std::uint32_t height) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    if (jpeg.size() < 32U || width == 0U || height == 0U) {
+        return VaultError{VaultErrorCode::InvalidArgument, "The thumbnail image is empty."};
+    }
+    auto& impl = *impl_;
+    auto row = impl.database_.query_video(video_id);
+    if (!row) {
+        return row.error();
+    }
+    auto thumbnail_key = internal::derive_subkey(
+        impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+    if (!thumbnail_key) {
+        return thumbnail_key.error();
+    }
+    internal::ThumbnailRow stored;
+    stored.mime = "image/jpeg";
+    stored.width = width;
+    stored.height = height;
+    internal::random_bytes(stored.nonce);
+    auto encrypted = internal::encrypt_xchacha20_poly1305(
+        jpeg, thumbnail_ad(video_id, row.value()), stored.nonce, thumbnail_key.value());
+    if (!encrypted) {
+        return encrypted.error();
+    }
+    stored.ciphertext = std::move(encrypted.value());
+    stored.created_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    auto inserted = impl.database_.insert_thumbnail(video_id, stored);
+    if (!inserted) {
+        return inserted.error();
+    }
+    ThumbnailInfo info;
+    info.video_id = video_id;
+    info.width = width;
+    info.height = height;
+    info.mime = stored.mime;
+    info.bytes = jpeg;
+    return info;
+}
+
 Result<ThumbnailInfo> Vault::generate_thumbnail(
     const std::int64_t video_id,
     const std::uint32_t max_dimension) const {
@@ -1306,7 +1482,7 @@ Result<ThumbnailInfo> Vault::display_thumbnail(
     auto stored = impl.database_.query_thumbnail(video_id);
     const bool audio = is_audio_display_name(video_row.value().display_name);
     const bool settled = stored && (stored.value().mime == "image/cover"
-        || stored.value().mime == "image/x-mvp-note");
+        || stored.value().mime == "image/x-mvp-empty");
     if (stored && (!audio || settled)) {
         auto thumbnail_key = internal::derive_subkey(
             impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
@@ -1657,7 +1833,26 @@ Result<bool> Vault::remove_folder(const std::int64_t folder_id) {
     if (!impl_) {
         return locked_error();
     }
-    return impl_->database_.remove_folder_row(folder_id);
+    auto paths = impl_->database_.remove_folder_row(folder_id);
+    if (!paths) {
+        return paths.error();
+    }
+    std::error_code error;
+    VaultError failure{};
+    bool failed = false;
+    for (const auto& relative : paths.value()) {
+        const auto package = root_ / L"vault-data" / relative;
+        std::filesystem::remove(package, error);
+        if (error && !failed) {
+            failed = true;
+            failure = filesystem_error(error, "remove package file");
+        }
+        error.clear();
+    }
+    if (failed) {
+        return failure;
+    }
+    return true;
 }
 
 Result<bool> Vault::move_folder(

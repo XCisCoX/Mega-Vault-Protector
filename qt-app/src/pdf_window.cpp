@@ -1,10 +1,15 @@
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/pdf_window.hpp"
 
 #include "videovault/core/vault.hpp"
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <QAbstractButton>
+#include <QColor>
+#include <QCursor>
 #include <QFutureWatcher>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -12,15 +17,19 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPen>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QWindow>
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +42,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #include <winrt/Windows.Data.Pdf.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Imaging.h>
@@ -42,6 +55,56 @@
 
 namespace videovault::app {
 namespace {
+
+enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
+
+class CaptionButton final : public QAbstractButton {
+public:
+    explicit CaptionButton(const CaptionGlyph glyph, QWidget* parent = nullptr)
+        : QAbstractButton(parent), glyph_(glyph) {
+        setFixedSize(46, 32);
+        setCursor(Qt::ArrowCursor);
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    void setGlyph(const CaptionGlyph glyph) {
+        glyph_ = glyph;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        if (underMouse()) {
+            painter.fillRect(rect(), glyph_ == CaptionGlyph::Close
+                ? QColor(232, 17, 35)
+                : QColor(255, 255, 255, 28));
+        }
+        painter.setPen(QPen(Qt::white, 1.2));
+        const QPointF center = rect().center();
+        switch (glyph_) {
+        case CaptionGlyph::Minimize:
+            painter.drawLine(QPointF(center.x() - 5, center.y()), QPointF(center.x() + 5, center.y()));
+            break;
+        case CaptionGlyph::Maximize:
+            painter.drawRoundedRect(QRectF(center.x() - 5, center.y() - 5, 10, 10), 1.5, 1.5);
+            break;
+        case CaptionGlyph::Restore:
+            painter.drawRoundedRect(QRectF(center.x() - 5, center.y() - 2, 8, 8), 1.2, 1.2);
+            painter.drawLine(QPointF(center.x() - 2, center.y() - 4), QPointF(center.x() + 5, center.y() - 4));
+            painter.drawLine(QPointF(center.x() + 5, center.y() - 4), QPointF(center.x() + 5, center.y() + 3));
+            break;
+        case CaptionGlyph::Close:
+            painter.drawLine(QPointF(center.x() - 5, center.y() - 5), QPointF(center.x() + 5, center.y() + 5));
+            painter.drawLine(QPointF(center.x() + 5, center.y() - 5), QPointF(center.x() - 5, center.y() + 5));
+            break;
+        }
+    }
+
+private:
+    CaptionGlyph glyph_;
+};
 
 class PageCanvas final : public QWidget {
 public:
@@ -92,23 +155,13 @@ bool hasPdfHeader(const std::vector<unsigned char>& bytes) {
     return false;
 }
 
-bool looksEncrypted(const std::vector<unsigned char>& bytes) {
-    const char mark[] = "/Encrypt";
-    const auto markSize = sizeof(mark) - 1U;
-    if (bytes.size() < markSize) {
-        return false;
-    }
-    const auto scan = [&](const std::size_t begin, const std::size_t end) {
-        for (std::size_t i = begin; i + markSize <= end; ++i) {
-            if (std::memcmp(bytes.data() + i, mark, markSize) == 0) {
-                return true;
-            }
-        }
-        return false;
-    };
-    const auto head = std::min<std::size_t>(bytes.size(), 65536U);
-    const auto tail = std::min<std::size_t>(bytes.size(), 262144U);
-    return scan(0U, head) || scan(bytes.size() - tail, bytes.size());
+bool passwordRejected(const winrt::hresult code, const QString& message) {
+    const auto value = static_cast<std::uint32_t>(static_cast<int32_t>(code));
+    // LoadFromStreamAsync reports a missing or wrong PDF password with these
+    // Win32 codes. A file that merely contains the letters "/Encrypt" is not
+    // one of these failures.
+    return value == 0x8007052BU || value == 0x8007052EU || value == 0x80070056U
+        || message.contains(QStringLiteral("password"), Qt::CaseInsensitive);
 }
 
 QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const int pixelWidth) {
@@ -135,7 +188,7 @@ QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const
         white.G = 255;
         white.B = 255;
         options.BackgroundColor(white);
-        options.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::PngEncoderId());
+        options.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::JpegEncoderId());
         winrt::Windows::Storage::Streams::InMemoryRandomAccessStream output;
         page.RenderToStreamAsync(output, options).get();
         const auto encodedSize = static_cast<std::uint32_t>(output.Size());
@@ -147,7 +200,7 @@ QImage renderPage(const std::shared_ptr<DocState>& state, const int index, const
         std::vector<unsigned char> encoded(encodedSize);
         reader.ReadBytes(winrt::array_view<std::uint8_t>(encoded.data(), encodedSize));
         QImage image;
-        if (!image.loadFromData(encoded.data(), static_cast<int>(encoded.size()), "PNG")) {
+        if (!image.loadFromData(encoded.data(), static_cast<int>(encoded.size()), "JPEG")) {
             return {};
         }
         return image;
@@ -162,6 +215,7 @@ struct OpenOutcome {
     std::shared_ptr<DocState> doc;
     std::vector<QSizeF> sizes;
     QString error;
+    bool needsPassword{false};
     bool badPassword{false};
 };
 
@@ -207,13 +261,19 @@ OpenOutcome openPdf(const std::vector<unsigned char>& bytes, const QString& pass
         }
         outcome.doc = std::move(state);
     } catch (const winrt::hresult_error& error) {
-        outcome.badPassword = !password.isEmpty();
-        outcome.error = outcome.badPassword
-            ? QStringLiteral("That password did not open this PDF.")
-            : QString::fromWCharArray(error.message().c_str());
-        if (outcome.error.isEmpty()) {
-            outcome.error = QStringLiteral("This PDF could not be opened.");
+        const QString message = QString::fromWCharArray(error.message().c_str());
+        if (passwordRejected(error.code(), message)) {
+            if (password.isEmpty()) {
+                outcome.needsPassword = true;
+            } else {
+                outcome.badPassword = true;
+                outcome.error = QStringLiteral("That password did not open this PDF.");
+            }
+            return outcome;
         }
+        outcome.error = message.isEmpty()
+            ? QStringLiteral("This PDF could not be opened.")
+            : message;
     }
     return outcome;
 }
@@ -243,6 +303,10 @@ struct RenderResult {
 } // namespace
 
 struct PdfWindow::Impl {
+    QWidget* caption{nullptr};
+    QLabel* captionTitle{nullptr};
+    CaptionButton* captionMax{nullptr};
+    QPushButton* pop{nullptr};
     QLabel* title{nullptr};
     QLabel* pageLabel{nullptr};
     QLabel* zoomLabel{nullptr};
@@ -278,6 +342,38 @@ PdfWindow::PdfWindow(QWidget* parent)
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    impl_->caption = new QWidget(this);
+    impl_->caption->setFixedHeight(32);
+    impl_->caption->setObjectName(QStringLiteral("pdfCaption"));
+    impl_->caption->setAttribute(Qt::WA_StyledBackground, true);
+    impl_->caption->setStyleSheet(QStringLiteral(
+        "QWidget#pdfCaption { background: #000000; border: none; }"));
+    auto* captionLayout = new QHBoxLayout(impl_->caption);
+    captionLayout->setContentsMargins(14, 0, 0, 0);
+    captionLayout->setSpacing(0);
+    impl_->captionTitle = new QLabel(QStringLiteral("PDF"), impl_->caption);
+    impl_->captionTitle->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    impl_->captionTitle->setStyleSheet(QStringLiteral(
+        "color: rgba(255, 255, 255, 210); background: transparent;"));
+    captionLayout->addWidget(impl_->captionTitle, 1);
+    auto* minimize = new CaptionButton(CaptionGlyph::Minimize, impl_->caption);
+    impl_->captionMax = new CaptionButton(CaptionGlyph::Maximize, impl_->caption);
+    auto* closeCaption = new CaptionButton(CaptionGlyph::Close, impl_->caption);
+    captionLayout->addWidget(minimize);
+    captionLayout->addWidget(impl_->captionMax);
+    captionLayout->addWidget(closeCaption);
+    connect(minimize, &QAbstractButton::clicked, this, [this] { showMinimized(); });
+    connect(impl_->captionMax, &QAbstractButton::clicked, this, [this] {
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(closeCaption, &QAbstractButton::clicked, this, &PdfWindow::closeRequested);
+    impl_->caption->hide();
+    root->addWidget(impl_->caption);
+
     auto* header = new QWidget(this);
     auto* headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(12, 8, 12, 8);
@@ -289,9 +385,15 @@ PdfWindow::PdfWindow(QWidget* parent)
     impl_->title->setStyleSheet(QStringLiteral("color: white; font-size: 15px; background: transparent;"));
     impl_->pageLabel = new QLabel(header);
     impl_->pageLabel->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
+    impl_->pop = new QPushButton(QStringLiteral("Pop out"), header);
+    impl_->pop->setProperty("quiet", true);
+    impl_->pop->setCursor(Qt::PointingHandCursor);
+    impl_->pop->setFocusPolicy(Qt::NoFocus);
+    impl_->pop->setToolTip(QStringLiteral("Open in a window you can move and resize"));
     headerLayout->addWidget(back);
     headerLayout->addWidget(impl_->title, 1);
     headerLayout->addWidget(impl_->pageLabel);
+    headerLayout->addWidget(impl_->pop);
     root->addWidget(header);
 
     impl_->stack = new QStackedWidget(this);
@@ -342,6 +444,9 @@ PdfWindow::PdfWindow(QWidget* parent)
         button->setCursor(Qt::PointingHandCursor);
         button->setFocusPolicy(Qt::NoFocus);
     }
+    zoomOut->setToolTip(QStringLiteral("Zoom out"));
+    zoomIn->setToolTip(QStringLiteral("Zoom in"));
+    fit->setToolTip(QStringLiteral("Fit width. Ctrl and the mouse wheel also zoom."));
     zoomOut->setProperty("quiet", true);
     zoomIn->setProperty("quiet", true);
     fit->setProperty("quiet", true);
@@ -365,6 +470,13 @@ PdfWindow::PdfWindow(QWidget* parent)
         pump();
     });
     connect(back, &QPushButton::clicked, this, &PdfWindow::closeRequested);
+    connect(impl_->pop, &QPushButton::clicked, this, [this] {
+        if (detached_) {
+            emit dockRequested();
+        } else {
+            emit detachRequested();
+        }
+    });
     connect(impl_->previous, &QPushButton::clicked, this, &PdfWindow::previousRequested);
     connect(impl_->next, &QPushButton::clicked, this, &PdfWindow::nextRequested);
     connect(zoomOut, &QPushButton::clicked, this, [this] { zoomBy(0.8); });
@@ -384,7 +496,10 @@ void PdfWindow::openDocument(
     const std::int64_t id,
     const QString& title) {
     id_ = id;
-    impl_->title->setText(title.isEmpty() ? QStringLiteral("PDF") : title);
+    const QString shown = title.isEmpty() ? QStringLiteral("PDF") : title;
+    impl_->title->setText(shown);
+    impl_->captionTitle->setText(shown);
+    setWindowTitle(shown);
     impl_->pageLabel->clear();
     impl_->zoom = 1.0;
     impl_->zoomLabel->setText(QStringLiteral("Fit"));
@@ -446,12 +561,13 @@ void PdfWindow::openDocument(
         }
         result.bytes = std::make_shared<std::vector<unsigned char>>(std::move(plain));
 #ifdef Q_OS_WIN
-        result.encrypted = looksEncrypted(*result.bytes);
-        if (!result.encrypted) {
-            auto opened = openPdf(*result.bytes, {});
-            result.doc = std::move(opened.doc);
-            result.sizes = std::move(opened.sizes);
-            result.error = std::move(opened.error);
+        auto opened = openPdf(*result.bytes, {});
+        result.encrypted = opened.needsPassword;
+        result.doc = std::move(opened.doc);
+        result.sizes = std::move(opened.sizes);
+        result.error = std::move(opened.error);
+        result.badPassword = opened.badPassword;
+        if (result.doc != nullptr || result.encrypted) {
             if (result.doc != nullptr) {
                 result.bytes.reset();
             }
@@ -513,20 +629,21 @@ void PdfWindow::askPassword(const bool rejected) {
         impl_->stack->setCurrentIndex(0);
         return;
     }
-    QInputDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("PDF password"));
-    dialog.setLabelText(rejected
+    InWindowSheet dialog(this);
+    dialog.setTitle(QStringLiteral("PDF password"));
+    dialog.setMessage(rejected
         ? QStringLiteral("That password did not open this PDF. Try again.")
         : QStringLiteral("This PDF is password protected."));
-    dialog.setTextEchoMode(QLineEdit::Password);
-    dialog.setOkButtonText(QStringLiteral("Open"));
-    if (dialog.exec() != QDialog::Accepted) {
+    dialog.addTextEntry(QLineEdit::Password, QString(), QStringLiteral("Password"));
+    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Open"), 1, true);
+    if (dialog.run() != 1) {
         impl_->pending.reset();
         impl_->message->setText(QStringLiteral("This PDF is password protected."));
         impl_->stack->setCurrentIndex(0);
         return;
     }
-    QString password = dialog.textValue();
+    QString password = dialog.text();
     const int generation = impl_->generation;
     const auto bytes = impl_->pending;
     impl_->message->setText(QStringLiteral("Opening…"));
@@ -541,6 +658,7 @@ void PdfWindow::askPassword(const bool rejected) {
         result.doc = std::move(opened.doc);
         result.sizes = std::move(opened.sizes);
         result.error = std::move(opened.error);
+        result.encrypted = opened.needsPassword;
         result.badPassword = opened.badPassword;
         if (result.doc != nullptr) {
             result.bytes.reset();
@@ -647,7 +765,7 @@ void PdfWindow::pump() {
     const int generation = impl_->generation;
     const auto state = impl_->doc;
     const qreal ratio = std::max<qreal>(1.0, impl_->devicePixelRatio);
-    const int pixels = std::clamp(static_cast<int>(width * ratio), width, 4096);
+    const int pixels = std::clamp(static_cast<int>(width * ratio), width, 2048);
     impl_->renderWatcher->setFuture(QtConcurrent::run([state, next, width, pixels, generation] {
         RenderResult result;
         result.generation = generation;
@@ -676,6 +794,142 @@ void PdfWindow::applyRender() {
         page->update();
     }
     pump();
+}
+
+void PdfWindow::updatePopButton() {
+    if (impl_ == nullptr || impl_->pop == nullptr) {
+        return;
+    }
+    impl_->pop->setText(detached_ ? QStringLiteral("Dock") : QStringLiteral("Pop out"));
+    impl_->pop->setToolTip(detached_
+        ? QStringLiteral("Put the PDF back in the library")
+        : QStringLiteral("Open in a window you can move and resize"));
+}
+
+void PdfWindow::prepareDock() {
+    if (isMaximized()) {
+        showNormal();
+    }
+    detached_ = false;
+    frameReady_ = false;
+    setMinimumSize(0, 0);
+    setWindowFlags(Qt::Widget);
+    if (impl_->caption != nullptr) {
+        impl_->caption->hide();
+    }
+    updatePopButton();
+}
+
+void PdfWindow::detach() {
+    if (isMaximized()) {
+        showNormal();
+    }
+    detached_ = true;
+    setParent(nullptr);
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint
+        | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint
+        | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
+    setMinimumSize(640, 480);
+    resize(960, 720);
+    if (impl_->caption != nullptr) {
+        impl_->caption->show();
+    }
+    updatePopButton();
+    if (QScreen* screen = QGuiApplication::screenAt(QCursor::pos())) {
+        const QRect area = screen->availableGeometry();
+        move(area.center() - QPoint(width() / 2, height() / 2));
+    }
+    show();
+    raise();
+    activateWindow();
+}
+
+void PdfWindow::applyDetachedFrame() {
+#ifdef Q_OS_WIN
+    if (!detached_ || frameReady_) {
+        return;
+    }
+    frameReady_ = true;
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    style |= WS_THICKFRAME | WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU;
+    SetWindowLongPtr(hwnd, GWL_STYLE, style);
+    const MARGINS shadow{0, 0, 0, 1};
+    DwmExtendFrameIntoClientArea(hwnd, &shadow);
+    const int corner = 2;
+    DwmSetWindowAttribute(hwnd, 33, &corner, sizeof(corner));
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#else
+    Q_UNUSED(this)
+#endif
+}
+
+void PdfWindow::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (detached_) {
+        applyDetachedFrame();
+    }
+}
+
+void PdfWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::WindowStateChange && impl_->captionMax != nullptr) {
+        impl_->captionMax->setGlyph(isMaximized() ? CaptionGlyph::Restore : CaptionGlyph::Maximize);
+    }
+    QWidget::changeEvent(event);
+}
+
+bool PdfWindow::nativeEvent(const QByteArray& eventType, void* message, long* result) {
+#ifdef Q_OS_WIN
+    if (detached_ && eventType == "windows_generic_MSG") {
+        auto* msg = static_cast<MSG*>(message);
+        if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
+            if (IsZoomed(msg->hwnd)) {
+                auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
+                const int pad = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                params->rgrc[0].left += pad;
+                params->rgrc[0].top += pad;
+                params->rgrc[0].right -= pad;
+                params->rgrc[0].bottom -= pad;
+            }
+            *result = 0;
+            return true;
+        }
+        if (msg->message == WM_NCHITTEST && impl_->caption != nullptr && impl_->caption->isVisible()) {
+            const QPoint global(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
+            const QPoint pos = mapFromGlobal(global);
+            const bool zoomed = IsZoomed(msg->hwnd);
+            const QPoint inCaption = impl_->caption->mapFromGlobal(global);
+            if (impl_->caption->rect().contains(inCaption)) {
+                QWidget* child = impl_->caption->childAt(inCaption);
+                if (qobject_cast<QAbstractButton*>(child) != nullptr) {
+                    *result = HTCLIENT;
+                } else if (!zoomed && inCaption.y() < 4) {
+                    *result = HTTOP;
+                } else {
+                    *result = HTCAPTION;
+                }
+                return true;
+            }
+            if (!zoomed) {
+                constexpr int border = 6;
+                const bool left = pos.x() < border;
+                const bool right = pos.x() >= width() - border;
+                const bool bottom = pos.y() >= height() - border;
+                if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
+                if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
+                if (left) { *result = HTLEFT; return true; }
+                if (right) { *result = HTRIGHT; return true; }
+                if (bottom) { *result = HTBOTTOM; return true; }
+            }
+        }
+    }
+#else
+    Q_UNUSED(eventType)
+    Q_UNUSED(message)
+    Q_UNUSED(result)
+#endif
+    return QWidget::nativeEvent(eventType, message, result);
 }
 
 void PdfWindow::keyPressEvent(QKeyEvent* event) {
@@ -769,7 +1023,7 @@ bool PdfWindow::eventFilter(QObject* watched, QEvent* event) {
 
 QImage renderPdfFirstPage(const std::vector<unsigned char>& bytes, const int maxEdge) {
 #ifdef Q_OS_WIN
-    if (maxEdge < 16 || looksEncrypted(bytes)) {
+    if (maxEdge < 16) {
         return {};
     }
     auto opened = openPdf(bytes, {});

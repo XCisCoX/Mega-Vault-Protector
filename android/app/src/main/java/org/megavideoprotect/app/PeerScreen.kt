@@ -426,11 +426,11 @@ private fun PeerFileTile(file: VideoEntry, picked: Boolean, onClick: () -> Unit)
             )
         } else {
             if (isAudioName(file.name)) {
-                Icon(
-                    painterResource(R.drawable.files_music),
+                Image(
+                    painterResource(R.drawable.nocover),
                     contentDescription = null,
-                    tint = Mvp.accent,
-                    modifier = Modifier.align(Alignment.Center).size(28.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
                 )
             } else if (file.name.endsWith(".pdf", ignoreCase = true)) {
                 Box(
@@ -608,6 +608,7 @@ private suspend fun copyFromPc(
         if (id <= 0L) return "Could not create the folder \"${folder.name}\"."
         made[folder.id] = id
         local = local + FolderEntry(id, parent, folder.name)
+        LibraryArrivals.addFolder(id, parent, folder.name)
     }
 
     val staging = File(context.cacheDir, "pc_copy").apply {
@@ -644,9 +645,14 @@ private suspend fun copyFromPc(
                         onProgress(done, total, label)
                     }
                 }
-                val result = CoreBridge.Result.parse(CoreBridge.nativeImportInto(target.absolutePath, localFolder(file.folderId)))
+                val result = CoreBridge.Result.parse(
+                    CoreBridge.nativeImportInto(target.absolutePath, localFolder(file.folderId)),
+                )
                 if (!result.ok) {
                     return "\"${file.name}\": ${result.error.ifBlank { result.detail }}. Copied $copied."
+                }
+                if (!result.duplicate && result.id > 0L) {
+                    LibraryArrivals.addFile(result.id, file.name, file.size, localFolder(file.folderId))
                 }
                 copied++
                 done += file.size.coerceAtLeast(0L)
@@ -659,15 +665,5 @@ private suspend fun copyFromPc(
     } finally {
         staging.deleteRecursively()
     }
-    refreshGalleryCache()
     return "Copied $copied file(s) and ${ordered.size} folder(s) from ${PeerLink.pcName ?: "the PC"}."
-}
-
-/** The library reuses its cached rows on return, so bring them up to date here. */
-private fun refreshGalleryCache() {
-    runCatching {
-        GalleryCache.videos = Json.videos(CoreBridge.nativeListVideos())
-        GalleryCache.folders = Json.folders(CoreBridge.nativeListFolders())
-        GalleryCache.tags = Json.tags(CoreBridge.nativeListTags())
-    }
 }

@@ -1,17 +1,11 @@
 name: Release
 
 # Publishes one GitHub Release with three downloads: Windows x64, Linux x64,
-# and Android arm64. Two ways to create it:
-#   1. Manual:  Actions -> "Release" -> "Run workflow" -> optional version
-#      (e.g. 0.4.0; empty = auto vYYYY.MM.DD.HHMM). Creates the tag itself.
-#   2. Tag push: git tag v0.4.0 && git push origin v0.4.0  (builds automatically).
+# and Android arm64. The version is chosen here. Actions -> Release ->
+# Run workflow takes the next unused tag after the highest vX.Y.Z
+# (v2.0.3 becomes v2.0.4). A pushed v* tag builds that exact tag instead.
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release (e.g. 0.4.0). Empty = auto (vYYYY.MM.DD.HHMM).'
-        required: false
-        default: ''
   push:
     tags:
       - 'v*'
@@ -24,7 +18,47 @@ permissions:
 # Node 20-only actions are used, so the fall-2026 Node 20 removal on runners
 # cannot break this workflow.
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      number: ${{ steps.pick.outputs.number }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Reserve the next unused version
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --force
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag=""
+            for _attempt in 1 2 3 4 5; do
+              git fetch origin --tags --force
+              tag="$(bash scripts/next-version.sh)"
+              if git tag "$tag" && git push origin "refs/tags/$tag"; then
+                break
+              fi
+              git tag -d "$tag" || true
+              tag=""
+            done
+            if [ -z "$tag" ]; then
+              echo "Could not reserve a new version tag." >&2
+              exit 1
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "number=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "### Version" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+
   build-windows:
+    needs: version
     # Pinned instead of the floating windows-latest: when that label moves to
     # a newer image, CMake's "Visual Studio 17 2022" generator can fail VS
     # discovery at project() with "could not find any instance of Visual
@@ -104,7 +138,8 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-release `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
             -DVCPKG_INSTALL_OPTIONS="" `
-            -DCMAKE_SYSTEM_VERSION=""
+            -DCMAKE_SYSTEM_VERSION="" `
+            -DMVP_VERSION="${{ needs.version.outputs.number }}"
 
       - name: Build (Release)
         shell: pwsh
@@ -155,6 +190,7 @@ jobs:
           path: ${{ runner.temp }}/MegaVaultProtect-windows-x64.zip
 
   build-linux:
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -166,11 +202,12 @@ jobs:
           sudo apt-get install -y -qq \
             qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-            libsqlcipher-dev libargon2-dev libsodium-dev \
+            libsqlcipher-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
+            libxcb-cursor0 libxcb-xinerama0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
       - name: Configure (Release)
-        run: cmake --preset linux-release
+        run: cmake --preset linux-release -DMVP_VERSION="${{ needs.version.outputs.number }}"
 
       - name: Build (Release)
         run: cmake --build --preset linux-release -j "$(nproc)"
@@ -193,26 +230,17 @@ jobs:
           path: ${{ runner.temp }}/MegaVaultProtect-linux-x64.tar.gz
 
   build-android:
+    needs: version
     uses: ./.github/workflows/android-build.yml
+    with:
+      version: ${{ needs.version.outputs.number }}
 
   release:
-    needs: [build-windows, build-linux, build-android]
+    needs: [version, build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-
-      - name: Resolve release version
-        id: version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=v$(date +%Y.%m.%d.%H%M)" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -234,8 +262,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Mega Vault Protect ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Mega Vault Protect ${{ needs.version.outputs.tag }}
           fail_on_unmatched_files: true
           body: |
             Windows, Linux, and Android downloads for this version.

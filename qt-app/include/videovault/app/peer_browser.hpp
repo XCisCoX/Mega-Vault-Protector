@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QDialog>
+#include <QWidget>
 #include <QHash>
 #include <QPixmap>
 #include <QString>
@@ -48,13 +48,14 @@ struct PeerCopyPlan {
 
 // The swapped phone's library, read-only. Nothing here can change or remove
 // the phone's files; the only action is copying into this PC's library.
-class PeerBrowser final : public QDialog {
+class PeerBrowser final : public QWidget {
 public:
     PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent = nullptr);
     ~PeerBrowser() override;
 
     void setOnCopy(std::function<void(std::shared_ptr<PeerCopyPlan>)> callback);
     void setOnUnlink(std::function<void()> callback);
+    void setOnBack(std::function<void()> callback);
     void reload();
 
 private:
@@ -87,6 +88,7 @@ private:
 
     std::function<void(std::shared_ptr<PeerCopyPlan>)> onCopy_;
     std::function<void()> onUnlink_;
+    std::function<void()> onBack_;
 };
 
 } // namespace videovault::app

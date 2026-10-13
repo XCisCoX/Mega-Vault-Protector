@@ -35,7 +35,15 @@ using namespace videovault::core;
 namespace {
 
 std::mutex g_mutex;
-std::unique_ptr<Vault> g_vault;
+std::shared_ptr<Vault> g_vault;
+
+// A copy of the open vault, taken without holding g_mutex across the call.
+// Import encrypts for a long time and drops the vault lock while it does, so
+// a player read has to be able to run in that gap.
+std::shared_ptr<Vault> retain_vault() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_vault;
+}
 
 // Plaintext of a very short clip, kept while the vault is unlocked. A loop
 // used to open the package and decrypt it again on every repeat. Songs and
@@ -876,7 +884,7 @@ JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring passwo
         static_cast<std::uint32_t>(parallelism)};
     auto result = Vault::create(r, p, params);
     if (!result) return to_jstring(env, err_json(result.error()));
-    g_vault = std::make_unique<Vault>(std::move(result.value()));
+    g_vault = std::make_shared<Vault>(std::move(result.value()));
     return to_jstring(env, ok_json());
 }
 
@@ -886,7 +894,7 @@ JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring password
     const std::string p = jstring_to_string(env, password);
     auto result = Vault::open(r, p);
     if (!result) return to_jstring(env, err_json(result.error()));
-    g_vault = std::make_unique<Vault>(std::move(result.value()));
+    g_vault = std::make_shared<Vault>(std::move(result.value()));
     return to_jstring(env, ok_json());
 }
 
@@ -937,6 +945,8 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeThum
     if (!g_vault) return nullptr;
     auto thumb = g_vault->display_thumbnail(id, static_cast<std::uint32_t>(max_dimension));
     if (!thumb) return nullptr;
+    const auto& mime = thumb.value().mime;
+    if (mime == "image/x-mvp-note" || mime == "image/x-mvp-empty") return nullptr;
     auto& bytes = thumb.value().bytes;
     jbyteArray out = env->NewByteArray(static_cast<jsize>(bytes.size()));
     if (out != nullptr) {
@@ -1048,13 +1058,13 @@ JNIEXPORT jlong JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVideoSize
 // array means end of stream; null means the read failed.
 JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeReadRange(
     JNIEnv* env, jobject, jlong id, jlong offset, jint size) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_vault || size <= 0 || offset < 0) return nullptr;
+    auto vault = retain_vault();
+    if (!vault || size <= 0 || offset < 0) return nullptr;
     const auto video = static_cast<std::int64_t>(id);
     const auto at = static_cast<std::uint64_t>(offset);
     // Stream this window only. Caching the whole song here made play wait
     // until every chunk was decrypted.
-    auto bytes = g_vault->read_video_range(video, at, static_cast<std::size_t>(size));
+    auto bytes = vault->read_video_range(video, at, static_cast<std::size_t>(size));
     if (!bytes) return nullptr;
     auto& data = bytes.value();
     jbyteArray out = env->NewByteArray(static_cast<jsize>(data.size()));
@@ -1141,11 +1151,11 @@ JNI_METHOD(nativeMoveVideo)(JNIEnv* env, jobject, jlong id, jlong folder_id) {
 }
 
 JNI_METHOD(nativeImportInto)(JNIEnv* env, jobject, jstring path, jlong folder_id) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
     const std::string p = jstring_to_string(env, path);
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, err_msg("Vault is not open"));
     bool duplicate = false;
-    auto result = g_vault->import_file(
+    auto result = vault->import_file(
         p, {}, static_cast<std::int64_t>(folder_id), &duplicate);
     if (!result) return to_jstring(env, err_json(result.error()));
     char buf[96];
@@ -1158,6 +1168,7 @@ JNI_METHOD(nativeImportInto)(JNIEnv* env, jobject, jstring path, jlong folder_id
 JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     clear_plain();
+    if (g_vault) g_vault->lock();
     g_vault.reset();
     return to_jstring(env, ok_json());
 }

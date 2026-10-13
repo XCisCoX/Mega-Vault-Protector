@@ -17,6 +17,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -929,6 +930,320 @@ Result<std::vector<unsigned char>> music_note_jpeg(
     return jpeg;
 }
 
+constexpr std::size_t kMaxCoverBytes = 12U * 1024U * 1024U;
+
+bool pull_bytes(PackageReader& reader, const std::uint64_t offset,
+    unsigned char* destination, const std::size_t count) {
+    if (count == 0U || offset > reader.plaintext_size()
+        || count > reader.plaintext_size() - offset) {
+        return false;
+    }
+    const auto sought = reader.seek(offset);
+    if (!sought) {
+        return false;
+    }
+    std::size_t got = 0U;
+    while (got < count) {
+        const auto chunk = reader.read(std::span<unsigned char>(destination + got, count - got));
+        if (!chunk || chunk.value() == 0U) {
+            return false;
+        }
+        got += chunk.value();
+    }
+    return true;
+}
+
+std::uint32_t read_be32(const unsigned char* data) {
+    return (static_cast<std::uint32_t>(data[0]) << 24U)
+        | (static_cast<std::uint32_t>(data[1]) << 16U)
+        | (static_cast<std::uint32_t>(data[2]) << 8U)
+        | static_cast<std::uint32_t>(data[3]);
+}
+
+std::uint32_t read_synchsafe(const unsigned char* data) {
+    return (static_cast<std::uint32_t>(data[0] & 0x7FU) << 21U)
+        | (static_cast<std::uint32_t>(data[1] & 0x7FU) << 14U)
+        | (static_cast<std::uint32_t>(data[2] & 0x7FU) << 7U)
+        | static_cast<std::uint32_t>(data[3] & 0x7FU);
+}
+
+std::size_t skip_encoded_text(const unsigned char* data, const std::size_t size,
+    std::size_t at, const unsigned char encoding) {
+    if (encoding == 1U || encoding == 2U) {
+        while (at + 1U < size) {
+            if (data[at] == 0U && data[at + 1U] == 0U) {
+                return at + 2U;
+            }
+            at += 2U;
+        }
+        return size;
+    }
+    while (at < size && data[at] != 0U) {
+        ++at;
+    }
+    return at < size ? at + 1U : size;
+}
+
+std::vector<unsigned char> image_from(const unsigned char* data, const std::size_t size) {
+    const std::size_t limit = std::min(size, static_cast<std::size_t>(64U));
+    for (std::size_t index = 0U; index + 8U < limit; ++index) {
+        const bool jpeg = data[index] == 0xFFU && data[index + 1U] == 0xD8U && data[index + 2U] == 0xFFU;
+        const bool png = std::memcmp(data + index, "\x89PNG\r\n\x1a\n", 8) == 0;
+        if (jpeg || png) {
+            return std::vector<unsigned char>(data + index, data + size);
+        }
+    }
+    return {};
+}
+
+std::vector<unsigned char> apic_from_id3(const unsigned char* tag, const std::size_t tag_size) {
+    if (tag_size < 10U || std::memcmp(tag, "ID3", 3) != 0 || tag[3] < 2U || tag[3] > 4U) {
+        return {};
+    }
+    std::size_t body_size = read_synchsafe(tag + 6);
+    if (body_size > tag_size - 10U) {
+        body_size = tag_size - 10U;
+    }
+    std::vector<unsigned char> body(tag + 10, tag + 10 + body_size);
+    const bool unsynchronised = (tag[5] & 0x80U) != 0;
+    auto picture_bytes = [&](const unsigned char* data, const std::size_t size) {
+        if (!unsynchronised) {
+            return image_from(data, size);
+        }
+        std::vector<unsigned char> clean;
+        clean.reserve(size);
+        for (std::size_t index = 0U; index < size; ++index) {
+            clean.push_back(data[index]);
+            if (data[index] == 0xFFU && index + 1U < size && data[index + 1U] == 0U) {
+                ++index;
+            }
+        }
+        return image_from(clean.data(), clean.size());
+    };
+    std::size_t at = 0U;
+    if (tag[3] == 2U) {
+        while (at + 6U <= body.size() && body[at] != 0U) {
+            const std::size_t frame_size = (static_cast<std::size_t>(body[at + 3]) << 16U)
+                | (static_cast<std::size_t>(body[at + 4]) << 8U)
+                | static_cast<std::size_t>(body[at + 5]);
+            const bool picture = body[at] == 'P' && body[at + 1] == 'I' && body[at + 2] == 'C';
+            at += 6U;
+            if (frame_size == 0U || at + frame_size > body.size()) {
+                break;
+            }
+            if (picture && frame_size > 8U) {
+                const unsigned char encoding = body[at];
+                std::size_t pos = skip_encoded_text(body.data(), at + frame_size, at + 5U, encoding);
+                auto image = picture_bytes(body.data() + pos, at + frame_size - pos);
+                if (!image.empty()) {
+                    return image;
+                }
+            }
+            at += frame_size;
+        }
+        return {};
+    }
+    const bool version4 = tag[3] == 4U;
+    while (at + 10U <= body.size() && body[at] != 0U) {
+        const std::size_t frame_size = version4
+            ? read_synchsafe(body.data() + at + 4)
+            : read_be32(body.data() + at + 4);
+        const bool picture = std::memcmp(body.data() + at, "APIC", 4) == 0;
+        at += 10U;
+        if (frame_size == 0U || at + frame_size > body.size()) {
+            break;
+        }
+        if (picture && frame_size > 4U) {
+            const unsigned char encoding = body[at];
+            std::size_t pos = at + 1U;
+            while (pos < at + frame_size && body[pos] != 0U) {
+                ++pos;
+            }
+            if (pos < at + frame_size) {
+                ++pos;
+            }
+            if (pos < at + frame_size) {
+                ++pos;
+            }
+            pos = skip_encoded_text(body.data(), at + frame_size, pos, encoding);
+            auto image = picture_bytes(body.data() + pos, at + frame_size - pos);
+            if (!image.empty()) {
+                return image;
+            }
+        }
+        at += frame_size;
+    }
+    return {};
+}
+
+std::vector<unsigned char> picture_from_flac(const unsigned char* data, const std::size_t size) {
+    if (size < 8U || std::memcmp(data, "fLaC", 4) != 0) {
+        return {};
+    }
+    std::size_t at = 4U;
+    while (at + 4U <= size) {
+        const bool last = (data[at] & 0x80U) != 0;
+        const unsigned int type = static_cast<unsigned int>(data[at] & 0x7FU);
+        const std::size_t block = (static_cast<std::size_t>(data[at + 1]) << 16U)
+            | (static_cast<std::size_t>(data[at + 2]) << 8U)
+            | static_cast<std::size_t>(data[at + 3]);
+        at += 4U;
+        if (block > size - at) {
+            break;
+        }
+        if (type == 6U && block > 32U) {
+            std::size_t pos = at + 4U;
+            if (pos + 4U > at + block) {
+                break;
+            }
+            const std::size_t mime = read_be32(data + pos);
+            pos += 4U + mime;
+            if (pos + 4U > at + block) {
+                break;
+            }
+            const std::size_t description = read_be32(data + pos);
+            pos += 4U + description + 16U;
+            if (pos + 4U > at + block) {
+                break;
+            }
+            const std::size_t bytes = read_be32(data + pos);
+            pos += 4U;
+            if (bytes == 0U || bytes > kMaxCoverBytes || pos + bytes > at + block) {
+                break;
+            }
+            return image_from(data + pos, bytes);
+        }
+        at += block;
+        if (last) {
+            break;
+        }
+    }
+    return {};
+}
+
+std::vector<unsigned char> covr_from_mp4(PackageReader& reader, const std::uint64_t start,
+    const std::uint64_t end, const int depth, const bool inside_cover) {
+    if (depth > 8 || end < start + 8U) {
+        return {};
+    }
+    std::uint64_t at = start;
+    while (at + 8U <= end) {
+        unsigned char header[8];
+        if (!pull_bytes(reader, at, header, 8U)) {
+            return {};
+        }
+        std::uint64_t size = read_be32(header);
+        std::uint64_t header_size = 8U;
+        if (size == 1U) {
+            unsigned char extended[8];
+            if (!pull_bytes(reader, at + 8U, extended, 8U)) {
+                return {};
+            }
+            size = (static_cast<std::uint64_t>(read_be32(extended)) << 32U) | read_be32(extended + 4);
+            header_size = 16U;
+        } else if (size == 0U) {
+            size = end - at;
+        }
+        if (size < header_size || at + size > end) {
+            break;
+        }
+        const std::uint64_t payload = at + header_size;
+        char type[5] = {
+            static_cast<char>(header[4]), static_cast<char>(header[5]),
+            static_cast<char>(header[6]), static_cast<char>(header[7]), '\0'};
+        if (std::strcmp(type, "meta") == 0 && payload + 4U < at + size) {
+            auto found = covr_from_mp4(reader, payload + 4U, at + size, depth + 1, false);
+            if (!found.empty()) {
+                return found;
+            }
+        } else if (std::strcmp(type, "moov") == 0 || std::strcmp(type, "udta") == 0
+            || std::strcmp(type, "ilst") == 0 || std::strcmp(type, "covr") == 0) {
+            auto found = covr_from_mp4(
+                reader, payload, at + size, depth + 1, std::strcmp(type, "covr") == 0);
+            if (!found.empty()) {
+                return found;
+            }
+        } else if (inside_cover && std::strcmp(type, "data") == 0 && payload + 8U < at + size) {
+            const std::uint64_t bytes = at + size - (payload + 8U);
+            if (bytes >= 32U && bytes <= kMaxCoverBytes) {
+                std::vector<unsigned char> image(static_cast<std::size_t>(bytes));
+                if (pull_bytes(reader, payload + 8U, image.data(), image.size())) {
+                    auto picture = image_from(image.data(), image.size());
+                    if (!picture.empty()) {
+                        return picture;
+                    }
+                }
+            }
+        }
+        at += size;
+    }
+    return {};
+}
+
+std::vector<unsigned char> read_embedded_cover(PackageReader& reader) {
+    unsigned char head[16] = {};
+    const std::size_t head_count = static_cast<std::size_t>(
+        std::min<std::uint64_t>(sizeof(head), reader.plaintext_size()));
+    if (head_count < 8U || !pull_bytes(reader, 0U, head, head_count)) {
+        return {};
+    }
+    if (std::memcmp(head, "ID3", 3) == 0 && head_count >= 10U) {
+        const std::uint64_t tag_size = 10U + static_cast<std::uint64_t>(read_synchsafe(head + 6));
+        if (tag_size > 10U && tag_size <= kMaxCoverBytes
+            && tag_size <= reader.plaintext_size()) {
+            std::vector<unsigned char> tag(static_cast<std::size_t>(tag_size));
+            if (pull_bytes(reader, 0U, tag.data(), tag.size())) {
+                return apic_from_id3(tag.data(), tag.size());
+            }
+        }
+        return {};
+    }
+    if (std::memcmp(head, "fLaC", 4) == 0) {
+        const std::uint64_t take = std::min<std::uint64_t>(reader.plaintext_size(), kMaxCoverBytes);
+        std::vector<unsigned char> prefix(static_cast<std::size_t>(take));
+        if (!pull_bytes(reader, 0U, prefix.data(), prefix.size())) {
+            return {};
+        }
+        return picture_from_flac(prefix.data(), prefix.size());
+    }
+    if (head_count >= 8U && std::memcmp(head + 4, "ftyp", 4) == 0) {
+        return covr_from_mp4(reader, 0U, reader.plaintext_size(), 0, false);
+    }
+    return {};
+}
+
+Result<AvFramePtr> decode_still_bytes(const unsigned char* data, const std::size_t size) {
+    if (data == nullptr || size < 8U) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat, "the cover image is empty"};
+    }
+    AVCodecID codec_id = AV_CODEC_ID_NONE;
+    if (data[0] == 0xFFU && data[1] == 0xD8U && data[2] == 0xFFU) {
+        codec_id = AV_CODEC_ID_MJPEG;
+    } else if (std::memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        codec_id = AV_CODEC_ID_PNG;
+    }
+    const AVCodec* decoder = codec_id == AV_CODEC_ID_NONE ? nullptr : avcodec_find_decoder(codec_id);
+    if (decoder == nullptr) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat, "no decoder is available for the cover art"};
+    }
+    AvCodecPtr codec(avcodec_alloc_context3(decoder));
+    AvFramePtr frame(av_frame_alloc());
+    if (!codec || !frame) {
+        return VaultError{VaultErrorCode::CryptoFailure, "unable to allocate FFmpeg frame"};
+    }
+    if (avcodec_open2(codec.get(), decoder, nullptr) < 0) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat, "the cover decoder did not open"};
+    }
+    AVPacket packet{};
+    packet.data = const_cast<unsigned char*>(data);
+    packet.size = static_cast<int>(size);
+    if (avcodec_send_packet(codec.get(), &packet) < 0
+        || avcodec_receive_frame(codec.get(), frame.get()) < 0) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat, "the cover image did not decode"};
+    }
+    return frame;
+}
+
 } // namespace
 
 Result<MediaProbeResult> probe_media(PackageReader& reader) {
@@ -1095,6 +1410,29 @@ Result<std::vector<unsigned char>> extract_audio_thumbnail_jpeg(
     auto note = [&]() {
         return music_note_jpeg(max_dimension, out_width, out_height);
     };
+    // ID3, FLAC, and M4A covers are read here so a build without those
+    // demuxers (the phone) still gets the picture. Playback does not use this.
+    const auto embedded = read_embedded_cover(reader);
+    if (!embedded.empty()) {
+        auto frame = decode_still_bytes(embedded.data(), embedded.size());
+        if (frame) {
+            auto dimensions = scaled_dimensions(
+                static_cast<std::uint32_t>(frame.value()->width),
+                static_cast<std::uint32_t>(frame.value()->height),
+                max_dimension);
+            if (dimensions) {
+                const auto jpeg_width = even_jpeg_dimension(dimensions.value().first);
+                const auto jpeg_height = even_jpeg_dimension(dimensions.value().second);
+                auto jpeg = encode_jpeg(frame.value().get(), jpeg_width, jpeg_height);
+                if (jpeg) {
+                    art_kind = 1;
+                    out_width = jpeg_width;
+                    out_height = jpeg_height;
+                    return jpeg;
+                }
+            }
+        }
+    }
     const char* hint = (name_hint != nullptr && name_hint[0] != '\0') ? name_hint : "audio.mp3";
     auto handle = try_open_format(reader, hint);
     if (!handle) {

@@ -95,16 +95,14 @@ struct PeerBrowser::Listing {
 };
 
 PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
-    : QDialog(parent),
+    : QWidget(parent),
       peer_(std::move(peer)),
       generation_(std::make_shared<std::atomic<quint64>>(0)) {
     phone_ = peer_->name();
     setAttribute(Qt::WA_DeleteOnClose);
-    setModal(false);
-    setWindowTitle(QStringLiteral("%1 · shared with you").arg(phone_));
-    resize(980, 660);
+    setObjectName(QStringLiteral("peerBrowser"));
     setStyleSheet(QStringLiteral(
-        "QDialog { background: #000000; }"
+        "QWidget#peerBrowser { background: #000000; }"
         "QLabel { color: white; background: transparent; }"
         "QLabel#peerHint, QLabel#peerStatus { color: #8e8e93; }"
         "QListWidget { background: #000000; border: none; color: white; outline: none; }"
@@ -121,6 +119,18 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(18, 14, 18, 14);
     layout->setSpacing(10);
+
+    auto* heading = new QHBoxLayout();
+    auto* back = new QPushButton(QStringLiteral("Back"), this);
+    back->setCursor(Qt::PointingHandCursor);
+    auto* title = new QLabel(QStringLiteral("%1 · shared with you").arg(phone_), this);
+    QFont titleFont(QStringLiteral("Segoe UI"));
+    titleFont.setPointSize(15);
+    titleFont.setWeight(QFont::DemiBold);
+    title->setFont(titleFont);
+    heading->addWidget(back);
+    heading->addWidget(title, 1);
+    layout->addLayout(heading);
 
     auto* top = new QHBoxLayout();
     crumbHost_ = new QWidget(this);
@@ -164,6 +174,9 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
     bottom->addWidget(copy_);
     layout->addLayout(bottom);
 
+    connect(back, &QPushButton::clicked, this, [this] {
+        if (onBack_) onBack_();
+    });
     connect(refresh_, &QPushButton::clicked, this, [this] { reload(); });
     connect(unlink_, &QPushButton::clicked, this, [this] {
         if (onUnlink_) onUnlink_();
@@ -192,6 +205,10 @@ void PeerBrowser::setOnCopy(std::function<void(std::shared_ptr<PeerCopyPlan>)> c
 
 void PeerBrowser::setOnUnlink(std::function<void()> callback) {
     onUnlink_ = std::move(callback);
+}
+
+void PeerBrowser::setOnBack(std::function<void()> callback) {
+    onBack_ = std::move(callback);
 }
 
 void PeerBrowser::reload() {

@@ -23,6 +23,7 @@ set(MVP_APP_SOURCES
     src/player_window.cpp
     src/music_window.cpp
     src/pdf_window.cpp
+    src/in_window_sheet.cpp
     src/record_document.cpp
     src/record_window.cpp
     src/settings_dialog.cpp
@@ -37,6 +38,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
     include/videovault/app/pdf_window.hpp
+    include/videovault/app/in_window_sheet.hpp
     include/videovault/app/record_document.hpp
     include/videovault/app/record_window.hpp
     include/videovault/app/settings_dialog.hpp
@@ -88,6 +90,10 @@ target_link_libraries(VideoVaultApp
         Qt5::MultimediaWidgets
         ${MVP_FFMPEG_LIBS}
 )
+if(UNIX AND NOT ANDROID)
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(VideoVaultApp PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 if(WIN32)
     target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32 windowsapp)
     set(_mvp_cppwinrt "")

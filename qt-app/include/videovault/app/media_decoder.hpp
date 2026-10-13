@@ -17,6 +17,10 @@ namespace videovault::app {
 struct DecodedFrame {
     QImage image;
     std::int64_t pts_ms{0};
+    // Decoder output size, before it is scaled to the window. A seek can
+    // emit a few frames at a different size than the rest of the stream.
+    int source_width{0};
+    int source_height{0};
 };
 
 // Title, artist, and album read from the container tags (ID3, Vorbis, MP4).
@@ -44,7 +48,8 @@ public:
     bool open(
         const std::shared_ptr<videovault::core::Vault>& vault,
         std::int64_t video_id,
-        QString* error);
+        QString* error,
+        const char* name_hint = nullptr);
 
     bool is_open() const;
     std::int64_t duration_ms() const;

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QStringList>
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 class QAbstractButton;
@@ -14,6 +16,7 @@ class QButtonGroup;
 class QDialog;
 class QComboBox;
 class QDragEnterEvent;
+class QResizeEvent;
 class QShowEvent;
 class QDropEvent;
 class QHBoxLayout;
@@ -26,6 +29,7 @@ class QThread;
 class QStackedWidget;
 class QTimer;
 class QEvent;
+class QLocalServer;
 class QObject;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -69,6 +73,7 @@ class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+    void acceptExternalPaths(const QStringList& paths);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -76,6 +81,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void changeEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
@@ -92,13 +98,26 @@ private:
     void beginImport();
     void beginImportFolder();
     void beginImportMany(std::vector<std::filesystem::path> sources, std::int64_t folder_id);
+    void beginImportTree(std::vector<std::filesystem::path> sources, std::int64_t folder_id);
+    void flushExternalImports();
     bool handleExplorerDrag(QObject* watched, QEvent* event);
     void moveItemsToFolder(std::int64_t destination);
     void highlightDropFolder(std::int64_t folder_id, bool on);
     bool galleryHasFocus() const;
     void beginRestoreSelected();
+    void beginExportPackage(std::int64_t only_folder_id = 0);
+    void beginImportPackage();
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
+    void revealVideo(qlonglong id, const QString& name, qlonglong size,
+        qlonglong folderId, qlonglong importedAt);
+    void revealFolder(qlonglong id, qlonglong parentId, const QString& name);
+    void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
+    void placeFolderRow(qlonglong id, const QString& name);
+    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void paintGalleryBatch();
+    void decorateVisible();
+    void recountLibrary();
     void openFolder(std::int64_t folder_id);
     void rebuildBreadcrumb();
     void beginNewFolder();
@@ -118,18 +137,30 @@ private:
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
     void closePdf();
+    // A note is a plain text item, edited in the in-window sheet.
+    void beginNewNote();
+    void beginText(std::int64_t video_id, const QString& title);
+    // Returns false when the reader stays open.
+    bool closeText(bool force = false);
+    void saveOpenText(bool closeAfter);
+    void placeTransferPanel();
+    // A record is a key/value item, edited in its own window.
+    void beginNewRecord();
     void beginRecord(std::int64_t video_id, const QString& title);
     void closeRecord();
-    void beginNewRecord();
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
+    void embedPdf();
+    void popPdf();
     void restoreGalleryFocus();
     std::int64_t selectedVideoId() const;
     std::vector<std::int64_t> selectedVideoIds() const;
     void setViewMode(int index);
     void applyGallerySort(int key);
     void sortGalleryItems();
+    void scheduleGallerySort();
+    void showGallerySortIndicator();
     void updateSortButton();
     void layoutLibraryChrome();
     void refreshTagFilter();
@@ -143,9 +174,12 @@ private:
     void openShare();
     void ensureShareServer();
     void approvePeer(const QString& phone, std::function<void(bool)> answer);
+    void finishPeerApproval(bool allow);
     void peerChanged();
     bool peerLinked() const;
     void openPeerBrowser();
+    void closePeerBrowser();
+    void dismissPeerBrowser();
     void beginCopyFromPeer(std::shared_ptr<PeerCopyPlan> plan);
     void pumpPeerCopies();
     void showTransfers();
@@ -184,12 +218,13 @@ private:
     QLabel* notice_{nullptr};
     QTimer* noticeTimer_{nullptr};
     QPushButton* importButton_{nullptr};
+    // Folder import is the same button: the Add popup offers both.
     QPushButton* importFolderButton_{nullptr};
-    QPushButton* newFolderButton_{nullptr};
-    QPushButton* newRecordButton_{nullptr};
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
+    std::vector<std::filesystem::path> pendingExternal_;
+    QLocalServer* importServer_{nullptr};
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
@@ -199,6 +234,9 @@ private:
     QPushButton* sortButton_{nullptr};
     int sortKey_{0};
     bool sortAscending_{true};
+    bool sortingGallery_{false};
+    bool gallerySortAgain_{false};
+    bool gallerySortQueued_{false};
     QComboBox* tagFilterCombo_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
@@ -209,6 +247,15 @@ private:
     MusicWindow* musicWindow_{nullptr};
     PdfWindow* pdfWindow_{nullptr};
     RecordWindow* recordWindow_{nullptr};
+    // In-window text reader/editor: the page plus the item it belongs to.
+    QWidget* textPage_{nullptr};
+    std::int64_t openTextId_{0};
+    std::int64_t openTextFolderId_{0};
+    QString openTextTitle_;
+    bool openTextTruncated_{false};
+    bool openTextBusy_{false};
+    bool closeTextAfterSave_{false};
+    bool lockAfterTextSave_{false};
     // Pixmaps and probed metadata for the open vault. Moving a file only
     // updates a row; painting the folder again must not reopen every package.
     struct GalleryCache;
@@ -228,6 +275,37 @@ private:
     // the tag filter and the gallery don't invalidate each other when they
     // run as part of the same refresh cycle.
     std::uint64_t galleryGeneration_{0};
+    struct PendingGalleryVideo {
+        std::int64_t id{0};
+        QString name;
+        std::uint64_t size{0};
+        std::int64_t importedAt{0};
+        QString tags;
+    };
+    // Rows still waiting to be inserted. The first screen is shown before the rest.
+    std::vector<PendingGalleryVideo> galleryQueue_;
+    std::size_t galleryQueueIndex_{0};
+    std::uint64_t galleryPaintGeneration_{0};
+    std::unordered_set<std::int64_t> decoratedIds_;
+    int sortProbeCursor_{0};
+    // True while refreshGallery is rebuilding the rows. Arrivals during that
+    // window are kept and merged into the snapshot, so a late list cannot
+    // wipe a file that landed after the list was read.
+    bool galleryListing_{false};
+    struct ArrivedVideo {
+        qlonglong id{0};
+        QString name;
+        qlonglong size{0};
+        qlonglong folderId{0};
+        qlonglong importedAt{0};
+    };
+    struct ArrivedFolder {
+        qlonglong id{0};
+        qlonglong parentId{0};
+        QString name;
+    };
+    std::vector<ArrivedVideo> pendingVideos_;
+    std::vector<ArrivedFolder> pendingFolders_;
     std::uint64_t tagGeneration_{0};
     QTimer* autoLockTimer_{nullptr};
     QTimer* searchTimer_{nullptr};
@@ -247,7 +325,9 @@ private:
     };
     std::vector<PeerTransfer> transfers_;
     quint64 transferSerial_{1};
-    QDialog* transferDialog_{nullptr};
+    QWidget* transferPanel_{nullptr};
+    QWidget* approvalVeil_{nullptr};
+    std::function<void(bool)> pendingPeerAnswer_;
     QWidget* transferHost_{nullptr};
     QPushButton* transfersButton_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};

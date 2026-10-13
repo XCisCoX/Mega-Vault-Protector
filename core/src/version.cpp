@@ -2,8 +2,12 @@
 
 namespace videovault::core {
 
+#ifndef MVP_VERSION_STRING
+#define MVP_VERSION_STRING "2.0.3"
+#endif
+
 std::string_view version() noexcept {
-    return "0.2.0-phase2";
+    return MVP_VERSION_STRING;
 }
 
 bool is_crypto_available() noexcept {

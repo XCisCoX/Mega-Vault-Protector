@@ -87,7 +87,7 @@ struct VideoInfo {
 };
 
 // A virtual folder. parent_id 0 is the library root. Removing a folder
-// moves its videos up one level; the encrypted packages stay where they are.
+// deletes the files and folders inside it.
 struct FolderInfo {
     std::int64_t id{0};
     std::int64_t parent_id{0};
@@ -229,7 +229,7 @@ public:
         std::int64_t folder_id,
         std::string_view name);
 
-    // Videos inside move to the parent folder. Nothing is decrypted or deleted.
+    // Deletes the folder, nested folders, and the encrypted packages inside.
     [[nodiscard]] Result<bool> remove_folder(std::int64_t folder_id);
 
     [[nodiscard]] Result<bool> move_folder(
@@ -270,10 +270,19 @@ public:
 
     // Decodes a representative frame, scales it to fit `max_dimension`, and
     // stores the JPEG encrypted in the vault database. Returns the plaintext
-    // thumbnail for display.
+    // thumbnail for display. A PDF is skipped here; the library renders one
+    // page and stores it with store_thumbnail.
     [[nodiscard]] Result<ThumbnailInfo> generate_thumbnail(
         std::int64_t video_id,
         std::uint32_t max_dimension = 320U) const;
+
+    // Encrypts a JPEG the caller already rendered and keeps it in the
+    // thumbnails table, replacing any older picture for this item.
+    [[nodiscard]] Result<ThumbnailInfo> store_thumbnail(
+        std::int64_t video_id,
+        const std::vector<unsigned char>& jpeg,
+        std::uint32_t width,
+        std::uint32_t height) const;
 
     // Phase 7: tags. Tag names are trimmed, non-empty, at most 64 bytes, and
     // matched case-insensitively (re-adding "family" to "Family" is a no-op
@@ -304,6 +313,38 @@ public:
 
     // Deletes a tag and detaches it from every video.
     [[nodiscard]] Result<bool> delete_tag(std::int64_t tag_id);
+
+    // One file inside a vault package. relative_path uses '/' separators and
+    // is relative to the package root ("Holiday/clip.mp4").
+    struct PackageItem {
+        std::int64_t video_id{0};
+        std::string relative_path;
+    };
+
+    // Writes a password-protected vault package. The file starts with the
+    // MVPK marker and is encrypted with its own password. It is not a RAR,
+    // ZIP, or 7-Zip archive, so archive tools cannot open it.
+    // `directories` are folder paths to keep even when they hold no files.
+    // `progress` receives 0.0..1.0 from the calling thread.
+    [[nodiscard]] Result<bool> export_package(
+        const std::filesystem::path& destination,
+        std::string_view password,
+        const std::vector<PackageItem>& files,
+        const std::vector<std::string>& directories,
+        bool compress,
+        const std::function<void(double)>& progress = {});
+
+    // Reads a vault package and copies its files into `folder_id` (0 is the
+    // library root), recreating folders. The password is the one chosen when
+    // the package was written, not the vault password.
+    // `on_file` / `on_folder` run for items that were newly stored.
+    [[nodiscard]] Result<int> import_package(
+        const std::filesystem::path& source,
+        std::string_view password,
+        std::int64_t folder_id,
+        const std::function<void(double)>& progress = {},
+        const std::function<void(std::int64_t id, const std::string& name, std::uint64_t size, std::int64_t parent)>& on_file = {},
+        const std::function<void(std::int64_t id, std::int64_t parent, const std::string& name)>& on_folder = {});
 
     // Restores a video to plaintext: streams the decrypted bytes to
     // `target_dir / <original name>` in chunks (no whole-file buffer) and

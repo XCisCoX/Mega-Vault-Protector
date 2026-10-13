@@ -271,11 +271,11 @@ fun MusicScreen(
             ) {
                 val art = cover
                 if (art == null) {
-                    Icon(
-                        painterResource(R.drawable.files_music),
+                    Image(
+                        painterResource(R.drawable.nocover),
                         contentDescription = null,
-                        tint = Mvp.accent,
-                        modifier = Modifier.size(22.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
                     )
                 } else {
                     Image(
@@ -560,6 +560,15 @@ fun MusicScreen(
                         .clip(RoundedCornerShape(8.dp)),
                     contentScale = ContentScale.Fit,
                 )
+            } else {
+                Image(
+                    painterResource(R.drawable.nocover),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp)),
+                    contentScale = ContentScale.Fit,
+                )
             }
         }
     }
@@ -674,11 +683,11 @@ private fun SongThumb(id: Long, modifier: Modifier) {
     Box(modifier.background(Color(0xFF2C2C2E)), contentAlignment = Alignment.Center) {
         val art = bmp
         if (art == null) {
-            Icon(
-                painterResource(R.drawable.files_music),
+            Image(
+                painterResource(R.drawable.nocover),
                 contentDescription = null,
-                tint = Mvp.accent,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
             )
         } else {
             Image(

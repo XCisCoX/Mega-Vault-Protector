@@ -1688,7 +1688,7 @@ Result<bool> Database::set_folder_parent(
     return true;
 }
 
-Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
+Result<std::vector<std::string>> Database::remove_folder_row(const std::int64_t folder_id) {
     if (database_ == nullptr) {
         return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
     }
@@ -1706,7 +1706,6 @@ Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
     if (self == nullptr) {
         return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
     }
-    const std::int64_t parent_id = self->parent_id;
     std::vector<std::int64_t> subtree;
     subtree.push_back(folder_id);
     for (std::size_t index = 0; index < subtree.size(); ++index) {
@@ -1717,12 +1716,6 @@ Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
         }
     }
 
-    auto transaction = run(database_, "BEGIN IMMEDIATE;");
-    if (!transaction) {
-        return transaction.error();
-    }
-    const auto rollback = [this] { (void)run(database_, "ROLLBACK;"); };
-
     std::string id_list;
     for (std::size_t index = 0; index < subtree.size(); ++index) {
         if (index > 0U) {
@@ -1730,15 +1723,38 @@ Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
         }
         id_list += std::to_string(subtree[index]);
     }
-    const std::string sql = parent_id > 0
-        ? "UPDATE videos SET folder_id = ?1 WHERE folder_id IN (" + id_list + ");"
-        : "UPDATE videos SET folder_id = NULL WHERE folder_id IN (" + id_list + ");";
-    Statement update(database_, sql.c_str());
-    if (update.status() != SQLITE_OK
-        || (parent_id > 0 && sqlite3_bind_int64(update.get(), 1, parent_id) != SQLITE_OK)
-        || sqlite3_step(update.get()) != SQLITE_DONE) {
+
+    auto transaction = run(database_, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [this] { (void)run(database_, "ROLLBACK;"); };
+
+    // Videos are deleted before the folder. Deleting the folder first would
+    // only clear their folder id, because that column is ON DELETE SET NULL.
+    std::vector<std::string> packages;
+    const std::string select_sql =
+        "SELECT package_relative_path FROM videos WHERE folder_id IN (" + id_list + ");";
+    Statement select(database_, select_sql.c_str());
+    if (select.status() != SQLITE_OK) {
         const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
-            "move videos out of folder", sqlite3_extended_errcode(database_));
+            "list folder packages", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+    while (sqlite3_step(select.get()) == SQLITE_ROW) {
+        const auto* text = sqlite3_column_text(select.get(), 0);
+        if (text != nullptr) {
+            packages.emplace_back(reinterpret_cast<const char*>(text));
+        }
+    }
+
+    const std::string delete_videos =
+        "DELETE FROM videos WHERE folder_id IN (" + id_list + ");";
+    Statement drop_videos(database_, delete_videos.c_str());
+    if (drop_videos.status() != SQLITE_OK || sqlite3_step(drop_videos.get()) != SQLITE_DONE) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "delete videos in folder", sqlite3_extended_errcode(database_));
         rollback();
         return error;
     }
@@ -1758,7 +1774,7 @@ Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
         rollback();
         return committed.error();
     }
-    return true;
+    return packages;
 }
 
 Result<bool> Database::rename_video_row(

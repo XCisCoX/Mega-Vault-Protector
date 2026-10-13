@@ -111,6 +111,8 @@ sealed interface Screen {
     data class Image(val videoId: Long, val name: String) : Screen
     /** A PDF: paged reading, not the video player. */
     data class Pdf(val videoId: Long, val name: String) : Screen
+    /** Plain text: a reader in the same window, not an external editor. */
+    data class Text(val videoId: Long, val name: String) : Screen
     /** Audio: a now-playing page, not the video feed. */
     data class Music(
         val videoId: Long,
