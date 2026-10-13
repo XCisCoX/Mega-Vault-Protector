@@ -607,7 +607,7 @@ long QrCode::getPenaltyScore() const {
 				runX = 1;
 			}
 		}
-		result += finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3;
+		result += static_cast<long>(finderPenaltyTerminateAndCount(runColor, runX, runHistory)) * PENALTY_N3;
 	}
 	// Adjacent modules in column having same color, and finder-like patterns
 	for (int x = 0; x < size; x++) {
