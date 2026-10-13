@@ -624,7 +624,7 @@ long QrCode::getPenaltyScore() const {
 			} else {
 				finderPenaltyAddHistory(runY, runHistory);
 				if (!runColor)
-					result += finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+					result += static_cast<long>(finderPenaltyCountPatterns(runHistory)) * PENALTY_N3;
 				runColor = module(x, y);
 				runY = 1;
 			}
