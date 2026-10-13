@@ -7,6 +7,8 @@
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/pdf_window.hpp"
 #include "videovault/app/player_window.hpp"
+#include "videovault/app/record_document.hpp"
+#include "videovault/app/record_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/core/vault.hpp"
@@ -275,6 +277,45 @@ QPixmap kindBadge(const QString& label, const QString& sizeText, const int side)
     return plate;
 }
 
+// A record has no thumbnail and, in the icon grid, no caption either (the name
+// lives in the tooltip). So the plate has to identify it by itself: the record's
+// name is drawn on the tile, coloured per record, with the kind and size around
+// it. Otherwise every record would look identical.
+QPixmap recordBadge(const QString& kindLabel, const QString& name,
+    const QString& sizeText, const int side) {
+    const int s = std::max(64, side);
+    QPixmap plate(s, s);
+    plate.fill(colorForKind(name));
+    QPainter painter(&plate);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::white);
+
+    QFont smallFont(QStringLiteral("Segoe UI"));
+    smallFont.setPixelSize(std::max(12, s / 12));
+    painter.setFont(smallFont);
+    painter.drawText(QRect(8, 6, s - 16, s / 8), Qt::AlignCenter, kindLabel);
+    painter.drawText(QRect(8, s - 6 - s / 8, s - 16, s / 8), Qt::AlignCenter, sizeText);
+
+    QFont nameFont(QStringLiteral("Segoe UI"));
+    nameFont.setPixelSize(std::max(16, s / 8));
+    nameFont.setWeight(QFont::DemiBold);
+    painter.setFont(nameFont);
+    const QFontMetrics nameMetrics(nameFont);
+    const QString elided = nameMetrics.elidedText(
+        name.isEmpty() ? QStringLiteral("Untitled") : name, Qt::ElideRight,
+        std::max(16, s - 16));
+    painter.drawText(QRect(8, s / 2 - s / 4, s - 16, s / 2),
+        Qt::AlignCenter | Qt::TextWordWrap, elided);
+    return plate;
+}
+
+QByteArray headBytes(const unsigned char* data, const std::size_t size) {
+    // The sniffing callers pass the first bytes of an item's plaintext; clamp
+    // so a hostile length can never overflow the QByteArray view.
+    const auto head = static_cast<int>(std::min<std::size_t>(size, 4096U));
+    return QByteArray::fromRawData(reinterpret_cast<const char*>(data), head);
+}
+
 bool looksLikeText(const unsigned char* data, std::size_t size);
 
 FileIdentity identityFromBytes(const unsigned char* data, const std::size_t size) {
@@ -286,6 +327,13 @@ FileIdentity identityFromBytes(const unsigned char* data, const std::size_t size
     };
     if (size == 0U) {
         return named("File", 0);
+    }
+    // Text records carry their maker in the first bytes of the plaintext, so a
+    // record is recognised by content like any other item, never by its name.
+    // Route 5, not 4: a record is text, but it opens in the record editor
+    // instead of the text sheet, so the two have to stay distinguishable.
+    if (looksLikeRecord(headBytes(data, size))) {
+        return named("Record", 5);
     }
     if (bytesAt(data, size, 0, "%PDF")) {
         return named("Pdf", 3);
@@ -2179,9 +2227,10 @@ QWidget* MainWindow::buildUnlockedPage() {
         menu.addCommand(QStringLiteral("Import files…"), 1);
         menu.addCommand(QStringLiteral("Import folder…"), 2);
         menu.addCommand(QStringLiteral("New note"), 3);
-        menu.addCommand(QStringLiteral("New folder"), 4);
-        menu.addCommand(QStringLiteral("Import package…"), 5);
-        menu.addCommand(QStringLiteral("Export package…"), 6);
+        menu.addCommand(QStringLiteral("New record"), 4);
+        menu.addCommand(QStringLiteral("New folder"), 5);
+        menu.addCommand(QStringLiteral("Import package…"), 6);
+        menu.addCommand(QStringLiteral("Export package…"), 7);
         const QPoint origin = importButton_->mapToGlobal(QPoint(0, importButton_->height()));
         placePopup(&menu, origin);
         switch (menu.exec()) {
@@ -2195,12 +2244,15 @@ QWidget* MainWindow::buildUnlockedPage() {
             beginNewNote();
             break;
         case 4:
-            beginNewFolder();
+            beginNewRecord();
             break;
         case 5:
-            beginImportPackage();
+            beginNewFolder();
             break;
         case 6:
+            beginImportPackage();
+            break;
+        case 7:
             beginExportPackage(0);
             break;
         default:
@@ -2913,7 +2965,8 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     if (!on_item || kind == 2) {
         menu.addCommand(QStringLiteral("New folder"), 1);
         menu.addCommand(QStringLiteral("New note"), 2);
-        menu.addCommand(QStringLiteral("Import package…"), 3);
+        menu.addCommand(QStringLiteral("New record"), 3);
+        menu.addCommand(QStringLiteral("Import package…"), 4);
         placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
@@ -2923,6 +2976,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
             beginNewNote();
             break;
         case 3:
+            beginNewRecord();
+            break;
+        case 4:
             beginImportPackage();
             break;
         default:
@@ -4282,6 +4338,111 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
     refreshGallery();
 }
 
+void MainWindow::beginNewRecord() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    bool accepted = false;
+    const QString entered = QInputDialog::getText(this, QStringLiteral("New record"),
+        QStringLiteral("Title"), QLineEdit::Normal, QString(), &accepted);
+    if (!accepted) {
+        return;
+    }
+    const QString title = entered.trimmed();
+    if (title.isEmpty()) {
+        showStatus(QStringLiteral("A record needs a title."), true);
+        return;
+    }
+
+    // The item is created before the editor opens, so it appears in this folder
+    // immediately — the same shape as creating a folder. The content is an
+    // empty record, which keeps the item recognisable as a record before its
+    // first edit; a zero-byte item could not be routed to the editor.
+    RecordDocument document;
+    document.title = title;
+    const QByteArray bytes = serializeRecord(document);
+
+    const auto vault = vault_;
+    const auto folder_id = currentFolderId_;
+    auto* watcher = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, title] {
+        const auto outcome = *watcher->result();
+        watcher->deleteLater();
+        if (!outcome) {
+            setError(galleryStatus_, vaultErrorText(outcome.error()));
+            galleryStatus_->setVisible(true);
+            return;
+        }
+        setError(galleryStatus_, {});
+        refreshGallery();
+        beginRecord(outcome.value(), title);
+    });
+    watcher->setFuture(QtConcurrent::run([vault, bytes, title, folder_id] {
+        const std::span<const unsigned char> content(
+            reinterpret_cast<const unsigned char*>(bytes.constData()),
+            static_cast<std::size_t>(bytes.size()));
+        return std::make_shared<core::Result<std::int64_t>>(
+            vault->import_bytes(content, title.toStdString(), folder_id));
+    }));
+}
+
+void MainWindow::beginRecord(const std::int64_t video_id, const QString& title) {
+    if (!vault_ || !vault_->is_unlocked() || video_id <= 0) {
+        return;
+    }
+    closePdf();
+    if (playerWindow_ != nullptr) {
+        auto* dying = playerWindow_;
+        playerWindow_ = nullptr;
+        dying->close();
+    }
+    if (musicWindow_ != nullptr) {
+        musicWindow_->pauseForVideo();
+    }
+    if (recordWindow_ == nullptr) {
+        auto* window = new RecordWindow(contentStack_);
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        connect(window, &QObject::destroyed, this, [this, window] {
+            if (recordWindow_ == window) {
+                recordWindow_ = nullptr;
+                if (contentStack_ != nullptr && pages_ != nullptr
+                    && playerWindow_ == nullptr) {
+                    fadeStack(contentStack_, pages_);
+                }
+            }
+            QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
+        });
+        connect(window, &RecordWindow::closeRequested, this, [this] { closeRecord(); });
+        connect(window, &RecordWindow::saved, this, [this] { refreshGallery(); });
+        recordWindow_ = window;
+    }
+    recordWindow_->openRecord(vault_, video_id, title);
+    if (contentStack_ != nullptr && contentStack_->indexOf(recordWindow_) < 0) {
+        contentStack_->addWidget(recordWindow_);
+    }
+    if (contentStack_ != nullptr) {
+        fadeStack(contentStack_, recordWindow_);
+    }
+    recordWindow_->show();
+    recordWindow_->setFocus();
+}
+
+void MainWindow::closeRecord() {
+    if (recordWindow_ == nullptr) {
+        return;
+    }
+    auto* dying = recordWindow_;
+    recordWindow_ = nullptr;
+    if (contentStack_ != nullptr) {
+        const bool showing = contentStack_->currentWidget() == dying;
+        contentStack_->removeWidget(dying);
+        if (showing && pages_ != nullptr) {
+            fadeStack(contentStack_, pages_);
+        }
+    }
+    dying->close();
+}
+
 void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
@@ -4659,7 +4820,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
     };
     const auto vault = vault_;
     const auto generation = galleryGeneration_;
-    auto presentIdentity = [this, vault, video_id, originalSize, applyThumb, generation](const FileIdentity& identity) {
+    auto presentIdentity = [this, vault, video_id, name, originalSize, applyThumb, generation](const FileIdentity& identity) {
         if (generation != galleryGeneration_) {
             return;
         }
@@ -4772,6 +4933,23 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 treeItem->setText(4, identity.label);
             }
             const QPixmap badge = textDocumentPixmap(identity.label, 320);
+            galleryCache_->thumbs[video_id] = badge;
+            applyThumb(iconItem, treeItem, badge);
+            return;
+        }
+        if (identity.route == 5) {
+            // A record is text: there is nothing to decode and no thumbnail to
+            // generate, so the media columns stay empty and the kind is shown
+            // instead. Probing it would only waste a decoder pass on JSON. The
+            // plate carries the record's name because the icon grid has no
+            // captions, and records would otherwise all look identical.
+            if (treeItem != nullptr) {
+                treeItem->setText(2, QString());
+                treeItem->setText(3, QString());
+                treeItem->setText(4, identity.label);
+            }
+            const QPixmap badge = recordBadge(
+                identity.label, name, compactSize(originalSize), 320);
             galleryCache_->thumbs[video_id] = badge;
             applyThumb(iconItem, treeItem, badge);
             return;
@@ -5517,6 +5695,12 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         window->playStill(vault_, video_id);
         applyClip(window);
         embedPlayer();
+        return;
+    }
+    if (identity.route == 5) {
+        // A record opens in the editor rather than a player, so previous/next
+        // neighbours do not apply: records have no playback order.
+        beginRecord(video_id, title);
         return;
     }
     if (identity.route == 2) {
@@ -6704,6 +6888,13 @@ void MainWindow::lockVault() {
         musicWindow_ = nullptr;
         dying->close();
     }
+    // A record window shows decrypted values, so it must not outlive the vault.
+    if (recordWindow_ != nullptr) {
+        auto* dying = recordWindow_;
+        recordWindow_ = nullptr;
+        dying->close();
+    }
+
     // File ids start over in every vault. Thumbnails, durations, and file
     // types kept from the one being locked would be drawn on the next one.
     if (galleryCache_ != nullptr) {

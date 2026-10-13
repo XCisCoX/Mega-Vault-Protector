@@ -172,6 +172,28 @@ public:
         std::int64_t folder_id = 0,
         bool* already_present = nullptr);
 
+    // Phase 8: text records. Imports content supplied in memory instead
+    // of a file on disk, so the app can author an item that lives in the library
+    // exactly like an imported file: the same package format, folders, tags,
+    // search, sharing and password-change behavior. The caller decides the
+    // content format; the core stores it as opaque bytes. Identical content
+    // returns the item already in the vault, exactly as import_file does.
+    // `display_name` follows the folder/file naming rule (1–120 characters).
+    [[nodiscard]] Result<std::int64_t> import_bytes(
+        std::span<const unsigned char> bytes,
+        std::string_view display_name,
+        std::int64_t folder_id = 0);
+
+    // Replaces an existing item's content in place. A new package is sealed and
+    // the row, its wrapped key and the content hash are updated in one
+    // transaction, so the item keeps its id, folder, tags and shares. The
+    // previous package file is removed after the commit. `display_name` renames
+    // the item. Unknown ids return InvalidArgument.
+    [[nodiscard]] Result<bool> replace_video_content(
+        std::int64_t video_id,
+        std::span<const unsigned char> bytes,
+        std::string_view display_name);
+
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 
     // Resolves the stored package file for a video and verifies it exists.

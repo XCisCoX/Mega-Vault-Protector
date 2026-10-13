@@ -76,6 +76,11 @@ if(TARGET VideoVaultPlaybackTests)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
+# Defined in qt-app/ for the same reason as the playback test above.
+if(TARGET VideoVaultRecordFormatTests)
+    add_test(NAME VideoVaultRecords.Format COMMAND $<TARGET_FILE:VideoVaultRecordFormatTests>)
+endif()
+
 add_executable(VideoVaultCoreTagTests
     tags.cpp
 )
@@ -85,3 +90,15 @@ target_compile_features(VideoVaultCoreTagTests PRIVATE cxx_std_20)
 set_target_properties(VideoVaultCoreTagTests PROPERTIES FOLDER "Tests")
 
 add_test(NAME VideoVaultCore.Tags COMMAND VideoVaultCoreTagTests)
+
+add_executable(VideoVaultCoreRecordTests
+    records.cpp
+)
+
+target_link_libraries(VideoVaultCoreRecordTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultCoreRecordTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultCoreRecordTests PROPERTIES FOLDER "Tests")
+
+mvp_copy_runtime_dlls(VideoVaultCoreRecordTests)
+
+add_test(NAME VideoVaultCore.Records COMMAND VideoVaultCoreRecordTests)

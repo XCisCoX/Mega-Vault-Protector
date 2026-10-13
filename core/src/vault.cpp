@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -793,6 +794,221 @@ void note_existing(bool* already_present, const std::function<void(double)>& pro
     }
 }
 
+// A package published at its content-addressed path, plus the metadata a
+// gallery row needs. The file key itself is returned through the caller's
+// buffer so the wrap step stays with the caller.
+struct SealedPackage {
+    std::filesystem::path relative;
+    std::filesystem::path published;
+    internal::Sha256Digest package_sha256{};
+    std::uint64_t package_size{0U};
+    std::array<unsigned char, 16> package_id{};
+};
+
+// Streams `source` into a vault-local temporary package, hashes the complete
+// ciphertext, and atomically publishes it at
+// vault-data/<h0h1>/<h2h3>/<64-hex>.vvp. Any failure removes the staging file,
+// so a partial package can never be observed. `file_key` is filled with a fresh
+// random 256-bit key.
+//
+// The caller holds the vault mutex in `guard`, but encryption is the slow part
+// and playback reads through the same mutex, so the guard is released for it.
+// `still_pinned` is asked afterwards whether the vault is still the one the
+// caller started with: a lock during the write must discard the staging file
+// instead of publishing a package into a vault that is gone.
+Result<SealedPackage> seal_package(
+    const std::filesystem::path& root,
+    std::istream& source,
+    const std::uint64_t plaintext_size,
+    internal::SensitiveBuffer& file_key,
+    const std::function<void(double)>& progress,
+    std::unique_lock<std::mutex>& guard,
+    const std::function<bool()>& still_pinned) {
+    const auto data_directory = root / L"vault-data";
+    const auto staging_directory = data_directory / L".tmp";
+    std::error_code error;
+    std::filesystem::create_directories(staging_directory, error);
+    if (error) {
+        return filesystem_error(error, "create package staging directory");
+    }
+
+    std::array<unsigned char, 8> staging_suffix{};
+    internal::random_bytes(staging_suffix);
+    // ASCII-only name; constructing the path from a narrow string is safe.
+    const auto staging_package = staging_directory
+        / ("import_" + to_hex_lower(staging_suffix) + ".vvp");
+
+    internal::random_bytes(std::span(file_key.data(), file_key.size()));
+
+    guard.unlock();
+    auto written = internal::write_package_file(
+        staging_package, file_key, internal::kDefaultPackageChunkSize, source,
+        plaintext_size, progress);
+    guard.lock();
+    if (!still_pinned()) {
+        std::error_code ignored;
+        std::filesystem::remove(staging_package, ignored);
+        return locked_error();
+    }
+    if (!written) {
+        std::error_code ignored;
+        std::filesystem::remove(staging_package, ignored);
+        return written.error();
+    }
+
+    const auto hex_hash = to_hex_lower(written.value().sha256);
+    const auto relative = std::filesystem::path(hex_hash.substr(0U, 2U))
+        / hex_hash.substr(2U, 2U) / (hex_hash + ".vvp");
+    const auto published = data_directory / relative;
+
+    std::filesystem::create_directories(published.parent_path(), error);
+    if (error) {
+        std::error_code ignored;
+        std::filesystem::remove(staging_package, ignored);
+        return filesystem_error(error, "create package directory");
+    }
+    if (std::filesystem::exists(published, error) && !error) {
+        // Orphan from an interrupted import; the database row is gone.
+        std::filesystem::remove(published, error);
+        if (error) {
+            std::error_code ignored;
+            std::filesystem::remove(staging_package, ignored);
+            return filesystem_error(error, "replace orphan package");
+        }
+    }
+    error.clear();
+    auto moved = internal::move_file_atomic(staging_package, published);
+    if (!moved) {
+        return moved.error();
+    }
+
+    SealedPackage sealed;
+    sealed.relative = relative;
+    sealed.published = published;
+    sealed.package_sha256 = written.value().sha256;
+    sealed.package_size = written.value().package_size;
+    sealed.package_id = written.value().package_id;
+    return sealed;
+}
+
+// Wraps a file key under the vault's package-wrapping subkey, with the package
+// id as associated data. Import and replace wrap keys identically.
+Result<internal::WrappedVideoKey> wrap_file_key(
+    const internal::SensitiveBuffer& master_key,
+    internal::SensitiveBuffer& file_key,
+    const std::array<unsigned char, 16>& package_id) {
+    auto wrapping_key = internal::derive_subkey(
+        master_key, kPackageWrappingSubkeyId, kPackageWrappingContext);
+    if (!wrapping_key) {
+        return wrapping_key.error();
+    }
+    internal::WrappedVideoKey key;
+    internal::random_bytes(key.nonce);
+    auto wrapped = internal::encrypt_xchacha20_poly1305(
+        std::span(file_key.data(), file_key.size()),
+        std::span(package_id), key.nonce, wrapping_key.value());
+    if (!wrapped || wrapped.value().size() != key.wrapped.size()) {
+        if (!wrapped) {
+            return wrapped.error();
+        }
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "wrapped file key has an invalid size"};
+    }
+    std::copy(wrapped.value().begin(), wrapped.value().end(), key.wrapped.begin());
+    return key;
+}
+
+// Seals `source` into a new package and commits its gallery row with the
+// wrapped file key, removing the published package if the commit fails. Returns
+// the new item id. Shared by import_file and import_bytes so the staging,
+// atomic-rename, key-wrap and commit order exists in exactly one place.
+// `guard` and `still_pinned` are handed to seal_package, which releases the
+// vault mutex while it encrypts.
+Result<std::int64_t> seal_and_commit(
+    const std::filesystem::path& root,
+    internal::Database& database,
+    const internal::SensitiveBuffer& master_key,
+    std::istream& source,
+    const std::uint64_t plaintext_size,
+    const internal::Sha256Digest& content_hash,
+    const std::string& display_name,
+    const std::int64_t folder_id,
+    const std::function<void(double)>& progress,
+    bool* already_present,
+    std::unique_lock<std::mutex>& guard,
+    const std::function<bool()>& still_pinned) {
+    internal::SensitiveBuffer file_key(32U);
+
+    auto sealed = seal_package(
+        root, source, plaintext_size, file_key, progress, guard, still_pinned);
+    if (!sealed) {
+        return sealed.error();
+    }
+    const auto discard = [&sealed] {
+        std::error_code ignored;
+        std::filesystem::remove(sealed.value().published, ignored);
+    };
+
+    // A fresh random file key makes the ciphertext unique, so this can only
+    // match a pre-existing package for the same bytes if a caller re-sealed
+    // identical content with a key that collided.
+    auto duplicate = database.query_video_by_sha256(sealed.value().package_sha256);
+    if (!duplicate) {
+        discard();
+        return duplicate.error();
+    }
+    if (duplicate.value()) {
+        discard();
+        note_existing(already_present, progress);
+        return duplicate.value()->id;
+    }
+
+    // The mutex was released for the encryption, so another import may have
+    // committed the same bytes in the meantime. Re-check the content hash and
+    // collapse onto that item instead of storing a second copy.
+    auto again = database.query_video_id_by_content_sha256(content_hash);
+    if (!again) {
+        discard();
+        return again.error();
+    }
+    if (again.value()) {
+        discard();
+        note_existing(already_present, progress);
+        return again.value().value();
+    }
+
+    internal::VideoRow row;
+    row.display_name = display_name;
+    row.original_size = plaintext_size;
+    const auto relative_u8 = sealed.value().relative.generic_u8string();
+    row.package_relative_path.assign(
+        reinterpret_cast<const char*>(relative_u8.data()), relative_u8.size());
+    row.package_size = sealed.value().package_size;
+    row.package_sha256 = sealed.value().package_sha256;
+    row.content_sha256 = content_hash;
+    row.has_content_sha256 = true;
+    row.format_version = internal::kPackageFormatVersion;
+    row.algorithm_id = internal::kPackageAlgorithmXChaCha20Poly1305;
+    row.chunk_size = internal::kDefaultPackageChunkSize;
+    row.package_id = sealed.value().package_id;
+    row.imported_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    row.folder_id = folder_id > 0 ? folder_id : 0;
+
+    auto key = wrap_file_key(master_key, file_key, row.package_id);
+    if (!key) {
+        discard();
+        return key.error();
+    }
+
+    auto inserted = database.insert_video(row, key.value());
+    if (!inserted) {
+        discard();
+        return inserted.error();
+    }
+    return inserted.value();
+}
+
 Result<std::int64_t> Vault::import_file(
     const std::filesystem::path& source_path,
     const std::function<void(double)>& progress,
@@ -878,28 +1094,6 @@ Result<std::int64_t> Vault::import_file(
         }
     }
 
-    const auto data_directory = root_ / L"vault-data";
-    const auto staging_directory = data_directory / L".tmp";
-    std::filesystem::create_directories(staging_directory, error);
-    if (error) {
-        return filesystem_error(error, "create package staging directory");
-    }
-
-    std::array<unsigned char, 8> staging_suffix{};
-    internal::random_bytes(staging_suffix);
-    // ASCII-only name; constructing the path from a narrow string is safe.
-    const auto staging_package = staging_directory
-        / ("import_" + to_hex_lower(staging_suffix) + ".vvp");
-
-    auto wrapping_key = internal::derive_subkey(
-        impl.master_key_, kPackageWrappingSubkeyId, kPackageWrappingContext);
-    if (!wrapping_key) {
-        return wrapping_key.error();
-    }
-
-    internal::SensitiveBuffer file_key(32U);
-    internal::random_bytes(std::span(file_key.data(), file_key.size()));
-
     std::ifstream source(source_path, std::ios::binary);
     if (!source) {
         return VaultError{VaultErrorCode::PermissionDenied,
@@ -910,114 +1104,16 @@ Result<std::int64_t> Vault::import_file(
             progress(0.15 + std::clamp(fraction, 0.0, 1.0) * 0.85);
         }
     };
-    guard.unlock();
-    auto written = internal::write_package_file(
-        staging_package, file_key, internal::kDefaultPackageChunkSize, source,
-        source_size, package_progress);
-    guard.lock();
-    if (!written) {
-        std::error_code ignored;
-        std::filesystem::remove(staging_package, ignored);
-        return written.error();
-    }
-    if (impl_.get() != pinned) {
-        std::error_code ignored;
-        std::filesystem::remove(staging_package, ignored);
-        return locked_error();
-    }
-
-    const auto hex_hash = to_hex_lower(written.value().sha256);
-    const auto relative = std::filesystem::path(hex_hash.substr(0U, 2U))
-        / hex_hash.substr(2U, 2U) / (hex_hash + ".vvp");
-    const auto final_package = data_directory / relative;
-
-    auto duplicate = impl.database_.query_video_by_sha256(written.value().sha256);
-    if (!duplicate) {
-        std::error_code ignored;
-        std::filesystem::remove(staging_package, ignored);
-        return duplicate.error();
-    }
-    if (duplicate.value()) {
-        std::error_code ignored;
-        std::filesystem::remove(staging_package, ignored);
-        note_existing(already_present, progress);
-        return duplicate.value()->id;
-    }
-
-    std::filesystem::create_directories(final_package.parent_path(), error);
-    if (error) {
-        std::error_code ignored;
-        std::filesystem::remove(staging_package, ignored);
-        return filesystem_error(error, "create package directory");
-    }
-    if (std::filesystem::exists(final_package, error) && !error) {
-        // Orphan from an interrupted import; the database row is gone.
-        std::filesystem::remove(final_package, error);
-        if (error) {
-            std::error_code ignored;
-            std::filesystem::remove(staging_package, ignored);
-            return filesystem_error(error, "replace orphan package");
-        }
-    }
-    error.clear();
-    auto moved = internal::move_file_atomic(staging_package, final_package);
-    if (!moved) {
-        return moved.error();
-    }
-
-    internal::VideoRow row;
     const auto name_u8 = source_path.filename().u8string();
-    row.display_name.assign(
+    const std::string display_name(
         reinterpret_cast<const char*>(name_u8.data()), name_u8.size());
-    row.original_size = source_size;
-    const auto relative_u8 = relative.generic_u8string();
-    row.package_relative_path.assign(
-        reinterpret_cast<const char*>(relative_u8.data()), relative_u8.size());
-    row.package_size = written.value().package_size;
-    row.package_sha256 = written.value().sha256;
-    row.content_sha256 = content_hash.value();
-    row.has_content_sha256 = true;
-    row.format_version = internal::kPackageFormatVersion;
-    row.algorithm_id = internal::kPackageAlgorithmXChaCha20Poly1305;
-    row.chunk_size = internal::kDefaultPackageChunkSize;
-    row.package_id = written.value().package_id;
-    row.imported_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
-        std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    row.folder_id = folder_id > 0 ? folder_id : 0;
 
-    internal::WrappedVideoKey key;
-    internal::random_bytes(key.nonce);
-    auto wrapped = internal::encrypt_xchacha20_poly1305(
-        std::span(file_key.data(), file_key.size()),
-        std::span(row.package_id), key.nonce, wrapping_key.value());
-    if (!wrapped || wrapped.value().size() != key.wrapped.size()) {
-        std::error_code ignored;
-        std::filesystem::remove(final_package, ignored);
-        if (!wrapped) {
-            return wrapped.error();
-        }
-        return VaultError{VaultErrorCode::CryptoFailure,
-            "wrapped file key has an invalid size"};
-    }
-    std::copy(wrapped.value().begin(), wrapped.value().end(), key.wrapped.begin());
-
-    auto again = impl.database_.query_video_id_by_content_sha256(content_hash.value());
-    if (!again) {
-        std::error_code ignored;
-        std::filesystem::remove(final_package, ignored);
-        return again.error();
-    }
-    if (again.value()) {
-        std::error_code ignored;
-        std::filesystem::remove(final_package, ignored);
-        note_existing(already_present, progress);
-        return again.value().value();
-    }
-
-    auto inserted = impl.database_.insert_video(row, key);
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
+    auto inserted = seal_and_commit(root_, impl.database_, impl.master_key_, source,
+        source_size, content_hash.value(), display_name,
+        folder_id > 0 ? folder_id : 0, package_progress, already_present,
+        guard, still_pinned);
     if (!inserted) {
-        std::error_code ignored;
-        std::filesystem::remove(final_package, ignored);
         return inserted.error();
     }
     const auto inserted_id = inserted.value();
@@ -1026,6 +1122,129 @@ Result<std::int64_t> Vault::import_file(
     guard.unlock();
     (void)generate_thumbnail(inserted_id, kImportThumbnailDimension);
     return inserted_id;
+}
+
+Result<std::int64_t> Vault::import_bytes(
+    const std::span<const unsigned char> bytes,
+    const std::string_view display_name,
+    const std::int64_t folder_id) {
+    std::unique_lock<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    // Sealing releases the mutex while it encrypts, so remember which vault
+    // this call belongs to and abort if the vault is locked in between.
+    const void* pinned = impl_.get();
+    if (folder_id > 0) {
+        auto folder = impl.database_.query_folder(folder_id);
+        if (!folder) {
+            return folder.error();
+        }
+    } else if (folder_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    const std::string name = normalize_entry_name(display_name);
+    if (name.empty()) {
+        return name_rejected();
+    }
+
+    const auto content_hash = internal::sha256(bytes);
+    auto known = impl.database_.query_video_id_by_content_sha256(content_hash);
+    if (!known) {
+        return known.error();
+    }
+    if (known.value()) {
+        return known.value().value();
+    }
+
+    // The package writer streams, so in-memory content is wrapped in a string
+    // stream. Nothing is written to disk outside the vault's own staging file.
+    const auto raw = std::string_view(
+        reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::istringstream source{std::string(raw)};
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
+    return seal_and_commit(root_, impl.database_, impl.master_key_, source,
+        static_cast<std::uint64_t>(bytes.size()), content_hash, name,
+        folder_id > 0 ? folder_id : 0, {}, nullptr, guard, still_pinned);
+}
+
+Result<bool> Vault::replace_video_content(
+    const std::int64_t video_id,
+    const std::span<const unsigned char> bytes,
+    const std::string_view display_name) {
+    std::unique_lock<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    const void* pinned = impl_.get();
+    auto existing = impl.database_.query_video(video_id);
+    if (!existing) {
+        return existing.error();
+    }
+    const std::string name = normalize_entry_name(display_name);
+    if (name.empty()) {
+        return name_rejected();
+    }
+
+    const auto content_hash = internal::sha256(bytes);
+    const auto raw = std::string_view(
+        reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::istringstream source{std::string(raw)};
+
+    internal::SensitiveBuffer file_key(32U);
+    const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
+    auto sealed = seal_package(root_, source, static_cast<std::uint64_t>(bytes.size()),
+        file_key, {}, guard, still_pinned);
+    if (!sealed) {
+        return sealed.error();
+    }
+    const auto discard_new = [&sealed] {
+        std::error_code ignored;
+        std::filesystem::remove(sealed.value().published, ignored);
+    };
+
+    // The row keeps its id, folder, tags and import time; only the content and
+    // its package metadata change.
+    internal::VideoRow row = existing.value();
+    row.display_name = name;
+    row.original_size = static_cast<std::uint64_t>(bytes.size());
+    const auto relative_u8 = sealed.value().relative.generic_u8string();
+    row.package_relative_path.assign(
+        reinterpret_cast<const char*>(relative_u8.data()), relative_u8.size());
+    row.package_size = sealed.value().package_size;
+    row.package_sha256 = sealed.value().package_sha256;
+    row.content_sha256 = content_hash;
+    row.has_content_sha256 = true;
+    row.format_version = internal::kPackageFormatVersion;
+    row.algorithm_id = internal::kPackageAlgorithmXChaCha20Poly1305;
+    row.chunk_size = internal::kDefaultPackageChunkSize;
+    row.package_id = sealed.value().package_id;
+
+    auto key = wrap_file_key(impl.master_key_, file_key, row.package_id);
+    if (!key) {
+        discard_new();
+        return key.error();
+    }
+
+    auto updated = impl.database_.update_video_package(video_id, row, key.value());
+    if (!updated) {
+        discard_new();
+        return updated.error();
+    }
+
+    // The committed row no longer references the previous package, so removing
+    // it cannot leave the gallery pointing at a missing file.
+    const auto previous =
+        root_ / L"vault-data" / existing.value().package_relative_path;
+    if (previous != sealed.value().published) {
+        std::error_code ignored;
+        std::filesystem::remove(previous, ignored);
+    }
+    // A thumbnail describes the replaced bytes.
+    (void)impl.database_.delete_thumbnail(video_id);
+    return true;
 }
 
 Result<std::vector<VideoInfo>> Vault::list_videos() const {
