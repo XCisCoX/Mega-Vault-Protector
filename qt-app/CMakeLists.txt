@@ -23,6 +23,8 @@ set(MVP_APP_SOURCES
     src/player_window.cpp
     src/music_window.cpp
     src/pdf_window.cpp
+    src/record_document.cpp
+    src/record_window.cpp
     src/settings_dialog.cpp
     src/batch_worker.cpp
     src/share_server.cpp
@@ -35,6 +37,8 @@ set(MVP_APP_SOURCES
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
     include/videovault/app/pdf_window.hpp
+    include/videovault/app/record_document.hpp
+    include/videovault/app/record_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
@@ -146,4 +150,24 @@ if(MVP_BUILD_TESTS)
     set_target_properties(VideoVaultPlaybackTests PROPERTIES FOLDER "Tests")
 
     mvp_copy_runtime_dlls(VideoVaultPlaybackTests)
+
+    # Headless check of the record content format: the JSON container, the
+    # routing marker and the inferred value kinds that the record editor and
+    # the gallery both depend on. It links the real record_document.cpp.
+    add_executable(VideoVaultRecordFormatTests
+        tests/record_format.cpp
+        src/record_document.cpp
+        include/videovault/app/record_document.hpp
+    )
+    target_link_libraries(VideoVaultRecordFormatTests
+        PRIVATE
+            Qt5::Core
+    )
+    target_include_directories(VideoVaultRecordFormatTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_features(VideoVaultRecordFormatTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultRecordFormatTests PROPERTIES FOLDER "Tests")
+
+    mvp_copy_runtime_dlls(VideoVaultRecordFormatTests)
 endif()

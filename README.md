@@ -52,6 +52,8 @@ Video, pictures, and music are decrypted in memory for viewing. On Android, the 
 
 Folders are names inside the vault. The encrypted packages stay where the vault put them. Removing a folder moves its items up. It does not delete them.
 
+**New record** creates a text item in the current folder: a title plus any number of name/value pairs — an API key, a password, an e-mail address, a note. Values can be marked secret; a secret stays masked until you reveal or copy it, and a copied secret is cleared from the clipboard after 30 seconds. The app works out how to present each value (a URL, an e-mail address, a password, a number, or a longer text) from the value itself, so there is no type to pick. A record is encrypted and stored exactly like an imported file, so it sits in folders, carries tags, and is found by search. Like every other item, it is recognised by its content, not by its name.
+
 The library has three views: large icons, a list, and a details table. Search matches the file name or a tag. Tags are edited in Settings. The vault locks after 5 minutes without use. Changing the password re-wraps keys and re-encrypts thumbnails. It does not re-encrypt the packages. Removing an item deletes its package.
 
 On Android, Back walks up one folder. At the library root, a second press within two seconds leaves the app. The video player starts fullscreen, fades the title, seeks ±5 seconds on a double tap, and plays at 2× while a side is held. The timeline shows the buffered region.
@@ -167,7 +169,7 @@ Full procedure: [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md). CI builds the sa
 
 ### Tests
 
-`ctest` runs seven headless suites. Windows and Linux release builds run the same list before a release is published.
+`ctest` runs nine headless suites. Windows and Linux release builds run the same list before a release is published.
 
 | Suite | What it checks |
 |---|---|
@@ -178,6 +180,8 @@ Full procedure: [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md). CI builds the sa
 | `VideoVaultCore.Media` | Probe, thumbnail after import, and thumbnail survival across a password change. |
 | `VideoVault.Playback` | Headless decode through the encrypted reader: duration, frames, seek, and audio. No temp file. |
 | `VideoVaultCore.Tags` | Add, filter, rename, and remove tags. |
+| `VideoVaultCore.Records` | Create a record from memory, read it back, replace its content in place (same id, folders and tags kept, old package gone), and reject bad names or unknown targets. |
+| `VideoVaultRecords.Format` | The record JSON container: marker at byte 0, escaping round-trip, non-record content rejected, and the inferred value kinds. |
 
 ```text
 ctest --preset linux-debug --output-on-failure
@@ -188,8 +192,8 @@ ctest --preset vs2022-x64-debug
 
 ```text
 core/        C++20 library: crypto, SQLCipher, .vvp packages, streaming
-             reader, FFmpeg probing, thumbnails, tags, folders
-qt-app/      Qt 5 app: library, video, pictures, PDF, music, share, transfers
+             reader, FFmpeg probing, thumbnails, tags, folders, text records
+qt-app/      Qt 5 app: library, video, pictures, PDF, music, records, share, transfers
 android/     Kotlin + Jetpack Compose app over the same core
 tests/       Headless ctest suites
 scripts/     Android cross-build and Windows FFmpeg import libraries

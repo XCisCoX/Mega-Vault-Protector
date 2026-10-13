@@ -48,6 +48,7 @@ struct VaultOperationResult;
 class PlayerWindow;
 class MusicWindow;
 class PdfWindow;
+class RecordWindow;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -117,6 +118,9 @@ private:
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
     void closePdf();
+    void beginRecord(std::int64_t video_id, const QString& title);
+    void closeRecord();
+    void beginNewRecord();
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
@@ -182,6 +186,7 @@ private:
     QPushButton* importButton_{nullptr};
     QPushButton* importFolderButton_{nullptr};
     QPushButton* newFolderButton_{nullptr};
+    QPushButton* newRecordButton_{nullptr};
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
@@ -203,6 +208,7 @@ private:
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
     PdfWindow* pdfWindow_{nullptr};
+    RecordWindow* recordWindow_{nullptr};
     // Pixmaps and probed metadata for the open vault. Moving a file only
     // updates a row; painting the folder again must not reopen every package.
     struct GalleryCache;
