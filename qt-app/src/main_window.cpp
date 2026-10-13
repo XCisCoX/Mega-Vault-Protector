@@ -4396,9 +4396,6 @@ void MainWindow::beginRecord(const std::int64_t video_id, const QString& title) 
         playerWindow_ = nullptr;
         dying->close();
     }
-    if (musicWindow_ != nullptr) {
-        musicWindow_->pauseForVideo();
-    }
     if (recordWindow_ == nullptr) {
         auto* window = new RecordWindow(contentStack_);
         window->setAttribute(Qt::WA_DeleteOnClose);
@@ -5652,9 +5649,6 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         || identity.label.compare(QStringLiteral("Tiff"), Qt::CaseInsensitive) == 0);
     if (stillImage) {
         closePdf();
-        if (musicWindow_ != nullptr) {
-            musicWindow_->pauseForVideo();
-        }
         auto applyClip = [&](PlayerWindow* window) {
             window->presentClip(title, index, count, hasPrevious, hasNext);
         };
