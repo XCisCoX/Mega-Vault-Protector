@@ -629,7 +629,7 @@ long QrCode::getPenaltyScore() const {
 				runY = 1;
 			}
 		}
-		result += finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3;
+		result += static_cast<long>(finderPenaltyTerminateAndCount(runColor, runY, runHistory)) * PENALTY_N3;
 	}
 	
 	// 2*2 blocks of modules having same color
