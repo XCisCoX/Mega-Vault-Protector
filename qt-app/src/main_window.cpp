@@ -858,29 +858,39 @@ public:
                 painter->drawText(thumb, Qt::AlignCenter, QStringLiteral("PDF"));
             }
             const int textLeft = thumb.right() + 12;
-            const QRect textRect(textLeft, row.top() + 8, row.width() - textLeft - 16, row.height() - 16);
-            QFont nameFont(QStringLiteral("Segoe UI"));
-            nameFont.setPointSize(10);
-            painter->setFont(nameFont);
             const QString name = index.data(Qt::UserRole + 1).toString();
-            const QFontMetrics nameMetrics(nameFont);
-            painter->setPen(Qt::white);
-            painter->drawText(
-                QRect(textRect.left(), textRect.top(), textRect.width(), nameMetrics.height()),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                nameMetrics.elidedText(name, Qt::ElideRight, textRect.width()));
             const QString sizeText = index.data(Qt::UserRole + 5).toString();
             const QString tags = index.data(Qt::UserRole + 2).toString();
-            const QString meta = tags.isEmpty() ? sizeText : QStringLiteral("%1  ·  %2").arg(sizeText, tags);
+            // One line per row: icon, name, then the meta pinned right. Folders
+            // carry no meta at all - the stacked "Folder" caption is what made
+            // list rows look like a broken table.
+            const QString meta = folderRow
+                ? tags
+                : (tags.isEmpty() ? sizeText : QStringLiteral("%1  ·  %2").arg(sizeText, tags));
+            QFont nameFont(QStringLiteral("Segoe UI"));
+            nameFont.setPointSize(10);
             QFont metaFont(QStringLiteral("Segoe UI"));
             metaFont.setPointSize(9);
-            painter->setFont(metaFont);
+            const QFontMetrics nameMetrics(nameFont);
             const QFontMetrics metaMetrics(metaFont);
-            painter->setPen(QColor(142, 142, 147));
-            painter->drawText(
-                QRect(textRect.left(), textRect.bottom() - metaMetrics.height(), textRect.width(), metaMetrics.height()),
+            const int metaWidth = meta.isEmpty()
+                ? 0
+                : std::min(metaMetrics.horizontalAdvance(meta) + 12, row.width() / 2);
+            const int nameRight = std::max(textLeft + 24, row.right() - 16 - metaWidth);
+            painter->setFont(nameFont);
+            painter->setPen(Qt::white);
+            painter->drawText(QRect(textLeft, row.top(), nameRight - textLeft, row.height()),
                 Qt::AlignLeft | Qt::AlignVCenter,
-                metaMetrics.elidedText(meta, Qt::ElideRight, textRect.width()));
+                nameMetrics.elidedText(name, Qt::ElideRight, nameRight - textLeft));
+            if (!meta.isEmpty()) {
+                painter->setFont(metaFont);
+                painter->setPen(QColor(168, 168, 174));
+                painter->drawText(QRect(nameRight, row.top(), metaWidth, row.height()),
+                    Qt::AlignRight | Qt::AlignVCenter,
+                    metaMetrics.elidedText(meta, Qt::ElideLeft, metaWidth));
+            }
+            painter->setPen(QColor(255, 255, 255, 16));
+            painter->drawLine(row.left() + 14, row.bottom(), row.right() - 14, row.bottom());
             painter->restore();
             return;
         }
@@ -2609,7 +2619,11 @@ void MainWindow::layoutLibraryChrome() {
     const int paneWidth = paneVisible ? (folderPaneCollapsed_ ? 34 : 208) : 0;
     const int galleryWidth = std::max(0, page->width() - paneWidth);
     if (paneVisible) {
-        folderPane_->setGeometry(0, topHeight, paneWidth,
+        // Keep the pane off the window border: flush at x=0 clipped the
+        // "Folders" header and let its labels paint over the window edge.
+        const int paneInset = folderPaneCollapsed_ ? 4 : 8;
+        folderPane_->setGeometry(paneInset, topHeight,
+            std::max(0, paneWidth - paneInset),
             std::max(0, page->height() - topHeight - bottomHeight));
     }
     if (details) {
