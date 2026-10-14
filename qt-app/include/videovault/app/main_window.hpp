@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 class QAbstractButton;
@@ -105,6 +106,26 @@ private:
     void flushExternalImports();
     bool handleExplorerDrag(QObject* watched, QEvent* event);
     void moveItemsToFolder(std::int64_t destination);
+    // Rows travel as (kind, signed role) pairs, exactly as the gallery stores
+    // them, so a drop moves what the drag carried, not the live selection.
+    using GalleryRow = std::pair<int, qlonglong>;
+    std::vector<GalleryRow> selectedRows() const;
+    void captureDragPayload(bool from_details);
+    void clearDragPayload();
+    // Returns true when every requested move landed. sourceFolder is where the
+    // rows were listed from, so moving them back there is a silent no-op.
+    bool moveRowsToFolder(const std::vector<GalleryRow>& rows, std::int64_t destination,
+        std::int64_t sourceFolder);
+    void selectGalleryRow(int kind, qlonglong role);
+    void applyPendingSelection();
+    void cutSelection();
+    void pasteCutSelection();
+    void clearCut();
+    void applyCutDimming();
+    void goUpFolder();
+    // Explorer-style folder pane on the left of both gallery views.
+    void rebuildFolderTree();
+    void setFolderPaneCollapsed(bool collapsed);
     void highlightDropFolder(std::int64_t folder_id, bool on);
     bool galleryHasFocus() const;
     void beginRestoreSelected();
@@ -274,6 +295,26 @@ private:
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
     QListWidget* iconList_{nullptr};
+    // Folder pane: the tree and its narrow collapse strip, positioned by
+    // layoutLibraryChrome. expandedFolders_ survives every refresh so a rebuilt
+    // tree opens the same way.
+    QWidget* folderPane_{nullptr};
+    QLabel* folderPaneLabel_{nullptr};
+    QPushButton* folderPaneToggle_{nullptr};
+    QTreeWidget* folderTree_{nullptr};
+    bool folderPaneCollapsed_{false};
+    std::unordered_set<std::int64_t> expandedFolders_;
+    // Captured when a gallery drag starts, consumed by the next drop.
+    std::vector<GalleryRow> dragPayload_;
+    bool dragPayloadValid_{false};
+    // Pending Ctrl+X rows. Kept here, never on the OS clipboard.
+    std::vector<GalleryRow> cutItems_;
+    // Folder the cut rows were listed from, so pasting them back there is a no-op.
+    std::int64_t cutFolderId_{0};
+    // Rows to re-select once the post-move refresh has painted them.
+    std::vector<GalleryRow> pendingSelection_;
+    QTimer* dragExpandTimer_{nullptr};
+    std::int64_t dragExpandFolder_{0};
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};

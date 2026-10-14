@@ -16,14 +16,49 @@ if(WIN32)
     enable_language(RC)
 endif()
 
+# Development-only escape hatch for a MinGW toolchain, which cannot compile
+# music_window.cpp / pdf_window.cpp (they need MSVC + the C++/WinRT headers for
+# SystemMediaTransportControls and Windows.Data.Pdf). When ON, those two
+# translation units are replaced by src/windows_fallback.cpp, an honest
+# "not available" implementation of the same two classes, so the rest of the
+# desktop app can be built and exercised locally. OFF by default; ignored for
+# MSVC builds, which always compile the real WinRT windows, so CI and release
+# artifacts are byte-for-byte unchanged.
+option(MVP_MINGW_APP_FALLBACK
+    "Build music/PDF as 'not available' stubs so the app links with MinGW (development only, never release)"
+    OFF)
+
+set(MVP_APP_WINRT_SOURCES
+    src/music_window.cpp
+    src/pdf_window.cpp
+)
+set(MVP_APP_FALLBACK_SOURCES "")
+if(MVP_MINGW_APP_FALLBACK)
+    if(MSVC)
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK ignored: MSVC builds always use the real "
+            "C++/WinRT music and PDF windows.")
+    elseif(WIN32 OR MINGW)
+        set(MVP_APP_WINRT_SOURCES "")
+        set(MVP_APP_FALLBACK_SOURCES src/windows_fallback.cpp)
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK=ON: music and PDF are 'not available' stubs. "
+            "This is a development smoke-test build, not a release configuration.")
+    else()
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK ignored: only supported for a non-MSVC "
+            "Windows (MinGW) build.")
+    endif()
+endif()
+
 set(MVP_APP_SOURCES
     src/main.cpp
     src/app_update.cpp
     src/main_window.cpp
     src/media_decoder.cpp
     src/player_window.cpp
-    src/music_window.cpp
-    src/pdf_window.cpp
+    ${MVP_APP_WINRT_SOURCES}
+    ${MVP_APP_FALLBACK_SOURCES}
     src/in_window_sheet.cpp
     src/record_document.cpp
     src/record_window.cpp

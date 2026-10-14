@@ -136,6 +136,8 @@ constexpr int kLoginPage = 1;
 constexpr int kUnlockedPage = 2;
 // Gallery item kinds (Qt::UserRole + 12).
 constexpr int kKindPhone = 3;
+// Set on a gallery row while it is cut (Ctrl+X). The delegate fades the row.
+constexpr int kCutDimRole = Qt::UserRole + 17;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
 // default, matching the previous fixed timer.
 int autoLockMilliseconds() {
@@ -813,6 +815,9 @@ public:
         if (view != nullptr && view->viewMode() == QListView::ListMode) {
             painter->save();
             painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            if (index.data(kCutDimRole).toBool()) {
+                painter->setOpacity(0.45);
+            }
             const QRect row = option.rect;
             const bool selected = option.state.testFlag(QStyle::State_Selected);
             const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
@@ -884,6 +889,9 @@ public:
         }
         painter->save();
         painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        if (index.data(kCutDimRole).toBool()) {
+            painter->setOpacity(0.45);
+        }
         const QRect tile = option.rect.adjusted(1, 1, -2, -2);
         painter->fillRect(tile, QColor(22, 22, 24));
         const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
@@ -1061,6 +1069,10 @@ class IconGrid final : public QListWidget {
 public:
     using QListWidget::QListWidget;
 
+    // Called as a drag starts from this view, so the gallery can record the
+    // rows being dragged before any drop target is known.
+    std::function<void()> onDragStart;
+
     void setChromeInset(const int top, const int bottom) {
         if (chromeTop_ == top && chromeBottom_ == bottom) {
             return;
@@ -1071,6 +1083,13 @@ public:
     }
 
 protected:
+    void startDrag(Qt::DropActions actions) override {
+        if (onDragStart) {
+            onDragStart();
+        }
+        QListWidget::startDrag(actions);
+    }
+
     void resizeEvent(QResizeEvent* event) override {
         QListWidget::resizeEvent(event);
         layoutInstagramGrid(this);
@@ -1079,6 +1098,23 @@ protected:
 private:
     int chromeTop_{-1};
     int chromeBottom_{-1};
+};
+
+// The details tree needs the same drag-start hook as IconGrid. Qt hands the
+// drop target only mime data, so the rows are recorded by the source view.
+class GalleryTree final : public QTreeWidget {
+public:
+    using QTreeWidget::QTreeWidget;
+
+    std::function<void()> onDragStart;
+
+protected:
+    void startDrag(Qt::DropActions actions) override {
+        if (onDragStart) {
+            onDragStart();
+        }
+        QTreeWidget::startDrag(actions);
+    }
 };
 
 enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
@@ -1738,6 +1774,40 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             beginNewFolder();
             return true;
         }
+        if (galleryHasFocus() && key->modifiers() == Qt::ControlModifier) {
+            if (key->key() == Qt::Key_X) {
+                cutSelection();
+                return true;
+            }
+            if (key->key() == Qt::Key_V) {
+                pasteCutSelection();
+                return true;
+            }
+            if (key->key() == Qt::Key_C) {
+                // The vault stores one copy of each file by content hash, so a
+                // duplicate cannot exist: say so instead of pretending to copy.
+                showStatus(QStringLiteral(
+                    "Files are stored once by content — there is no copy to paste. "
+                    "Use Cut (Ctrl+X) to move an item."), false);
+                return true;
+            }
+        }
+        // Escape drops a pending cut, the way Explorer cancels a cut.
+        if (galleryHasFocus() && key->key() == Qt::Key_Escape && !cutItems_.empty()) {
+            clearCut();
+            showStatus(QStringLiteral("Cut cancelled."), false);
+            return true;
+        }
+        if (galleryHasFocus() && key->key() == Qt::Key_Left
+            && key->modifiers() == Qt::AltModifier) {
+            goUpFolder();
+            return true;
+        }
+        if (galleryHasFocus() && key->key() == Qt::Key_F5
+            && key->modifiers() == Qt::NoModifier) {
+            refreshGallery();
+            return true;
+        }
         if (key->key() == Qt::Key_Backspace && key->modifiers() == Qt::NoModifier) {
             QWidget* focus = QApplication::focusWidget();
             for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
@@ -2194,7 +2264,9 @@ QWidget* MainWindow::buildUnlockedPage() {
     rebuildBreadcrumb();
 
     // Explorer-style gallery views fill the window.
-    detailsTree_ = new QTreeWidget(page);
+    auto* galleryTree = new GalleryTree(page);
+    galleryTree->onDragStart = [this] { captureDragPayload(true); };
+    detailsTree_ = galleryTree;
     detailsTree_->setObjectName(QStringLiteral("gallery"));
     detailsTree_->setColumnCount(7);
     detailsTree_->setHeaderLabels({
@@ -2222,6 +2294,7 @@ QWidget* MainWindow::buildUnlockedPage() {
         }
     });
     iconList_ = new IconGrid(page);
+    static_cast<IconGrid*>(iconList_)->onDragStart = [this] { captureDragPayload(false); };
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setItemDelegate(new InstagramDelegate(iconList_));
     iconList_->setViewMode(QListView::IconMode);
@@ -2248,6 +2321,107 @@ QWidget* MainWindow::buildUnlockedPage() {
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
     galleryStack_->addWidget(iconList_);
+
+    // Explorer-style folder pane. It sits beside both gallery views and is laid
+    // out by layoutLibraryChrome, because the library page uses floating bars
+    // instead of a layout. Its width collapses to a thin strip.
+    folderPane_ = new QWidget(page);
+    folderPane_->setObjectName(QStringLiteral("folderPane"));
+    // Plain QWidget needs this for the stylesheet background and divider to paint.
+    folderPane_->setAttribute(Qt::WA_StyledBackground, true);
+    folderPane_->setStyleSheet(QStringLiteral(
+        "QWidget#folderPane { background: rgba(255, 255, 255, 8);"
+        " border-right: 1px solid rgba(255, 255, 255, 22); }"
+        "QTreeWidget#folderTree { background: transparent; border: none; color: #d8d8dc; }"
+        "QTreeWidget#folderTree::item { min-height: 26px; border-radius: 6px; }"
+        "QTreeWidget#folderTree::item:selected { background: rgba(51, 144, 236, 110); color: white; }"
+        "QLabel#folderPaneTitle { color: rgba(255, 255, 255, 150); font-size: 9pt;"
+        " font-weight: 600; background: transparent; }"
+        "QPushButton#folderPaneToggle { color: #8ec8ff; background: transparent;"
+        " border: none; font-size: 12pt; padding: 0; }"
+        "QPushButton#folderPaneToggle:hover { color: white; }"));
+    auto* paneLayout = new QVBoxLayout(folderPane_);
+    paneLayout->setContentsMargins(6, 6, 6, 6);
+    paneLayout->setSpacing(4);
+    auto* paneHeader = new QHBoxLayout();
+    paneHeader->setContentsMargins(6, 0, 0, 0);
+    paneHeader->setSpacing(2);
+    folderPaneLabel_ = new QLabel(QStringLiteral("Folders"), folderPane_);
+    folderPaneLabel_->setObjectName(QStringLiteral("folderPaneTitle"));
+    folderPaneToggle_ = new QPushButton(QStringLiteral("‹"), folderPane_);
+    folderPaneToggle_->setObjectName(QStringLiteral("folderPaneToggle"));
+    folderPaneToggle_->setToolTip(QStringLiteral("Collapse the folder pane"));
+    folderPaneToggle_->setFixedSize(20, 20);
+    folderPaneToggle_->setFocusPolicy(Qt::NoFocus);
+    folderPaneToggle_->setCursor(Qt::PointingHandCursor);
+    paneHeader->addWidget(folderPaneLabel_, 1);
+    paneHeader->addWidget(folderPaneToggle_, 0, Qt::AlignRight);
+    folderTree_ = new QTreeWidget(folderPane_);
+    folderTree_->setObjectName(QStringLiteral("folderTree"));
+    folderTree_->setHeaderHidden(true);
+    folderTree_->setRootIsDecorated(true);
+    folderTree_->setIndentation(14);
+    folderTree_->setUniformRowHeights(true);
+    folderTree_->setSelectionMode(QAbstractItemView::SingleSelection);
+    folderTree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    folderTree_->setAcceptDrops(true);
+    folderTree_->viewport()->setAcceptDrops(true);
+    folderTree_->installEventFilter(this);
+    folderTree_->viewport()->installEventFilter(this);
+    paneLayout->addLayout(paneHeader);
+    paneLayout->addWidget(folderTree_, 1);
+    folderPane_->hide();
+    connect(folderPaneToggle_, &QPushButton::clicked, this, [this] {
+        setFolderPaneCollapsed(!folderPaneCollapsed_);
+    });
+    connect(folderTree_, &QTreeWidget::itemClicked, this,
+        [this](QTreeWidgetItem* item, int) {
+            if (item == nullptr) {
+                return;
+            }
+            const auto id = item->data(0, Qt::UserRole).toLongLong();
+            if (id != currentFolderId_) {
+                openFolder(id);
+            }
+        });
+    // The set of open folders is replayed onto the rebuilt tree after a refresh.
+    connect(folderTree_, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item) {
+        if (item != nullptr) {
+            expandedFolders_.insert(item->data(0, Qt::UserRole).toLongLong());
+        }
+    });
+    connect(folderTree_, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem* item) {
+        if (item != nullptr) {
+            expandedFolders_.erase(item->data(0, Qt::UserRole).toLongLong());
+        }
+    });
+    // Hovering a closed folder mid-drag opens it, the way Explorer does.
+    dragExpandTimer_ = new QTimer(this);
+    dragExpandTimer_->setSingleShot(true);
+    connect(dragExpandTimer_, &QTimer::timeout, this, [this] {
+        const std::int64_t id = dragExpandFolder_;
+        dragExpandFolder_ = 0;
+        if (id == 0 || folderTree_ == nullptr) {
+            return;
+        }
+        std::function<QTreeWidgetItem*(QTreeWidgetItem*)> findItem =
+            [&findItem, id](QTreeWidgetItem* node) -> QTreeWidgetItem* {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* child = node->child(index);
+                if (child->data(0, Qt::UserRole).toLongLong() == id) {
+                    return child;
+                }
+                if (auto* hit = findItem(child)) {
+                    return hit;
+                }
+            }
+            return nullptr;
+        };
+        if (auto* item = findItem(folderTree_->invisibleRootItem())) {
+            expandedFolders_.insert(id);
+            item->setExpanded(true);
+        }
+    });
 
     libraryBottom_ = new FrostedBar(FrostedBar::Band::Bottom, page);
     auto* statusBar = libraryBottom_;
@@ -2430,13 +2604,20 @@ void MainWindow::layoutLibraryChrome() {
     const int topHeight = std::max(libraryTop_->sizeHint().height(), 44);
     const int bottomHeight = std::max(libraryBottom_->sizeHint().height(), 28);
     const bool details = galleryStack_->currentWidget() == detailsTree_;
+    const bool paneVisible = folderPane_ != nullptr && folderPane_->isVisibleTo(page);
+    const int paneWidth = paneVisible ? (folderPaneCollapsed_ ? 34 : 208) : 0;
+    const int galleryWidth = std::max(0, page->width() - paneWidth);
+    if (paneVisible) {
+        folderPane_->setGeometry(0, topHeight, paneWidth,
+            std::max(0, page->height() - topHeight - bottomHeight));
+    }
     if (details) {
         libraryTop_->setGeometry(0, 0, page->width(), topHeight);
         libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
         galleryStack_->setGeometry(
-            0, topHeight, page->width(), std::max(0, page->height() - topHeight - bottomHeight));
+            paneWidth, topHeight, galleryWidth, std::max(0, page->height() - topHeight - bottomHeight));
     } else {
-        galleryStack_->setGeometry(page->rect());
+        galleryStack_->setGeometry(paneWidth, 0, galleryWidth, page->height());
         libraryTop_->setGeometry(0, 0, page->width(), topHeight);
         libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
         galleryStack_->lower();
@@ -3071,6 +3252,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         menu.addCommand(QStringLiteral("New note"), 2);
         menu.addCommand(QStringLiteral("New record"), 3);
         menu.addCommand(QStringLiteral("Import package…"), 4);
+        if (!cutItems_.empty()) {
+            menu.addCommand(QStringLiteral("Paste"), 5);
+        }
         placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
@@ -3085,6 +3269,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         case 4:
             beginImportPackage();
             break;
+        case 5:
+            pasteCutSelection();
+            break;
         default:
             break;
         }
@@ -3094,6 +3281,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         const qlonglong folder_id = -role;
         menu.addCommand(QStringLiteral("Open"), 1);
         menu.addCommand(QStringLiteral("Rename"), 2);
+        menu.addCommand(QStringLiteral("Cut"), 6);
+        if (!cutItems_.empty()) {
+            menu.addCommand(QStringLiteral("Paste"), 7);
+        }
         menu.addCommand(QStringLiteral("Move to…"), 3);
         menu.addCommand(QStringLiteral("Export as package…"), 5);
         menu.addCommand(QStringLiteral("Remove folder"), 4, true);
@@ -3105,6 +3296,17 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         case 2:
             beginRenameFolder(folder_id);
             break;
+        case 6:
+            cutSelection();
+            break;
+        case 7: {
+            // Paste into the folder that was right-clicked, as Explorer does.
+            const auto rows = cutItems_;
+            if (moveRowsToFolder(rows, folder_id, cutFolderId_)) {
+                clearCut();
+            }
+            break;
+        }
         case 3:
             beginMoveSelection(folder_id);
             break;
@@ -3136,6 +3338,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     menu.addCommand(count > 1
         ? QStringLiteral("Move") + countText + QStringLiteral("…")
         : QStringLiteral("Move to…"), 4);
+    menu.addCommand(QStringLiteral("Cut"), 8);
+    if (!cutItems_.empty()) {
+        menu.addCommand(QStringLiteral("Paste"), 9);
+    }
     menu.addCommand(count > 1
         ? QStringLiteral("Restore") + countText
         : QStringLiteral("Restore to folder…"), 5);
@@ -3161,6 +3367,12 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         break;
     case 4:
         beginMoveSelection(0);
+        break;
+    case 8:
+        cutSelection();
+        break;
+    case 9:
+        pasteCutSelection();
         break;
     case 5:
         beginRestoreSelected();
@@ -4198,6 +4410,21 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
             item->setBackground(hit ? mark : QBrush());
         }
     }
+    if (folderTree_ != nullptr) {
+        // The pane uses its own background for "current folder", so restore that
+        // rather than clearing to default.
+        std::function<void(QTreeWidgetItem*)> paint = [&](QTreeWidgetItem* node) {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* item = node->child(index);
+                const auto id = item->data(0, Qt::UserRole).toLongLong();
+                const bool hit = on && id == folder_id;
+                const bool current = id == currentFolderId_;
+                item->setBackground(0, hit ? mark : (current ? QBrush(QColor(51, 144, 236, 70)) : QBrush()));
+                paint(item);
+            }
+        };
+        paint(folderTree_->invisibleRootItem());
+    }
     if (crumbHost_ != nullptr) {
         const auto buttons = crumbHost_->findChildren<QPushButton*>();
         for (auto* button : buttons) {
@@ -4214,30 +4441,94 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
     }
 }
 
-void MainWindow::moveItemsToFolder(const std::int64_t destination) {
-    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
-        return;
-    }
-    std::vector<std::int64_t> videos;
-    std::vector<std::int64_t> folders;
-    const auto take = [&videos, &folders](const int kind, const qlonglong role) {
+std::vector<MainWindow::GalleryRow> MainWindow::selectedRows() const {
+    std::vector<GalleryRow> rows;
+    const auto take = [&rows](const int kind, const qlonglong role) {
         if (kind == 0 && role > 0) {
-            videos.push_back(role);
+            rows.emplace_back(0, role);
         } else if (kind == 1 && role < 0) {
-            folders.push_back(-role);
+            rows.emplace_back(1, role);
         }
     };
-    if (galleryStack_->currentWidget() == detailsTree_) {
+    if (galleryStack_ != nullptr && galleryStack_->currentWidget() == detailsTree_) {
         for (auto* item : detailsTree_->selectedItems()) {
             take(item->data(0, Qt::UserRole + 12).toInt(),
                 item->data(0, Qt::UserRole).toLongLong());
         }
-    } else {
+    } else if (iconList_ != nullptr) {
         for (auto* item : iconList_->selectedItems()) {
             take(item->data(Qt::UserRole + 12).toInt(),
                 item->data(Qt::UserRole).toLongLong());
         }
     }
+    return rows;
+}
+
+void MainWindow::captureDragPayload(const bool from_details) {
+    dragPayload_.clear();
+    const auto take = [this](const int kind, const qlonglong role) {
+        if (kind == 0 && role > 0) {
+            dragPayload_.emplace_back(0, role);
+        } else if (kind == 1 && role < 0) {
+            dragPayload_.emplace_back(1, role);
+        }
+    };
+    if (from_details) {
+        if (detailsTree_ != nullptr) {
+            for (auto* item : detailsTree_->selectedItems()) {
+                take(item->data(0, Qt::UserRole + 12).toInt(),
+                    item->data(0, Qt::UserRole).toLongLong());
+            }
+        }
+    } else if (iconList_ != nullptr) {
+        for (auto* item : iconList_->selectedItems()) {
+            take(item->data(Qt::UserRole + 12).toInt(),
+                item->data(Qt::UserRole).toLongLong());
+        }
+    }
+    dragPayloadValid_ = !dragPayload_.empty();
+}
+
+void MainWindow::clearDragPayload() {
+    dragPayload_.clear();
+    dragPayloadValid_ = false;
+}
+
+void MainWindow::moveItemsToFolder(const std::int64_t destination) {
+    // What the drag carried, captured in startDrag. The selection can have
+    // changed by the time the drop lands, so it is only a fallback. The rows
+    // came from this view, which lists the open folder.
+    std::vector<GalleryRow> rows = dragPayloadValid_ ? dragPayload_ : selectedRows();
+    clearDragPayload();
+    (void)moveRowsToFolder(rows, destination, currentFolderId_);
+}
+
+bool MainWindow::moveRowsToFolder(const std::vector<GalleryRow>& rows,
+    const std::int64_t destination, const std::int64_t sourceFolder) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_ || rows.empty()) {
+        return false;
+    }
+    std::vector<std::int64_t> videos;
+    std::vector<std::int64_t> folders;
+    for (const auto& row : rows) {
+        if (row.first == 0 && row.second > 0) {
+            videos.push_back(row.second);
+        } else if (row.first == 1 && row.second < 0) {
+            folders.push_back(-row.second);
+        }
+    }
+    if (videos.empty() && folders.empty()) {
+        return false;
+    }
+    auto parentOf = [this](const std::int64_t folder_id, std::int64_t* parent) {
+        for (const auto& folder : folders_) {
+            if (folder.id == folder_id) {
+                *parent = folder.parent_id;
+                return true;
+            }
+        }
+        return false;
+    };
     auto contains = [this](const std::int64_t ancestor, std::int64_t node) {
         for (int guard = 0; guard < 64 && node != 0; ++guard) {
             if (node == ancestor) {
@@ -4259,22 +4550,48 @@ void MainWindow::moveItemsToFolder(const std::int64_t destination) {
         }
         return false;
     };
+    // A file lives in exactly one folder, so a drop back onto the folder it is
+    // already in is a no-op rather than an error. The rows came from
+    // sourceFolder, so the move only has work to do when that differs.
+    const bool videosStay = destination == sourceFolder;
+    // Check every folder before touching the vault: one impossible target must
+    // not leave a half-applied batch.
     QString problem;
     for (const auto folder_id : folders) {
         if (folder_id == destination || contains(folder_id, destination)) {
             problem = QStringLiteral("A folder can't be moved into itself.");
-            continue;
-        }
-        auto moved = vault_->move_folder(folder_id, destination);
-        if (!moved) {
-            problem = vaultErrorText(moved.error());
+            break;
         }
     }
-    for (const auto video_id : videos) {
-        auto moved = vault_->move_video(video_id, destination);
-        if (!moved) {
-            problem = vaultErrorText(moved.error());
+    if (!problem.isEmpty()) {
+        setError(galleryStatus_, problem);
+        galleryStatus_->setVisible(true);
+        return false;
+    }
+    std::vector<GalleryRow> moved;
+    moved.reserve(rows.size());
+    for (const auto folder_id : folders) {
+        std::int64_t parent = -1;
+        if (parentOf(folder_id, &parent) && parent == destination) {
+            continue;
         }
+        auto result = vault_->move_folder(folder_id, destination);
+        if (!result) {
+            problem = vaultErrorText(result.error());
+            continue;
+        }
+        moved.emplace_back(1, -folder_id);
+    }
+    for (const auto video_id : videos) {
+        if (videosStay) {
+            continue;
+        }
+        auto result = vault_->move_video(video_id, destination);
+        if (!result) {
+            problem = vaultErrorText(result.error());
+            continue;
+        }
+        moved.emplace_back(0, video_id);
     }
     if (!problem.isEmpty()) {
         setError(galleryStatus_, problem);
@@ -4282,7 +4599,269 @@ void MainWindow::moveItemsToFolder(const std::int64_t destination) {
     } else {
         setError(galleryStatus_, {});
     }
+    // Explorer leaves the moved rows selected when the destination is the folder
+    // that is on screen; the paint pass re-selects them once the rows exist.
+    pendingSelection_ = destination == currentFolderId_ ? moved : std::vector<GalleryRow>{};
+    // A cut whose rows just moved by drag or paste has been spent.
+    if (problem.isEmpty() && !cutItems_.empty()) {
+        for (const auto& row : moved) {
+            const bool wasCut = std::any_of(cutItems_.begin(), cutItems_.end(),
+                [&row](const GalleryRow& cut) {
+                    return cut.first == row.first && cut.second == row.second;
+                });
+            if (wasCut) {
+                clearCut();
+                break;
+            }
+        }
+    }
     refreshGallery();
+    return problem.isEmpty();
+}
+
+void MainWindow::selectGalleryRow(const int kind, const qlonglong role) {
+    if (galleryStack_ == nullptr) {
+        return;
+    }
+    if (galleryStack_->currentWidget() == detailsTree_ && detailsTree_ != nullptr) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            if (item->data(0, Qt::UserRole + 12).toInt() == kind
+                && item->data(0, Qt::UserRole).toLongLong() == role) {
+                item->setSelected(true);
+                return;
+            }
+        }
+        return;
+    }
+    if (iconList_ == nullptr) {
+        return;
+    }
+    for (int index = 0; index < iconList_->count(); ++index) {
+        auto* item = iconList_->item(index);
+        if (item->data(Qt::UserRole + 12).toInt() == kind
+            && item->data(Qt::UserRole).toLongLong() == role) {
+            item->setSelected(true);
+            return;
+        }
+    }
+}
+
+void MainWindow::applyPendingSelection() {
+    if (galleryStack_ == nullptr) {
+        pendingSelection_.clear();
+        return;
+    }
+    if (pendingSelection_.empty()) {
+        return;
+    }
+    const auto rows = pendingSelection_;
+    pendingSelection_.clear();
+    QAbstractItemView* view = galleryStack_->currentWidget() == detailsTree_
+        ? static_cast<QAbstractItemView*>(detailsTree_)
+        : static_cast<QAbstractItemView*>(iconList_);
+    if (view == nullptr) {
+        return;
+    }
+    view->clearSelection();
+    for (const auto& row : rows) {
+        selectGalleryRow(row.first, row.second);
+    }
+    const auto selected = view->selectionModel()->selectedIndexes();
+    if (!selected.isEmpty()) {
+        view->setCurrentIndex(selected.first());
+        view->scrollTo(selected.first());
+    }
+}
+
+void MainWindow::cutSelection() {
+    const auto rows = selectedRows();
+    if (rows.empty()) {
+        showStatus(QStringLiteral("Select files or folders, then press Ctrl+X."), false);
+        return;
+    }
+    cutItems_ = rows;
+    cutFolderId_ = currentFolderId_;
+    applyCutDimming();
+    showStatus(QStringLiteral("Cut %1 item%2. Ctrl+V moves here, Escape cancels.")
+        .arg(rows.size())
+        .arg(rows.size() == 1 ? QString() : QStringLiteral("s")), false);
+}
+
+void MainWindow::pasteCutSelection() {
+    if (cutItems_.empty()) {
+        showStatus(QStringLiteral("Nothing is cut. Select items and press Ctrl+X first."), false);
+        return;
+    }
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    const auto rows = cutItems_;
+    if (moveRowsToFolder(rows, currentFolderId_, cutFolderId_)) {
+        clearCut();
+    }
+}
+
+void MainWindow::clearCut() {
+    cutItems_.clear();
+    cutFolderId_ = 0;
+    applyCutDimming();
+}
+
+void MainWindow::applyCutDimming() {
+    const auto isCut = [this](const int kind, const qlonglong role) {
+        for (const auto& row : cutItems_) {
+            if (row.first == kind && row.second == role) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const QBrush dim(QColor(142, 142, 147));
+    if (detailsTree_ != nullptr) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            const bool cut = isCut(item->data(0, Qt::UserRole + 12).toInt(),
+                item->data(0, Qt::UserRole).toLongLong());
+            for (int column = 0; column < detailsTree_->columnCount(); ++column) {
+                item->setForeground(column, cut ? dim : QBrush());
+            }
+        }
+    }
+    if (iconList_ != nullptr) {
+        for (int index = 0; index < iconList_->count(); ++index) {
+            auto* item = iconList_->item(index);
+            const bool cut = isCut(item->data(Qt::UserRole + 12).toInt(),
+                item->data(Qt::UserRole).toLongLong());
+            item->setData(kCutDimRole, cut);
+        }
+    }
+}
+
+void MainWindow::goUpFolder() {
+    if (currentFolderId_ == 0) {
+        return;
+    }
+    std::int64_t parent = 0;
+    for (const auto& folder : folders_) {
+        if (folder.id == currentFolderId_) {
+            parent = folder.parent_id;
+            break;
+        }
+    }
+    openFolder(parent);
+}
+
+void MainWindow::rebuildFolderTree() {
+    if (folderTree_ == nullptr || folderPane_ == nullptr) {
+        return;
+    }
+    const bool unlocked = vault_ && vault_->is_unlocked();
+    folderTree_->blockSignals(true);
+    folderTree_->clear();
+    folderPane_->setVisible(unlocked);
+    if (!unlocked) {
+        folderTree_->blockSignals(false);
+        layoutLibraryChrome();
+        return;
+    }
+    // The path down to the open folder always stays expanded, as in Explorer.
+    expandedFolders_.insert(0);
+    for (std::int64_t id = currentFolderId_; id != 0; ) {
+        expandedFolders_.insert(id);
+        std::int64_t parent = 0;
+        bool found = false;
+        for (const auto& folder : folders_) {
+            if (folder.id == id) {
+                parent = folder.parent_id;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            break;
+        }
+        id = parent;
+    }
+    auto* root = new QTreeWidgetItem(folderTree_);
+    root->setText(0, QStringLiteral("Vault"));
+    root->setData(0, Qt::UserRole, static_cast<qlonglong>(0));
+    root->setToolTip(0, QStringLiteral("Vault"));
+    std::function<void(QTreeWidgetItem*, std::int64_t)> fill =
+        [this, &fill](QTreeWidgetItem* parentItem, const std::int64_t parentId) {
+        std::vector<const core::FolderInfo*> children;
+        for (const auto& folder : folders_) {
+            if (folder.parent_id == parentId) {
+                children.push_back(&folder);
+            }
+        }
+        std::sort(children.begin(), children.end(),
+            [](const core::FolderInfo* left, const core::FolderInfo* right) {
+                return QString::fromStdString(left->name)
+                    .compare(QString::fromStdString(right->name), Qt::CaseInsensitive) < 0;
+            });
+        for (const auto* folder : children) {
+            auto* item = new QTreeWidgetItem(parentItem);
+            const QString name = QString::fromStdString(folder->name);
+            item->setText(0, name);
+            item->setToolTip(0, name);
+            item->setData(0, Qt::UserRole, static_cast<qlonglong>(folder->id));
+            fill(item, folder->id);
+            item->setExpanded(expandedFolders_.count(folder->id) != 0);
+        }
+    };
+    fill(root, 0);
+    root->setExpanded(expandedFolders_.count(0) != 0);
+    QTreeWidgetItem* open = root;
+    if (currentFolderId_ != 0) {
+        std::function<QTreeWidgetItem*(QTreeWidgetItem*)> find =
+            [this, &find](QTreeWidgetItem* node) -> QTreeWidgetItem* {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* child = node->child(index);
+                if (child->data(0, Qt::UserRole).toLongLong() == currentFolderId_) {
+                    return child;
+                }
+                if (auto* hit = find(child)) {
+                    return hit;
+                }
+            }
+            return nullptr;
+        };
+        if (auto* hit = find(root)) {
+            open = hit;
+        }
+    }
+    const QBrush mark(QColor(51, 144, 236, 70));
+    for (auto* item : {root, open}) {
+        if (item != nullptr && item->data(0, Qt::UserRole).toLongLong() == currentFolderId_) {
+            item->setBackground(0, mark);
+        }
+    }
+    if (open != nullptr) {
+        QFont font = open->font(0);
+        font.setBold(true);
+        open->setFont(0, font);
+        folderTree_->scrollToItem(open, QAbstractItemView::PositionAtCenter);
+    }
+    folderTree_->blockSignals(false);
+    layoutLibraryChrome();
+}
+
+void MainWindow::setFolderPaneCollapsed(const bool collapsed) {
+    folderPaneCollapsed_ = collapsed;
+    if (folderTree_ != nullptr) {
+        folderTree_->setVisible(!collapsed);
+    }
+    if (folderPaneLabel_ != nullptr) {
+        folderPaneLabel_->setVisible(!collapsed);
+    }
+    if (folderPaneToggle_ != nullptr) {
+        folderPaneToggle_->setText(collapsed ? QStringLiteral("›") : QStringLiteral("‹"));
+        folderPaneToggle_->setToolTip(collapsed
+            ? QStringLiteral("Show the folder pane")
+            : QStringLiteral("Collapse the folder pane"));
+    }
+    layoutLibraryChrome();
 }
 
 bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
@@ -4292,10 +4871,16 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         && (watched == iconList_ || watched == iconList_->viewport());
     auto* crumb = qobject_cast<QPushButton*>(watched);
     const bool on_crumb = crumb != nullptr && crumb->property("mvpDropFolder").isValid();
-    if (!on_details && !on_icons && !on_crumb) {
+    const bool on_tree = folderTree_ != nullptr
+        && (watched == folderTree_ || watched == folderTree_->viewport());
+    if (!on_details && !on_icons && !on_crumb && !on_tree) {
         return false;
     }
     if (event->type() == QEvent::DragLeave) {
+        if (dragExpandTimer_ != nullptr) {
+            dragExpandTimer_->stop();
+            dragExpandFolder_ = 0;
+        }
         highlightDropFolder(0, false);
         return false;
     }
@@ -4323,7 +4908,22 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
 
     std::int64_t destination = currentFolderId_;
     bool on_folder = false;
-    if (on_crumb) {
+    QTreeWidgetItem* treeTarget = nullptr;
+    if (on_tree) {
+        QPoint pos = drop->pos();
+        if (watched == folderTree_) {
+            pos = folderTree_->viewport()->mapFrom(folderTree_, pos);
+        }
+        treeTarget = folderTree_->itemAt(pos);
+        if (treeTarget == nullptr) {
+            // Empty pane space is not a destination; only rows are.
+            highlightDropFolder(0, false);
+            drop->ignore();
+            return true;
+        }
+        destination = treeTarget->data(0, Qt::UserRole).toLongLong();
+        on_folder = true;
+    } else if (on_crumb) {
         destination = crumb->property("mvpDropFolder").toLongLong();
         on_folder = true;
     } else if (on_details) {
@@ -4368,21 +4968,36 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         }
     }
 
-    const bool allow = external || (internal && on_folder && destination != currentFolderId_);
-    if (!allow) {
-        highlightDropFolder(0, false);
-        drop->ignore();
-        return true;
-    }
+    // Empty gallery space is a destination too: it means the current folder,
+    // which is a no-op for rows that already live here.
     // TargetMoveAction keeps the gallery rows in place. A plain MoveAction makes
     // Qt delete the dragged rows after the drop, which fights the refresh.
     drop->setDropAction(internal ? Qt::TargetMoveAction : Qt::CopyAction);
     if (event->type() != QEvent::Drop) {
         highlightDropFolder(on_folder ? destination : -1, on_folder);
+        // Hovering a closed folder in the pane opens it after a moment.
+        if (dragExpandTimer_ != nullptr) {
+            const bool closedTarget = on_tree && treeTarget != nullptr
+                && !treeTarget->isExpanded() && treeTarget->childCount() > 0;
+            if (closedTarget) {
+                const auto expand_id = treeTarget->data(0, Qt::UserRole).toLongLong();
+                if (dragExpandFolder_ != expand_id || !dragExpandTimer_->isActive()) {
+                    dragExpandFolder_ = expand_id;
+                    dragExpandTimer_->start(700);
+                }
+            } else {
+                dragExpandTimer_->stop();
+                dragExpandFolder_ = 0;
+            }
+        }
         drop->accept();
         return true;
     }
 
+    if (dragExpandTimer_ != nullptr) {
+        dragExpandTimer_->stop();
+        dragExpandFolder_ = 0;
+    }
     highlightDropFolder(0, false);
     if (internal) {
         moveItemsToFolder(destination);
@@ -5450,6 +6065,10 @@ void MainWindow::paintGalleryBatch() {
         sortGalleryItems();
         showGallerySortIndicator();
         galleryListing_ = false;
+        // Rows exist now, so a post-move selection and any pending cut can be
+        // drawn onto them.
+        applyPendingSelection();
+        applyCutDimming();
     }
     iconList_->setUpdatesEnabled(true);
     detailsTree_->setUpdatesEnabled(true);
@@ -5606,6 +6225,7 @@ void MainWindow::refreshGallery() {
     if (!vault_ || !vault_->is_unlocked()) {
         folders_.clear();
         rebuildBreadcrumb();
+        rebuildFolderTree();
         galleryListing_ = false;
         return;
     }
@@ -5613,6 +6233,7 @@ void MainWindow::refreshGallery() {
     if (!listed) {
         setError(galleryStatus_, vaultErrorText(listed.error()));
         galleryStatus_->setVisible(true);
+        pendingSelection_.clear();
         galleryListing_ = false;
         return;
     }
@@ -5631,6 +6252,7 @@ void MainWindow::refreshGallery() {
         parentOfOpen = 0;
     }
     rebuildBreadcrumb();
+    rebuildFolderTree();
     QVector<QPair<qlonglong, QString>> childFolders;
     for (const auto& folder : folders_) {
         if (folder.parent_id == currentFolderId_) {
@@ -7235,7 +7857,14 @@ void MainWindow::lockVault() {
     galleryQueueIndex_ = 0;
     decoratedIds_.clear();
     galleryListing_ = false;
+    cutItems_.clear();
+    dragPayload_.clear();
+    dragPayloadValid_ = false;
+    pendingSelection_.clear();
     ++galleryGeneration_;
+    if (folderPane_ != nullptr) {
+        folderPane_->hide();
+    }
     if (vault_) {
         root = vault_->root_path();
         if (peerLinked()) {
