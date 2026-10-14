@@ -1,3 +1,4 @@
+#include "videovault/app/app_update.hpp"
 #include "videovault/app/batch_worker.hpp"
 #include "videovault/app/cloud_browser.hpp"
 #include "videovault/app/glass.hpp"
@@ -78,6 +79,7 @@
 #include <QPlainTextEdit>
 #include <QTextCursor>
 #include <QProgressBar>
+#include <QPointer>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSet>
@@ -158,6 +160,39 @@ QPixmap scaledIcon(const char* resource, const int side) {
     }
     return source.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
+
+// The update glyph: the download arrow the phone shows in its library header.
+// Drawn here (like the cloud browser's green tick) so the button needs no asset.
+QIcon updateGlyph() {
+    QPixmap plate(22, 22);
+    plate.fill(Qt::transparent);
+    QPainter painter(&plate);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(Qt::white);
+    pen.setWidthF(1.9);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    painter.setPen(pen);
+    painter.drawLine(QPointF(11.0, 3.5), QPointF(11.0, 13.5));
+    painter.drawLine(QPointF(6.5, 9.0), QPointF(11.0, 13.5));
+    painter.drawLine(QPointF(15.5, 9.0), QPointF(11.0, 13.5));
+    painter.drawLine(QPointF(4.5, 18.5), QPointF(17.5, 18.5));
+    return QIcon(plate);
+}
+
+// What the background update check found, handed back through a QFutureWatcher.
+struct UpdateCheckOutcome {
+    QString version;
+    QString url;
+    qint64 size{0};
+};
+
+// What a finished download/unpack produced: the folder to install from, or why
+// it did not get that far.
+struct UpdateInstallOutcome {
+    QString payload;
+    QString error;
+};
 
 QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
     if (source.isNull()) {
@@ -2042,9 +2077,9 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
-    const auto makeIconButton = [](QWidget* parent, const QString& iconPath, const QString& tip, const bool filled) {
+    const auto makeIconButton = [](QWidget* parent, const QIcon& icon, const QString& tip, const bool filled) {
         auto* button = new QPushButton(parent);
-        button->setIcon(QIcon(iconPath));
+        button->setIcon(icon);
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(36, 36);
         button->setCursor(Qt::PointingHandCursor);
@@ -2062,17 +2097,22 @@ QWidget* MainWindow::buildUnlockedPage() {
                 "QPushButton[sharing=\"true\"] { background: rgba(51, 144, 236, 90); }"));
         return button;
     };
-    importButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_add.png"),
+    // Offered only once GitHub has a newer release, the way the phone puts a
+    // download icon in its library header.
+    updateButton_ = makeIconButton(toolbar, updateGlyph(),
+        QStringLiteral("Check for a newer version"), false);
+    updateButton_->hide();
+    importButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_add.png")),
         QStringLiteral("Add"), true);
     // Folder import uses the same button. Both stay in step while a batch runs.
     importFolderButton_ = importButton_;
-    shareButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_share.png"),
+    shareButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_share.png")),
         QStringLiteral("Share this vault on Wi-Fi over an encrypted connection. "
                        "The phone must enter the vault password. Locking this PC does not stop sharing."),
         false);
-    settingsButton_ = makeIconButton(toolbar, QStringLiteral(":/icons/bar_settings.png"),
+    settingsButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_settings.png")),
         QStringLiteral("Change the password, manage tags, and adjust player settings"), false);
-    auto* lockButton = makeIconButton(toolbar, QStringLiteral(":/icons/bar_lock.png"),
+    auto* lockButton = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_lock.png")),
         QStringLiteral("Lock this PC. A phone that already entered the password keeps access until you stop sharing."),
         false);
 
@@ -2085,6 +2125,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     libraryTitle->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
     titleRow->addWidget(libraryTitle);
     titleRow->addStretch(1);
+    titleRow->addWidget(updateButton_);
     titleRow->addWidget(importButton_);
     titleRow->addWidget(shareButton_);
     titleRow->addWidget(settingsButton_);
@@ -2249,6 +2290,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     statusLayout->addWidget(galleryStatus_);
 
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
+    connect(updateButton_, &QPushButton::clicked, this, [this] { beginUpdateInstall(); });
     connect(importButton_, &QPushButton::clicked, this, [this] {
         CommandPopup menu(this);
         menu.addCommand(QStringLiteral("Import files…"), 1);
@@ -3480,6 +3522,152 @@ void MainWindow::openSettings() {
     });
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
+}
+
+void MainWindow::beginUpdateCheck() {
+    if (updateChecked_ || updateButton_ == nullptr || !appUpdateSupported()) {
+        return;
+    }
+    updateChecked_ = true;
+    auto* watcher = new QFutureWatcher<UpdateCheckOutcome>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
+        const UpdateCheckOutcome outcome = watcher->result();
+        watcher->deleteLater();
+        if (outcome.version.isEmpty() || updateButton_ == nullptr) {
+            // Newest release already, or GitHub unreachable. The phone stays
+            // quiet in both cases too, so nothing is shown here either.
+            return;
+        }
+        updateVersion_ = outcome.version;
+        updateUrl_ = outcome.url;
+        updateSize_ = outcome.size;
+        updateButton_->setToolTip(
+            QStringLiteral("Download and install version %1").arg(updateVersion_));
+        updateButton_->show();
+    });
+    watcher->setFuture(QtConcurrent::run([] {
+        UpdateCheckOutcome outcome;
+        AppRelease release;
+        QString error;
+        if (!fetchLatestRelease(installedVersion(), &release, &error)) {
+            return outcome;
+        }
+        outcome.version = release.version;
+        outcome.url = release.url.toString();
+        outcome.size = release.size;
+        return outcome;
+    }));
+}
+
+void MainWindow::beginUpdateInstall() {
+    if (updateInstalling_ || updateVersion_.isEmpty()) {
+        return;
+    }
+    if (!updatePayload_.isEmpty()) {
+        offerUpdateRestart();   // unpacked on an earlier visit
+        return;
+    }
+    updateInstalling_ = true;
+    updateButton_->setEnabled(false);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    showStatus(QStringLiteral("Updating…"), false);
+
+    AppRelease release;
+    release.version = updateVersion_;
+    release.url = QUrl(updateUrl_);
+    release.size = updateSize_;
+    // The worker reports progress with queued calls, which a guard keeps from
+    // reaching a window that is already gone.
+    const QPointer<MainWindow> guard(this);
+    auto* watcher = new QFutureWatcher<UpdateInstallOutcome>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, release] {
+        const UpdateInstallOutcome outcome = watcher->result();
+        watcher->deleteLater();
+        updateInstalling_ = false;
+        progressBar_->hide();
+        if (updateButton_ != nullptr) {
+            updateButton_->setEnabled(true);
+        }
+        if (!outcome.error.isEmpty()) {
+            showStatus(outcome.error, true);
+            return;
+        }
+        updatePayload_ = outcome.payload;
+        showStatus(QStringLiteral("Version %1 is ready to install.").arg(release.version), false);
+        offerUpdateRestart();
+    });
+    watcher->setFuture(QtConcurrent::run([release, guard] {
+        UpdateInstallOutcome outcome;
+        const QString folder = updateFolder(release.version);
+        QDir().mkpath(folder);
+        const QString package = folder + QLatin1Char('/') + QFileInfo(release.url.path()).fileName();
+        const auto progress = [guard](const qint64 done, const qint64 total) {
+            if (guard != nullptr) {
+                QMetaObject::invokeMethod(guard, [guard, done, total] {
+                    if (guard != nullptr) {
+                        guard->setUpdateProgress(done, total);
+                    }
+                }, Qt::QueuedConnection);
+            }
+            return true;
+        };
+        if (!downloadRelease(release, package, progress, &outcome.error)) {
+            return outcome;
+        }
+        stageRelease(package, &outcome.payload, &outcome.error);
+        return outcome;
+    }));
+}
+
+void MainWindow::setUpdateProgress(const qint64 done, const qint64 total) {
+    if (progressBar_ == nullptr) {
+        return;
+    }
+    if (total > 0) {
+        progressBar_->setRange(0, 1000);
+        progressBar_->setValue(static_cast<int>((done * 1000) / total));
+    } else {
+        // GitHub reported no length: show the bar working instead of a number.
+        progressBar_->setRange(0, 0);
+    }
+}
+
+void MainWindow::offerUpdateRestart() {
+    if (updatePayload_.isEmpty()) {
+        return;
+    }
+    AppRelease release;
+    release.version = updateVersion_;
+    release.url = QUrl(updateUrl_);
+    release.size = updateSize_;
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("Update ready"));
+    box.setText(QStringLiteral("Version %1 has been downloaded.").arg(release.version));
+    box.setInformativeText(QStringLiteral(
+        "MegaVaultProtect closes, replaces its files and starts again."));
+    QPushButton* restart = box.addButton(QStringLiteral("Restart and install"), QMessageBox::AcceptRole);
+    box.addButton(QStringLiteral("Later"), QMessageBox::RejectRole);
+    box.setDefaultButton(restart);
+    box.exec();
+    if (box.clickedButton() != restart) {
+        showStatus(QStringLiteral("Version %1 installs at the next restart.").arg(release.version), false);
+        return;
+    }
+    if (batchBusy_) {
+        showStatus(QStringLiteral("An import is still running. Try again when it finishes."), true);
+        return;
+    }
+    QString error;
+    if (!applyRelease(release, updatePayload_, &error)) {
+        showStatus(error, true);
+        return;
+    }
+    showStatus(QStringLiteral("Installing version %1…").arg(release.version), false);
+    // The helper waits for this process to exit before it swaps the files.
+    QTimer::singleShot(300, qApp, [] { QCoreApplication::quit(); });
 }
 
 void MainWindow::beginRestoreSelected() {
@@ -6233,6 +6421,7 @@ void MainWindow::showUnlocked() {
     refreshTagFilter();
     refreshGallery();
     flushExternalImports();
+    beginUpdateCheck();
 }
 
 void MainWindow::ensureShareServer() {

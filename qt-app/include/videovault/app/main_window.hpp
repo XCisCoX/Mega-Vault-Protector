@@ -134,6 +134,13 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
+
+    // The running build against the newest GitHub release, the same check the
+    // phone runs when its library opens. The whole flow is off the UI thread.
+    void beginUpdateCheck();
+    void beginUpdateInstall();
+    void setUpdateProgress(qint64 done, qint64 total);
+    void offerUpdateRestart();
     void beginPlayback(std::int64_t video_id);
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
@@ -236,6 +243,16 @@ private:
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
     QPushButton* shareButton_{nullptr};
+    // Update offer: the release GitHub reported, shown as an icon in the library
+    // bar only once a newer version exists. updatePayload_ holds the unpacked
+    // folder while the user decides whether to restart into it.
+    QPushButton* updateButton_{nullptr};
+    bool updateChecked_{false};
+    bool updateInstalling_{false};
+    QString updateVersion_;
+    QString updateUrl_;
+    qint64 updateSize_{0};
+    QString updatePayload_;
     QComboBox* viewModeCombo_{nullptr};
     QButtonGroup* viewModeGroup_{nullptr};
     QPushButton* sortButton_{nullptr};

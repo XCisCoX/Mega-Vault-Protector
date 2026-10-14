@@ -18,6 +18,7 @@ endif()
 
 set(MVP_APP_SOURCES
     src/main.cpp
+    src/app_update.cpp
     src/main_window.cpp
     src/media_decoder.cpp
     src/player_window.cpp
@@ -34,6 +35,7 @@ set(MVP_APP_SOURCES
     src/peer_browser.cpp
     src/cloud_browser.cpp
     third_party/qrcodegen/qrcodegen.cpp
+    include/videovault/app/app_update.hpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
@@ -96,7 +98,7 @@ if(UNIX AND NOT ANDROID)
     target_link_libraries(VideoVaultApp PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 if(WIN32)
-    target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32 windowsapp)
+    target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32 windowsapp winhttp)
     set(_mvp_cppwinrt "")
     if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
         set(_mvp_cppwinrt "C:/Program Files (x86)/Windows Kits/10/Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/cppwinrt")
