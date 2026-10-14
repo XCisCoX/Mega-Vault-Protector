@@ -45,7 +45,7 @@ The server is a single-tenant small-service MVP, not a hardened general-purpose 
 
 ## Docker deployment
 
-The deployment files are in `deployment/sync/`. Use the supplied compose/Caddy configuration so TLS terminates at Caddy and the plaintext relay stays on a private container network. The persistent data volume must survive container recreation. Generate pairing codes and make backups with the server administration CLI inside the relay container; do not bake credentials into images.
+The deployment files are in `deployment/` (Dockerfile, compose.yaml, Caddyfile, `.env.example`). See `deployment/README.md` for the exact commands. Use the supplied compose/Caddy configuration so TLS terminates at Caddy and the plaintext relay stays on a private container network. The persistent data volume must survive container recreation. Generate pairing codes and make backups with the server administration CLI inside the relay container; do not bake credentials into images.
 
 Review the actual compose service names and required hostname settings in that directory before running it. Native execution is useful when Docker is unavailable; Docker is not required for the server or its tests.
 
@@ -77,14 +77,24 @@ Transport uses TLS, and MVPK content, file names and folder paths are encrypted 
 
 Each device has the shared package secret and its own vault password. Revocation cannot erase already downloaded files or a copied shared secret. After compromise, revoke the device and establish a new secret for newly encrypted packages; historical packages remain decryptable with the old secret. If all copies of the secret are lost, no server password reset can decrypt the relay's packages.
 
-The persistent sync transfer cache contains encrypted packages. The existing MVPK core import path temporarily decrypts a file into a staging file before importing it into the local vault. Normal cleanup removes it, but crashes/filesystem snapshots may retain plaintext. Protect the client OS account, use full-disk encryption and avoid untrusted shared temporary storage. This transient import staging is different from the old plaintext media cache, which is not the new sync design.
+The persistent sync transfer cache contains encrypted packages only. The MVPK import path authenticates the whole package first and then stages each file as plaintext inside the destination vault at `<vault-root>/.import-staging/`, with owner-only permissions on POSIX and the vault directory's ACL inherited on Windows. Normal cleanup removes the staging directory, but a crash or a filesystem snapshot can retain plaintext there. Protect the client OS account, use full-disk encryption, and treat the vault directory itself as confidential storage. This transient import staging is different from the old plaintext media cache, which is not the new sync design.
 
 Names/folder paths and contents travel in MVPK. Tags, empty-folder-only changes, binary deltas, real-time collaboration, automatic text merges and automatic destructive deletion propagation are not promised by this MVP. Large edits require a new encrypted package, although interrupted network transfers resume. History occupies real disk space; it is not a substitute for independent backups.
 
 ## Tests
 
 ```sh
-python -m unittest discover -s tests/sync_server -v
+python -W error -m unittest discover -s tests/sync_server -v
 ```
 
-Native package integrity tests are registered as `VideoVaultCore.SyncPackages` in CTest. Native sync state tests and end-to-end client checks must also pass before treating a development build as daily-use-ready. Server unit/integration tests alone do not establish that an Android or desktop UI has been tested on a device.
+Native suites: `ctest --test-dir <build> --output-on-failure` covers the core vault, package and media suites plus the sync protocol/state/engine/dialog tests and `VideoVaultCore.SyncPackages` (one-file encrypted packages, no plaintext leakage, rejection of a tampered final record, vault-private staging, retry idempotence).
+
+End-to-end against a real relay (starts a disposable `sync_server`, then reads back device/object/revision counts from SQLite):
+
+```sh
+python qt-app/tests/run_sync_live.py <build>/qt-app/VideoVaultSyncEngineTests[.exe]
+python qt-app/tests/run_sync_live.py <build>/qt-app/VideoVaultSyncEngineTests[.exe] --tls   # needs openssl
+python android/sync-tests/run.py --tools <scratch-tools> --real-server
+```
+
+Server tests alone do not establish that a desktop or Android UI works on a device: the Android APK/native link/Keystore path and the on-device UI are not covered here, and the Windows GUI cannot be built without the C++/WinRT SDK that `music_window.cpp`/`pdf_window.cpp` require.
