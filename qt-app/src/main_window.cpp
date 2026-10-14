@@ -3388,11 +3388,18 @@ void MainWindow::acceptExternalPaths(const QStringList& paths) {
     raise();
     activateWindow();
     for (const QString& path : paths) {
-        if (QFileInfo::exists(path)) {
-            pendingExternal_.push_back(pathFromText(path));
+        if (!QFileInfo::exists(path)) {
+            continue;
         }
+        // The shell file association hands .mvpk packages to this app; they are
+        // imported as packages, not as files for the library.
+        if (path.endsWith(QStringLiteral(".mvpk"), Qt::CaseInsensitive)) {
+            pendingPackageExternal_.push_back(path);
+            continue;
+        }
+        pendingExternal_.push_back(pathFromText(path));
     }
-    if (pendingExternal_.empty()) {
+    if (pendingExternal_.empty() && pendingPackageExternal_.isEmpty()) {
         return;
     }
     if (!vault_ || !vault_->is_unlocked()) {
@@ -3405,7 +3412,21 @@ void MainWindow::acceptExternalPaths(const QStringList& paths) {
 }
 
 void MainWindow::flushExternalImports() {
-    if (pendingExternal_.empty() || !vault_ || !vault_->is_unlocked() || batchBusy_) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    if (!pendingPackageExternal_.isEmpty()) {
+        // A package import holds the batch slot, so media that arrived with it
+        // waits for finishBatch() to call back into here.
+        const QString package = pendingPackageExternal_.takeFirst();
+        if (importPackagePath(package)) {
+            return;
+        }
+        // Dismissing the password prompt drops the rest of the packages, but
+        // still lets the media queue through.
+        pendingPackageExternal_.clear();
+    }
+    if (pendingExternal_.empty()) {
         return;
     }
     auto paths = std::move(pendingExternal_);
@@ -4072,9 +4093,16 @@ void MainWindow::beginImportPackage() {
     if (selected.isEmpty()) {
         return;
     }
+    importPackagePath(selected);
+}
+
+bool MainWindow::importPackagePath(const QString& selected) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return false;
+    }
     PackagePassword prompt = askPackagePassword(this, false);
     if (!prompt.accepted) {
-        return;
+        return false;
     }
     batchBusy_ = true;
     batchLabel_ = QStringLiteral("Importing");
@@ -4097,6 +4125,7 @@ void MainWindow::beginImportPackage() {
             worker->importPackage(vault, path, password, folderId);
         },
         Qt::QueuedConnection);
+    return true;
 }
 
 std::vector<std::int64_t> MainWindow::selectedVideoIds() const {

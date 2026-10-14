@@ -184,6 +184,21 @@ exec "$HERE/MegaVaultProtect" "$@"
 EOF
 chmod +x "$root/MegaVaultProtect.sh"
 
+# Desktop integration. The archive stays portable: install-desktop-entry.sh
+# copies the menu entry, the hicolor icons and the .mvpk package type into the
+# user's XDG directories only when they ask for it.
+here="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+linux_res="$here/qt-app/resources/linux"
+if [[ ! -d "$linux_res/icons" ]]; then
+  echo "Linux icon resources not found under $linux_res" >&2
+  exit 1
+fi
+cp -R "$linux_res/icons" "$root/icons"
+cp "$linux_res/MegaVaultProtect.desktop.in" "$root/MegaVaultProtect.desktop"
+cp "$linux_res/megavault-package.xml" "$root/megavault-package.xml"
+cp "$linux_res/install-desktop-entry.sh" "$root/install-desktop-entry.sh"
+chmod +x "$root/install-desktop-entry.sh"
+
 cat > "$root/README.txt" << 'EOF'
 Mega Vault Protect for Linux x64.
 
@@ -193,6 +208,10 @@ Run:
 This build is linked on Ubuntu 24.04. It needs glibc 2.39 or newer
 (Ubuntu 24.04, or another current distro). Extract the archive and
 start the shell script above; the libraries it needs are in lib/.
+
+Optional: add the application menu entry, the icons, and the .mvpk
+package type (so package files show their own icon and open here):
+  ./install-desktop-entry.sh
 EOF
 
 tar -C "$stage" -czf "$archive" MegaVaultProtect

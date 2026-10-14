@@ -110,6 +110,7 @@ private:
     void beginRestoreSelected();
     void beginExportPackage(std::int64_t only_folder_id = 0);
     void beginImportPackage();
+    bool importPackagePath(const QString& path);
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
     void revealVideo(qlonglong id, const QString& name, qlonglong size,
@@ -242,6 +243,9 @@ private:
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
     std::vector<std::filesystem::path> pendingExternal_;
+    // .mvpk files handed over by the shell file association, kept apart from
+    // media imports because they unlock and import as packages.
+    QStringList pendingPackageExternal_;
     QLocalServer* importServer_{nullptr};
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
