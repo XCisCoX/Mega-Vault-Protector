@@ -108,3 +108,11 @@ replay_pid*
 /out/android-arm64/*.log
 
 cloud/config.json
+
+# Local self-hosted sync data, Python caches and developer environments.
+# Sync recovery secrets and device credentials never belong in Git.
+/sync-data/
+__pycache__/
+*.py[cod]
+.venv/
+CMakeUserPresets.json

@@ -69,6 +69,22 @@ Both devices have to be on the same network.
 
 Copies wait in a queue and run one at a time, because the vault writes one package at a time. You can leave the other library, open your own, and add more copies while a transfer is running. **Transfers** lists what is copying and what is waiting. Cancel removes a waiting item immediately, and stops the item that is currently copying.
 
+### Optional self-hosted sync
+
+The self-hosted sync design keeps a local vault on each device and transfers
+end-to-end encrypted vault packages through an optional relay. Pairing uses a
+separate device credential; the server must never receive your vault password
+or the shared package recovery secret. Selected files remain usable locally
+when the relay is offline. Interrupted transfers resume, and conflicting edits
+are preserved rather than silently overwritten.
+
+See [setup, pairing, security and backups](docs/self-hosted-sync.md), the
+[architecture decision](docs/sync-architecture.md), and the
+[protocol contract](docs/sync-protocol.md). This replaces the old trusted-server
+`MegaVaultCloud` workflow, not PC/LAN sharing. Development-build verification
+and the documented MVP limits still matter; server tests alone do not prove
+native client UI behavior.
+
 ## Screenshots
 
 The pictures below are the library and the video player. Pictures, music, PDFs, and phone sharing are in the app and are not in these shots.

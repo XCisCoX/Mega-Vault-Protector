@@ -102,3 +102,12 @@ set_target_properties(VideoVaultCoreRecordTests PROPERTIES FOLDER "Tests")
 mvp_copy_runtime_dlls(VideoVaultCoreRecordTests)
 
 add_test(NAME VideoVaultCore.Records COMMAND VideoVaultCoreRecordTests)
+
+# The encrypted package boundary used by self-hosted sync. The sender and
+# receiver use different local vault passwords and share only a package secret.
+add_executable(VideoVaultSyncPackageTests sync_packages.cpp)
+target_link_libraries(VideoVaultSyncPackageTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultSyncPackageTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultSyncPackageTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultSyncPackageTests)
+add_test(NAME VideoVaultCore.SyncPackages COMMAND VideoVaultSyncPackageTests)

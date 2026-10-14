@@ -315,6 +315,7 @@ fun VaultScreen(
     onPlay: (Long, String, List<VideoEntry>) -> Unit,
     onOpenMusic: () -> Unit = {},
     onOpenPeer: () -> Unit = {},
+    onOpenSync: () -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
@@ -1732,6 +1733,10 @@ fun VaultScreen(
                 MvpButton("New folder", onClick = {
                     showAdd = false
                     namePrompt = NamePrompt.NewFolder(currentFolderId)
+                }, modifier = Modifier.fillMaxWidth())
+                if (!RemoteVault.connected()) MvpButton("Encrypted sync…", onClick = {
+                    showAdd = false
+                    onOpenSync()
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton(if (pcName == null) "Swap with PC" else "Open PC · $pcName", onClick = {
                     showAdd = false

@@ -1,6 +1,7 @@
 #include "videovault/app/app_update.hpp"
 #include "videovault/app/batch_worker.hpp"
-#include "videovault/app/cloud_browser.hpp"
+#include "videovault/app/sync_engine.hpp"
+#include "videovault/app/sync_dialog.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/music_window.hpp"
@@ -1521,6 +1522,7 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    closeSync();
     qApp->removeEventFilter(this);
     if (shareServer_) {
         shareServer_->setOnRunning({});
@@ -2031,7 +2033,9 @@ QWidget* MainWindow::buildLoginPage() {
 
     unlockButton_ = new QPushButton(QStringLiteral("Unlock vault"), card);
     unlockButton_->setProperty("primary", true);
-    auto* cloudButton = new QPushButton(QStringLiteral("Cloud login"), card);
+    auto* cloudButton = new QPushButton(QStringLiteral("Sync setup is available after unlocking a local vault"), card);
+    cloudButton->setEnabled(false);
+    cloudButton->setToolTip(QStringLiteral("Legacy remote vault-password login is disabled. Sync v2 never sends your vault password."));
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
     layout->addWidget(unlockButton_);
     layout->addWidget(cloudButton);
@@ -2040,15 +2044,7 @@ QWidget* MainWindow::buildLoginPage() {
     connect(browse, &QPushButton::clicked, this, [this] { selectLoginLocation(); });
     connect(unlockButton_, &QPushButton::clicked, this, [this] { beginOpen(); });
     connect(loginPassword_, &QLineEdit::returnPressed, this, [this] { beginOpen(); });
-    connect(cloudButton, &QPushButton::clicked, this, [this, cloudButton, newVaultButton] {
-        cloudLogin_ = !cloudLogin_;
-        loginLocationRow_->setVisible(!cloudLogin_);
-        cloudFields_->setVisible(cloudLogin_);
-        newVaultButton->setVisible(!cloudLogin_);
-        unlockButton_->setText(cloudLogin_ ? QStringLiteral("Connect") : QStringLiteral("Unlock vault"));
-        cloudButton->setText(cloudLogin_ ? QStringLiteral("This PC") : QStringLiteral("Cloud login"));
-        setError(loginError_, {});
-    });
+
     connect(newVaultButton, &QPushButton::clicked, this, [this] { showSetup(); });
 
     placeCard(page, card);
@@ -2128,6 +2124,10 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addWidget(updateButton_);
     titleRow->addWidget(importButton_);
     titleRow->addWidget(shareButton_);
+    auto* syncButton = new QPushButton(QStringLiteral("Sync"), toolbar);
+    syncButton->setToolTip(QStringLiteral("Self-hosted E2EE sync v2 — local vault stays your library"));
+    connect(syncButton, &QPushButton::clicked, this, &MainWindow::openSync);
+    titleRow->addWidget(syncButton);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
     toolbarLayout->addLayout(titleRow);
@@ -3231,38 +3231,8 @@ void MainWindow::beginCreate() {
 }
 
 void MainWindow::beginCloudLogin() {
-    setError(loginError_, {});
-    const QString address = cloudAddress_->text().trimmed();
-    const QString fingerprint = cloudFingerprint_->text().trimmed();
-    const QString password = loginPassword_->text();
-    if (!address.contains(QLatin1Char(':')) || address.startsWith(QLatin1Char(':'))) {
-        setError(loginError_, QStringLiteral("Enter the cloud address as host:port."));
-        return;
-    }
-    if (fingerprint.size() != 64) {
-        setError(loginError_, QStringLiteral("Paste the cloud server's public key."));
-        return;
-    }
-    if (password.isEmpty()) {
-        setError(loginError_, QStringLiteral("Enter the vault password."));
-        return;
-    }
-    if (cloudPage_ != nullptr) {
-        pages_->removeWidget(cloudPage_);
-        cloudPage_->deleteLater();
-        cloudPage_ = nullptr;
-    }
-    auto* browser = new CloudBrowser(pages_);
-    cloudPage_ = browser;
-    pages_->addWidget(browser);
-    browser->setOnLeave([this] {
-        if (cloudPage_ != nullptr) {
-            pages_->setCurrentWidget(loginPage_);
-        }
-    });
     loginPassword_->clear();
-    browser->openSession(address, fingerprint, password);
-    pages_->setCurrentWidget(browser);
+    setError(loginError_, QStringLiteral("Legacy remote vault-password login is disabled. Unlock a local vault, then use Sync setup."));
 }
 
 void MainWindow::beginOpen() {
@@ -3507,6 +3477,26 @@ void MainWindow::finishBatch(const bool ok, const QString& message, const int co
     }
     pumpPeerCopies();
     flushExternalImports();
+}
+
+void MainWindow::openSync() {
+    if (!vault_ || !vault_->is_unlocked() || pages_->currentWidget() != unlockedPage_) return;
+    if (!syncEngine_) {
+        syncEngine_ = new SyncEngine(vault_, {}, this);
+        connect(syncEngine_, &SyncEngine::libraryChanged, this, [this] { refreshGallery(); refreshTagFilter(); });
+        connect(syncEngine_, &SyncEngine::changed, this, [this] {
+            if (syncEngine_ && syncEngine_->failed()) showStatus(syncEngine_->status(), true);
+        });
+    }
+    if (!syncDialog_) {
+        syncDialog_ = new SyncDialog(syncEngine_, vault_, this);
+        connect(syncDialog_, &QObject::destroyed, this, [this] { syncDialog_ = nullptr; });
+    }
+    syncDialog_->show(); syncDialog_->raise(); syncDialog_->activateWindow();
+}
+void MainWindow::closeSync() {
+    if (syncDialog_) { delete syncDialog_; syncDialog_ = nullptr; }
+    if (syncEngine_) { syncEngine_->stop(); delete syncEngine_; syncEngine_ = nullptr; }
 }
 
 void MainWindow::openSettings() {
@@ -7177,6 +7167,7 @@ void MainWindow::lockVault() {
         }
         return;
     }
+    closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
     // Sharing stays up until Stop sharing, including a swap. The lock screen
     // only hides this library; the other side can still look and copy.
     finishPeerApproval(false);

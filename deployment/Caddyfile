@@ -1,0 +1,9 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$SYNC_DOMAIN} {
+    reverse_proxy server:8766
+    header Strict-Transport-Security "max-age=31536000"
+    # No access logs: URLs, device labels and credentials stay out of logs.
+}

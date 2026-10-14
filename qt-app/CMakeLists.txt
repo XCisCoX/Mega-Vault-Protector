@@ -33,7 +33,7 @@ set(MVP_APP_SOURCES
     src/share_tls.cpp
     src/peer_link.cpp
     src/peer_browser.cpp
-    src/cloud_browser.cpp
+
     third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/app_update.hpp
     include/videovault/app/main_window.hpp
@@ -52,6 +52,25 @@ set(MVP_APP_SOURCES
     include/videovault/app/peer_browser.hpp
     resources/resources.qrc
 )
+
+add_library(MegaVaultSync STATIC
+    src/sync_protocol.cpp src/sync_state.cpp src/sync_package.cpp
+    src/sync_engine.cpp src/sync_dialog.cpp
+    include/videovault/app/sync_engine.hpp)
+target_include_directories(MegaVaultSync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(MegaVaultSync PUBLIC cxx_std_20)
+set_target_properties(MegaVaultSync PROPERTIES AUTOMOC ON)
+target_link_libraries(MegaVaultSync PUBLIC VideoVault::Core Qt5::Core Qt5::Concurrent Qt5::Network Qt5::Widgets)
+if(WIN32)
+    target_link_libraries(MegaVaultSync PRIVATE MvpSodium)
+elseif(ANDROID)
+    target_include_directories(MegaVaultSync PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    target_link_libraries(MegaVaultSync PRIVATE ${MVP_SODIUM_LIBS})
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYNC_SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    target_link_libraries(MegaVaultSync PRIVATE PkgConfig::SYNC_SODIUM)
+endif()
 
 if(ANDROID)
     # Android apps are shared libraries: androiddeployqt packages the .so into
@@ -85,6 +104,7 @@ endif()
 target_link_libraries(VideoVaultApp
     PRIVATE
         VideoVault::Core
+        MegaVaultSync
         Qt5::Core
         Qt5::Concurrent
         Qt5::Widgets
@@ -127,7 +147,9 @@ endif()
 
 mvp_copy_runtime_dlls(VideoVaultApp)
 
-if(NOT ANDROID)
+option(MVP_BUILD_LEGACY_CLOUD "Build deprecated remote vault-password service (NOT sync v2 E2EE)" OFF)
+if(NOT ANDROID AND MVP_BUILD_LEGACY_CLOUD)
+    message(WARNING "MegaVaultCloud is deprecated remote decrypted access, NOT sync v2 E2EE. Use the Python sync v2 relay.")
     add_executable(MegaVaultCloud
         src/cloud_server.cpp
         src/share_tls.cpp
@@ -164,6 +186,24 @@ endif()
 # Headless playback test: decodes frames from an imported video through the
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
+    enable_testing()
+    add_executable(VideoVaultSyncProtocolTests tests/sync_protocol.cpp src/sync_protocol.cpp)
+    target_include_directories(VideoVaultSyncProtocolTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultSyncProtocolTests PRIVATE Qt5::Core Qt5::Network)
+    target_compile_features(VideoVaultSyncProtocolTests PRIVATE cxx_std_20)
+    add_executable(VideoVaultSyncStateTests tests/sync_state.cpp)
+    add_executable(VideoVaultSyncEngineTests tests/sync_engine.cpp)
+    add_executable(VideoVaultSyncDialogTests tests/sync_dialog.cpp)
+    foreach(_sync_test VideoVaultSyncStateTests VideoVaultSyncEngineTests VideoVaultSyncDialogTests)
+        target_link_libraries(${_sync_test} PRIVATE MegaVaultSync)
+        mvp_copy_runtime_dlls(${_sync_test})
+    endforeach()
+    mvp_copy_runtime_dlls(VideoVaultSyncProtocolTests)
+    add_test(NAME sync_protocol COMMAND VideoVaultSyncProtocolTests)
+    add_test(NAME sync_state COMMAND VideoVaultSyncStateTests)
+    add_test(NAME sync_engine COMMAND VideoVaultSyncEngineTests)
+    add_test(NAME sync_dialog COMMAND VideoVaultSyncDialogTests)
+    set_tests_properties(sync_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp

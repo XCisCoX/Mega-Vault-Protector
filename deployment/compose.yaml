@@ -1,0 +1,51 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    command: [serve, --host, "0.0.0.0", --port, "8766", --proxy-mode, --quota-bytes, "${SYNC_QUOTA_BYTES:-10737418240}", --max-blob-bytes, "${SYNC_MAX_BLOB_BYTES:-1073741824}", --workers, "16", --request-timeout, "30"]
+    environment:
+      MV_SYNC_PROXY_MODE: "1"
+    networks: [relay]
+    volumes:
+      - sync_data:/data
+      - sync_backups:/backups
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      SYNC_DOMAIN: "${SYNC_DOMAIN:?Set SYNC_DOMAIN in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL in .env}"
+    ports: ["80:80", "443:443"]
+    networks: [relay, edge]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+networks:
+  relay:
+    internal: true
+  edge: {}
+volumes:
+  sync_data: {}
+  sync_backups: {}
+  caddy_data: {}
+  caddy_config: {}

@@ -53,6 +53,8 @@ class PlayerWindow;
 class MusicWindow;
 class PdfWindow;
 class RecordWindow;
+class SyncEngine;
+class SyncDialog;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -134,6 +136,8 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
+    void openSync();
+    void closeSync();
 
     // The running build against the newest GitHub release, the same check the
     // phone runs when its library opens. The whole flow is off the UI thread.
@@ -359,6 +363,8 @@ private:
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
+    SyncEngine* syncEngine_{nullptr};
+    SyncDialog* syncDialog_{nullptr};
     // Declared after the vault so sharing stops before the vault is destroyed.
     std::unique_ptr<ShareServer> shareServer_;
     // The swapped phone's library, while it is open. Deletes itself on close.
