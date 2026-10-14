@@ -6,7 +6,7 @@ This document describes our accessibility priorities, expectations for contribut
 
 ## Priorities
 
-We prioritize access to essential tasks: creating and unlocking a vault, importing and finding files, opening supported content, managing records, and controlling sharing and transfers.
+We prioritize access to essential tasks: creating and unlocking a vault, importing and finding files, opening supported content, managing records on desktop, and controlling sharing and transfers, including cloud login and browsing where available.
 
 Our goals are to:
 
@@ -79,7 +79,8 @@ The README documents the following application platforms. These are build and di
 | --- | --- | --- |
 | Windows | x64 desktop application using Qt 5.12.12 | No published keyboard-only or screen reader evaluation |
 | Linux | x64; Ubuntu 24.04 build environment; distributed package requires glibc 2.39 or newer; Qt 5.15 | No published keyboard-only or screen reader evaluation |
-| Android | arm64 devices running Android 8 or newer; Kotlin and Jetpack Compose interface | No published TalkBack, switch access, or external-keyboard evaluation |
+| Android | arm64 devices running Android 8 or newer; Kotlin and Jetpack Compose interface; no record-management screen (the record editor is desktop-only) | No published TalkBack, switch access, or external-keyboard evaluation |
+| Cloud access | Desktop and Android Cloud login and remote-vault interfaces backed by a self-hosted `MegaVaultCloud` server; see [cloud setup](docs/cloud-ssl.md) | No published evaluation of cloud login, certificate-fingerprint entry, browsing, sync status, or deletion confirmations with assistive technology |
 
 Screen reader support, magnification, text scaling, alternative input, and specific device combinations need testing. Platform availability alone does not establish that these combinations work. Contributors should record the app version, environment, task, and result when reporting tests.
 
@@ -92,6 +93,7 @@ The README describes interactions that need accessibility review:
 - Picture and PDF navigation includes dragging, wheel or pinch zoom, and double-tapping. Equivalent access through a keyboard or assistive technology has not been documented.
 - Android video controls include double-tap seeking, press-and-hold speed changes, and fading controls. Access to these actions with TalkBack or alternative input has not been documented.
 - Opening a PC vault on a phone uses a QR code. An equivalent flow for someone who cannot scan that code has not been documented.
+- Cloud login uses an address, certificate fingerprint, and vault password rather than the LAN-sharing QR flow. Accessibility of fingerprint entry, connection errors, signed-in-device and sync-status displays, and shared-vault deletion confirmations has not been established; cloud availability is not evidence of accessible operation.
 - Automatic vault locking after five minutes of inactivity and clearing copied secrets after 30 seconds may affect users who need more time. Accessible timing controls or extensions have not been documented.
 - Media and document access depends on both the viewer and the imported content. Caption support, readable PDF text for screen readers, and alternative descriptions for images have not been evaluated in a published accessibility report.
 
