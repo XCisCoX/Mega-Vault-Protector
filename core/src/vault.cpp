@@ -57,28 +57,6 @@ bool is_audio_display_name(const std::string& name) {
     return false;
 }
 
-bool is_still_display_name(const std::string& name) {
-    const auto dot = name.find_last_of('.');
-    if (dot == std::string::npos || dot + 1U >= name.size()) {
-        return false;
-    }
-    std::string ext = name.substr(dot + 1U);
-    for (char& c : ext) {
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    static constexpr const char* kExtensions[] = {
-        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff",
-    };
-    for (const char* known : kExtensions) {
-        if (ext == known) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool header_is_pdf(internal::PackageReader& reader) {
     unsigned char head[1024]{};
     const auto count = std::min<std::uint64_t>(reader.plaintext_size(), sizeof(head));
@@ -1380,11 +1358,10 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
             return row.error();
         }
         display_name = row.value().display_name;
-        if (is_still_display_name(display_name)) {
-            MediaInfo info;
-            info.video_id = video_id;
-            return info;
-        }
+        // Stills (PNG, JPEG, WebP, ...) are probed like any other file: the
+        // gallery shows their real resolution and codec, and the media test
+        // asserts that a 1x1 PNG reports png at 1x1. Do not short-circuit
+        // images here — an early return left those columns blank.
         auto opened = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
         if (!opened) {
             return opened.error();
