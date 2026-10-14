@@ -59,6 +59,14 @@ The library has three views: large icons, a list, and a details table. Search ma
 
 On Android, Back walks up one folder. At the library root, a second press within two seconds leaves the app. The video player starts fullscreen, fades the title, seeks ±5 seconds on a double tap, and plays at 2× while a side is held. The timeline shows the buffered region.
 
+## Packages
+
+<img src="docs/MVP-package-logo.png" alt="Mega Vault package" width="120" align="right" />
+
+**Export package** writes one `.mvpk` file holding the selected items or a folder, locked with a password you choose for that file — it is separate from the vault password. **Import package** asks for that password and adds the contents to the current folder as new items. Nothing is uploaded; the file moves only where you copy it.
+
+On the desktop, a package carries the icon above and opens straight into the import prompt. Windows gets the type on first run, under `HKEY_CURRENT_USER\Software\Classes`, so it needs no elevation. In the Linux release archive, `./install-desktop-entry.sh` installs the same association plus the menu entry and icons.
+
 ## Phone and PC
 
 Sharing and swapping need both devices on the same network. The self-hosted cloud, described at the end of this section, does not.
@@ -101,7 +109,7 @@ Each [GitHub Release](https://github.com/XCisCoX/Mega-Vault-Protector/releases) 
 | File | How to run it |
 |---|---|
 | `MegaVaultProtect-windows-x64.zip` | Unzip and run `MegaVaultProtect.exe`. |
-| `MegaVaultProtect-linux-x64.tar.gz` | Extract and run `./MegaVaultProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). |
+| `MegaVaultProtect-linux-x64.tar.gz` | Extract and run `./MegaVaultProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). `./install-desktop-entry.sh` adds the menu entry, icons, and the `.mvpk` type. |
 | `MegaVaultProtect-android-arm64.apk` | Install on an arm64 phone running Android 8 or newer. |
 
 Create another release from Actions → **Release** → Run workflow, or push a tag such as `v0.4.0`.
@@ -209,10 +217,11 @@ qt-app/      Qt 5 app: library, viewers, player, records, text, share,
              MegaVaultCloud server executable
 android/     Kotlin + Jetpack Compose app over the same core
 tests/       Headless ctest suites
-scripts/     Android cross-build, Linux release packaging, Windows FFmpeg
-             import libraries, next-version tag
+scripts/     Android cross-build, Linux release packaging, icon generation,
+             Windows FFmpeg import libraries, next-version tag
 third_party/ vcpkg overlay ports (Windows)
-docs/        ANDROID-BUILD.md, cloud-ssl.md, architecture.md, screenshots, logo
+docs/        ANDROID-BUILD.md, cloud-ssl.md, architecture.md, screenshots,
+             branding masters and logo
 .github/     Release, beta, Android build and CodeQL workflows
 ```
 

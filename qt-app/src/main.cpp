@@ -13,6 +13,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QFont>
 #include <QIcon>
@@ -81,6 +82,42 @@ void installSendToShortcut() {
 #endif
 }
 
+#ifdef Q_OS_WIN
+// Gives .mvpk packages the package icon in Explorer and lets a double-click
+// open this app's package import. Everything sits under HKEY_CURRENT_USER, so
+// it needs no elevation and never touches another user's settings. The
+// resource id 2 is mvpk.ico, compiled in by resources/app.rc.
+void installPackageFileType() {
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    const QString progId = QStringLiteral("MegaVaultProtect.mvpk");
+    QSettings classes(QStringLiteral("HKEY_CURRENT_USER\\Software\\Classes"),
+        QSettings::NativeFormat);
+    bool changed = false;
+    const auto assign = [&](const QString& key, const QString& value) {
+        if (classes.value(key).toString() == value) {
+            return;
+        }
+        classes.setValue(key, value);
+        changed = true;
+    };
+    assign(QStringLiteral(".mvpk/"), progId);
+    assign(QStringLiteral(".mvpk/Content Type"),
+        QStringLiteral("application/x-megavault-package"));
+    assign(progId + QStringLiteral("/"), QStringLiteral("Mega Vault package"));
+    assign(progId + QStringLiteral("/DefaultIcon/"),
+        QStringLiteral("\"%1\",2").arg(exe));
+    assign(progId + QStringLiteral("/shell/open/command/"),
+        QStringLiteral("\"%1\" \"%2\"").arg(exe, QStringLiteral("%1")));
+    if (!changed) {
+        return;
+    }
+    classes.sync();
+    // Explorer caches the icon it showed for a file type, so tell it to look
+    // again after the first run (or after the app moved).
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -123,6 +160,7 @@ int main(int argc, char* argv[]) {
         }
     }
     installSendToShortcut();
+    installPackageFileType();
     if (forwardToRunning(incoming)) {
         return 0;
     }
