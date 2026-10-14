@@ -656,7 +656,8 @@ void handle(Pipe* pipe, const std::shared_ptr<State>& state) {
             data = std::move(bytes.value());
         }
         QByteArray head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
-            + QByteArray::number(data.size()) + "\r\nConnection: close\r\n\r\n";
+            + QByteArray::number(static_cast<qulonglong>(data.size()))
+            + "\r\nConnection: close\r\n\r\n";
         if (!writeAll(pipe, head.constData(), head.size())) return;
         if (!data.empty()) {
             writePaced(pipe, reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()), request.syncSpeed);
