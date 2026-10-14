@@ -37,6 +37,7 @@
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QComboBox>
+#include <QCursor>
 #include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -4909,12 +4910,16 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
     std::int64_t destination = currentFolderId_;
     bool on_folder = false;
     QTreeWidgetItem* treeTarget = nullptr;
+    // Drop events normally reach the viewport, where drop->pos() is already
+    // viewport-relative. Mapping from the view again shifted the hit test by the
+    // header/frame height, so a tree with a header only hit rows near the top:
+    // drops worked in the icon views and stopped working after a view switch.
+    // The cursor's own position is correct no matter which widget got the event.
+    const auto cursorIn = [](const QWidget* viewport) {
+        return viewport->mapFromGlobal(QCursor::pos());
+    };
     if (on_tree) {
-        QPoint pos = drop->pos();
-        if (watched == folderTree_) {
-            pos = folderTree_->viewport()->mapFrom(folderTree_, pos);
-        }
-        treeTarget = folderTree_->itemAt(pos);
+        treeTarget = folderTree_->itemAt(cursorIn(folderTree_->viewport()));
         if (treeTarget == nullptr) {
             // Empty pane space is not a destination; only rows are.
             highlightDropFolder(0, false);
@@ -4927,11 +4932,7 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         destination = crumb->property("mvpDropFolder").toLongLong();
         on_folder = true;
     } else if (on_details) {
-        QPoint pos = drop->pos();
-        if (watched == detailsTree_) {
-            pos = detailsTree_->viewport()->mapFrom(detailsTree_, pos);
-        }
-        auto* item = detailsTree_->itemAt(pos);
+        auto* item = detailsTree_->itemAt(cursorIn(detailsTree_->viewport()));
         if (item != nullptr) {
             const int kind = item->data(0, Qt::UserRole + 12).toInt();
             const auto role = item->data(0, Qt::UserRole).toLongLong();
@@ -4947,11 +4948,7 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
             }
         }
     } else {
-        QPoint pos = drop->pos();
-        if (watched == iconList_) {
-            pos = iconList_->viewport()->mapFrom(iconList_, pos);
-        }
-        auto* item = iconList_->itemAt(pos);
+        auto* item = iconList_->itemAt(cursorIn(iconList_->viewport()));
         if (item != nullptr) {
             const int kind = item->data(Qt::UserRole + 12).toInt();
             const auto role = item->data(Qt::UserRole).toLongLong();
@@ -5479,17 +5476,32 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
 }
 
 int MainWindow::selectedGalleryKind() const {
+    // The gallery keeps a current row that is not always the one the user
+    // clicked (selection can change without the current index following), so
+    // the selection wins whenever the current row is not part of it.
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         return item == nullptr ? -1 : item->data(0, Qt::UserRole + 12).toInt();
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     return item == nullptr ? -1 : item->data(Qt::UserRole + 12).toInt();
 }
 
 void MainWindow::activateCurrentItem() {
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         if (item == nullptr) {
             return;
         }
@@ -5507,6 +5519,10 @@ void MainWindow::activateCurrentItem() {
         return;
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     if (item == nullptr) {
         return;
     }
@@ -5641,8 +5657,8 @@ void MainWindow::revealFolder(const qlonglong id, const qlonglong parentId, cons
 void MainWindow::placeVideoRow(const qlonglong id, const QString& name, const qlonglong size,
     const qlonglong importedAt) {
     const int index = insertIndex(iconList_, 2, sortKey_, sortAscending_, id, name, size, importedAt);
-    const QString sizeText = QStringLiteral("%1 MB").arg(
-        static_cast<double>(size) / (1024.0 * 1024.0), 0, 'f', 2);
+    // Units step down to KB for small files; a 4 KB file used to read "0.00 MB".
+    const QString sizeText = compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, size)));
     auto* iconItem = new QListWidgetItem();
     iconItem->setData(Qt::UserRole, id);
     iconItem->setData(Qt::UserRole + 1, name);
@@ -5705,9 +5721,9 @@ void MainWindow::recountLibrary() {
             bytes += iconList_->item(i)->data(Qt::UserRole + 6).toLongLong();
         }
     }
-    statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
+    statusCountLabel_->setText(QStringLiteral("%1 items · %2")
         .arg(items)
-        .arg(static_cast<double>(bytes) / (1024.0 * 1024.0), 0, 'f', 1));
+        .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, bytes)))));
     if (emptyState_ != nullptr) {
         if (items == 0) {
             emptyState_->setText(currentFolderId_ == 0
@@ -6020,8 +6036,8 @@ void MainWindow::paintGalleryBatch() {
     int made = 0;
     while (made < kBatch && galleryQueueIndex_ < galleryQueue_.size()) {
         const PendingGalleryVideo& video = galleryQueue_[galleryQueueIndex_++];
-        const QString sizeText = QStringLiteral("%1 MB").arg(
-            static_cast<double>(video.size) / (1024.0 * 1024.0), 0, 'f', 2);
+        const QString sizeText = compactSize(
+            static_cast<std::uint64_t>(std::max<qlonglong>(0, video.size)));
         const QString created = QDateTime::fromSecsSinceEpoch(video.importedAt)
             .toLocalTime()
             .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
@@ -6435,9 +6451,9 @@ void MainWindow::refreshGallery() {
                 emptyState_->hide();
             }
         }
-        statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
+        statusCountLabel_->setText(QStringLiteral("%1 items · %2")
             .arg(visible.size() + realFolders)
-            .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
+            .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, total_bytes)))));
         watcher->deleteLater();
         paintGalleryBatch();
     });
@@ -6451,14 +6467,24 @@ void MainWindow::refreshGallery() {
 }
 
 std::int64_t MainWindow::selectedVideoId() const {
+    // Same rule as selectedGalleryKind: the selection is the truth, the current
+    // row only when it is part of it. Enter/F2 used to act on a stale row.
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         if (item == nullptr || item->data(0, Qt::UserRole + 12).toInt() != 0) {
             return -1;
         }
         return item->data(0, Qt::UserRole).toLongLong();
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     if (item == nullptr || item->data(Qt::UserRole + 12).toInt() != 0) {
         return -1;
     }
@@ -7051,8 +7077,14 @@ void MainWindow::showUnlocked() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
+    // Show only the vault's folder name. The full path used to sit here and
+    // leaked the storage location in every screenshot and on a shared screen;
+    // it stays available as a tooltip for the person at the machine.
+    const auto rootText = textFromPath(vault_->root_path());
+    const auto leaf = QDir(rootText).dirName();
     unlockedLocation_->setText(
-        QStringLiteral("Vault location: %1").arg(textFromPath(vault_->root_path())));
+        QStringLiteral("Vault: %1").arg(leaf.isEmpty() ? rootText : leaf));
+    unlockedLocation_->setToolTip(rootText);
     fadeStack(pages_, unlockedPage_);
     resetAutoLock();
     tagFilterId_ = -1;
