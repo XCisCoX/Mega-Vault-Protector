@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      allow_unsigned:
+        description: 'False for a build that publishes a release: it then fails unless the project keystore is available.'
+        required: false
+        type: boolean
+        default: true
   push:
     branches: [main]
   pull_request:
@@ -140,9 +145,45 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build debug APK
+      # Signing is what lets an installed copy be replaced by a newer download:
+      # Android refuses an update whose certificate differs from the one already
+      # on the phone, which is why every earlier release (fresh debug key per
+      # run) could never install over the previous one. The keystore and its
+      # password live in the repository secrets, and the verification step below
+      # checks the APK really carries this certificate. A fork pull request has
+      # no secrets and falls back to a debug build, which publishes nothing.
+      - name: Prepare the release keystore
+        env:
+          EXPECTED_SIGNER: ba94bf1cde8978456e21b5b35cc86382695816faea1a4ccbc9f7ce629da56bfe
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "EXPECTED_SIGNER=$EXPECTED_SIGNER" >> "$GITHUB_ENV"
+          signed=false
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/MegaVaultProtect-release.p12"
+            echo "MVP_KEYSTORE=$RUNNER_TEMP/MegaVaultProtect-release.p12" >> "$GITHUB_ENV"
+            echo "ASSEMBLE_TASK=assembleRelease" >> "$GITHUB_ENV"
+            echo "APK_PATH=android/app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+            signed=true
+            echo "The project keystore is available; building a signed release APK."
+          else
+            echo "ASSEMBLE_TASK=assembleDebug" >> "$GITHUB_ENV"
+            echo "APK_PATH=android/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret here, so this build is an unsigned-for-release debug APK."
+          fi
+          echo "SIGNED=$signed" >> "$GITHUB_ENV"
+          if [ "$signed" = "false" ] && [ "${{ inputs.allow_unsigned }}" = "false" ]; then
+            echo "::error::This run publishes a release, so it must be signed with the project keystore. ANDROID_KEYSTORE_BASE64 is missing."
+            exit 1
+          fi
+
+      - name: Build the APK
         env:
           MVP_ANDROID_PREFIX: ${{ github.workspace }}/out/android-arm64/prefix
+          MVP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MVP_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MVP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           cd android
@@ -150,13 +191,13 @@ jobs:
           # The wrapper distribution is pinned to the mirror reachable from the
           # developer's network. If that mirror is ever unavailable, fall back to
           # the official distribution before failing the job.
-          if ! MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon assembleDebug; then
+          if ! MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon "$ASSEMBLE_TASK"; then
             echo "::warning::gradlew failed; retrying with the official Gradle distribution"
             # Written with printf rather than sed: the backslash that escapes the
             # colon in a .properties value must survive shell + YAML layers.
             printf 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip\n' \
               > gradle/wrapper/gradle-wrapper.properties
-            MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon assembleDebug
+            MVP_VERSION="${{ inputs.version }}" ./gradlew --no-daemon "$ASSEMBLE_TASK"
           fi
 
       - name: Verify the APK carries a working native core
@@ -164,7 +205,7 @@ jobs:
           NDK_PATH: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
           set -euo pipefail
-          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          APK="$APK_PATH"
           test -f "$APK"
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmvpcore.so'
           unzip -l "$APK" | grep -q 'classes.dex'
@@ -186,23 +227,38 @@ jobs:
           echo "libmvpcore.so: $(grep -c . /tmp/apkcheck/symbols.txt) dynamic symbols, all JNI entry points present"
           ls -la "$APK"
 
+          # The signature is what decides whether an installed copy can update
+          # to this APK at all, so it is checked here rather than trusted: a
+          # missing secret or a swapped key would otherwise ship a build that
+          # every phone refuses to install over the previous one.
+          if [ "$SIGNED" = "true" ]; then
+            APKSIGNER="$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
+            test -x "$APKSIGNER"
+            "$APKSIGNER" verify --print-certs "$APK" | tee "$RUNNER_TEMP/apk-certs.txt"
+            grep -qi "Signer #1 certificate SHA-256 digest: $EXPECTED_SIGNER" "$RUNNER_TEMP/apk-certs.txt" \
+              || { echo "::error::The APK is not signed by the project keystore ($EXPECTED_SIGNER), so installed copies cannot update to it."; exit 1; }
+            echo "Signed by the project keystore, so it installs over the previous release."
+          else
+            echo "::warning::Unsigned build (no keystore secret); not suitable for release."
+          fi
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MegaVaultProtect-android-arm64
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
           retention-days: 30
 
       - name: Summary
         if: always()
         run: |
-          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          APK="${APK_PATH:-android/app/build/outputs/apk/debug/app-debug.apk}"
           {
             echo "### Android arm64-v8a"
             echo
             if [ -f "$APK" ]; then
-              echo "APK: \`$APK\` ($(stat -c%s "$APK") bytes)"
+              echo "APK: \`$APK\` ($(stat -c%s "$APK") bytes, signed=${SIGNED:-unknown})"
             else
               echo "No APK was produced."
             fi

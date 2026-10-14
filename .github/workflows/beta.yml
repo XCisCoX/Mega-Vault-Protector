@@ -225,6 +225,9 @@ jobs:
     uses: ./.github/workflows/android-build.yml
     with:
       version: ${{ needs.version.outputs.number }}
+      # A beta is published too, and only a keystore-signed APK can install over
+      # an existing copy — including over the previous beta.
+      allow_unsigned: false
 
   release:
     needs: [version, build-windows, build-linux, build-android]
@@ -247,8 +250,8 @@ jobs:
           ls -la "$dir"
           test -f "$dir/MegaVaultProtect-windows-x64.zip"
           test -f "$dir/MegaVaultProtect-linux-x64.tar.gz"
-          test -f "$dir/app-debug.apk"
-          mv "$dir/app-debug.apk" "$dir/MegaVaultProtect-android-arm64.apk"
+          test -f "$dir/app-release.apk"
+          mv "$dir/app-release.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
       - name: Create GitHub Beta
         uses: softprops/action-gh-release@v2

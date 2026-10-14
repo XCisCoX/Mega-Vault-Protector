@@ -120,17 +120,18 @@ Mirrors that work from Iran (the paths this build was validated against):
 
 ## CI (GitHub Actions)
 
-`.github/workflows/android-build.yml` builds the same arm64-v8a debug APK on
-every push to `main` (plus PRs and manual `workflow_dispatch`), and is the only
-workflow that touches Android — `release.yml`/`beta.yml` are desktop releases
-triggered by tag or by hand.
+`.github/workflows/android-build.yml` builds the arm64-v8a APK on every push to
+`main` (plus PRs and manual `workflow_dispatch`), and is the only workflow that
+touches Android itself — `release.yml` and `beta.yml` call it with
+`allow_unsigned: false` and attach the APK it produces.
 
 What it does, in order: JDK 21 and the real Android SDK (platform 36,
 build-tools 35.0.0, NDK 30.0.14904198 from the stable channel, CMake 3.22.1) via
 `sdkmanager`; `scripts/android/build-android-core.sh`, which also **runs the
 aarch64 test suites under qemu-user and fails the job if one fails**; then
-`./gradlew assembleDebug` with `MVP_ANDROID_PREFIX` pointing at the freshly built
-`out/android-arm64/prefix`.
+`./gradlew assembleRelease` with `MVP_ANDROID_PREFIX` pointing at the freshly
+built `out/android-arm64/prefix` and the project keystore passed in through
+`MVP_KEYSTORE`, `MVP_KEYSTORE_PASSWORD`, `MVP_KEY_ALIAS` and `MVP_KEY_PASSWORD`.
 
 Three caches keep it bearable: the SDK packages (the NDK alone is ~1 GB), the
 cross-built deps + core (`out/android-arm64`, keyed on the build script and
@@ -140,10 +141,45 @@ newer push cancels an in-flight run.
 Before uploading, the job asserts the APK really carries a working native core:
 `lib/arm64-v8a/libmvpcore.so` and `classes.dex` present, and every JNI entry
 point the Kotlin side declares exported from the `.so`. A broken native link
-otherwise produces a "successful" build with a dead core.
+otherwise produces a "successful" build with a dead core. It then runs
+`apksigner verify --print-certs` and fails unless the APK carries the release
+certificate from the section below: a missing or rotated secret must not ship an
+APK that no phone will install over the previous one.
 
-The artifact is `MegaVaultProtect-native-debug` (30-day retention). To build
+The artifact is `MegaVaultProtect-android-arm64` (30-day retention). To build
 without pushing: Actions → Android Build → Run workflow.
+
+## Signing (Android releases)
+
+Android replaces an installed app only when the new APK is signed with the same
+certificate as the copy already on the phone. Until 2026-10-14 CI built
+`assembleDebug`, and AGP generated a fresh debug key on every runner, so each
+release carried a different certificate: the update button inside the app
+downloaded the new APK and the installer then refused it with "App not installed
+as package conflicts with an existing package".
+
+Everything now signs with one key:
+
+* Keystore: `megavaultprotect-release.p12` (PKCS#12, RSA 4096, valid to 2056),
+  alias `megavaultprotect`. It lives **outside** the repository, next to it in
+  `android-signing/` together with its password and `README.txt`; `.gitignore`
+  also covers `*.p12`/`*.pfx` and that folder name.
+* Certificate SHA-256 (what CI pins in `android-build.yml` as
+  `EXPECTED_SIGNER`):
+  `ba94bf1cde8978456e21b5b35cc86382695816faea1a4ccbc9f7ce629da56bfe`
+* Repository secrets: `ANDROID_KEYSTORE_BASE64` (the keystore, base64),
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_PASSWORD`, `ANDROID_KEY_ALIAS`.
+* The workflow decodes the keystore into `$RUNNER_TEMP`, builds
+  `assembleRelease`, and verifies the signature as described above. A fork pull
+  request has no secrets and falls back to a debug build, which is why the
+  release and beta workflows pass `allow_unsigned: false` — those two must fail
+  rather than publish something uninstallable.
+
+Two rules that come with this key: it must never change (a new key can never
+replace an install made with the old one), and it must never be committed or
+pasted anywhere. Phones carrying a pre-2026-10-14 install have one uninstall and
+reinstall ahead of them; after that, in-app updates install straight over the
+previous version.
 
 ## Project layout (Android)
 

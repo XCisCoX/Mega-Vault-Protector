@@ -12,6 +12,26 @@ android {
     // refuses anything below its minimum build-tools revision (35.0.0).
     buildToolsVersion = "35.0.0"
 
+    // Release signing. CI decodes the project keystore from the repository
+    // secrets and points MVP_KEYSTORE at it. Android only replaces an installed
+    // app when the new APK carries the same certificate as the old one, so this
+    // key has to stay the same for every release — see android-signing/ next to
+    // the repository, not inside it. Without the variables the release build is
+    // simply unsigned, which local `assembleDebug` work never notices.
+    val keystorePath = System.getenv("MVP_KEYSTORE") ?: ""
+    signingConfigs {
+        if (keystorePath.isNotBlank()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                // PKCS#12, the format openssl exports and apksigner reads.
+                storeType = "PKCS12"
+                storePassword = System.getenv("MVP_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("MVP_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("MVP_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     // The SDK image ships NDK 30.0.14904198; AGP's default ndkVersion (27.x)
     // is not installed and cannot be downloaded on this network.
     ndkVersion = "30.0.14904198"
@@ -50,6 +70,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // An unsigned release APK cannot update an installed copy, so the
+            // workflow hands the keystore in and then checks the signature.
+            if (keystorePath.isNotBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

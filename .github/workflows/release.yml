@@ -234,6 +234,9 @@ jobs:
     uses: ./.github/workflows/android-build.yml
     with:
       version: ${{ needs.version.outputs.number }}
+      # A published release must be signed with the project keystore: without it
+      # no phone can install this APK over the previous one.
+      allow_unsigned: false
 
   release:
     needs: [version, build-windows, build-linux, build-android]
@@ -256,8 +259,8 @@ jobs:
           ls -la "$dir"
           test -f "$dir/MegaVaultProtect-windows-x64.zip"
           test -f "$dir/MegaVaultProtect-linux-x64.tar.gz"
-          test -f "$dir/app-debug.apk"
-          mv "$dir/app-debug.apk" "$dir/MegaVaultProtect-android-arm64.apk"
+          test -f "$dir/app-release.apk"
+          mv "$dir/app-release.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -270,7 +273,7 @@ jobs:
 
             - **Windows x64:** unzip and run `MegaVaultProtect.exe`.
             - **Linux x64:** extract and run `./MegaVaultProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive.
-            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. This build is signed with the CI debug key, so a newer download replaces it only after you uninstall the previous copy if the signature ever changes.
+            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app. Copies installed from releases published before this became the case carry a per-build CI key and need one uninstall before they can join that line.
 
             The vault stays on your machine. Playback does not decrypt videos onto disk.
           files: |

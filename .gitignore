@@ -88,6 +88,12 @@ android/captures/
 *.aab
 *.keystore
 *.jks
+*.p12
+*.pfx
+# The release signing key and its password, if anyone copies the folder in.
+# It belongs next to the repository (Desktop/MegaVault/android-signing), never
+# inside it.
+android-signing/
 hs_err_pid*
 replay_pid*
 
