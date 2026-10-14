@@ -232,6 +232,12 @@ jobs:
   build-android:
     needs: version
     uses: ./.github/workflows/android-build.yml
+    # A called workflow does not see repository secrets unless the caller passes
+    # them, so the keystore has to be inherited here: without it the job finds
+    # no ANDROID_KEYSTORE_BASE64 and (correctly) refuses to build an unsigned
+    # release. Push-triggered runs of android-build.yml are called by nobody and
+    # read the secrets directly, which is why only this path was affected.
+    secrets: inherit
     with:
       version: ${{ needs.version.outputs.number }}
       # A published release must be signed with the project keystore: without it

@@ -223,6 +223,9 @@ jobs:
   build-android:
     needs: version
     uses: ./.github/workflows/android-build.yml
+    # See release.yml: a called workflow receives no secrets unless the caller
+    # hands them over, and this one needs the keystore to sign.
+    secrets: inherit
     with:
       version: ${{ needs.version.outputs.number }}
       # A beta is published too, and only a keystore-signed APK can install over
