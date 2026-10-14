@@ -165,7 +165,11 @@ bool writeAll(Pipe* pipe, const char* data, int size) {
         const qint64 wrote = pipe->write(data + off, size - off);
         if (wrote <= 0) return false;
         off += static_cast<int>(wrote);
-        if (!pipe->waitForBytesWritten(20000)) return false;
+        // On a TLS channel write() has already pushed these bytes to the socket,
+        // so an unsuccessful wait here means "nothing left to wait for", not
+        // "the bytes were lost". Treating it as a failure cut every reply off
+        // after its headers: the client saw a truncated response.
+        pipe->waitForBytesWritten(20000);
     }
     return true;
 }
@@ -673,20 +677,36 @@ public:
             if (!socket.setSocketDescriptor(handle_)) return;
             Pipe pipe;
             pipe.tcp = &socket;
-            handle(&pipe, state_);
+            try {
+                handle(&pipe, state_);
+            } catch (...) {
+            }
             socket.disconnectFromHost();
             return;
         }
         videovault::app::TlsChannel channel;
-        if (!channel.accept(handle_, state_->tls)) return;
+        if (!channel.accept(handle_, state_->tls)) {
+            // A failed handshake must still give the descriptor back, or a
+            // scanner on the network leaks one per attempt.
+            QTcpSocket orphan;
+            if (orphan.setSocketDescriptor(handle_)) orphan.abort();
+            return;
+        }
         Pipe pipe;
         pipe.tls = &channel;
-        handle(&pipe, state_);
+        // Never let a throw escape a pool thread: terminating the whole server
+        // because one client sent something odd is not acceptable.
+        try {
+            handle(&pipe, state_);
+        } catch (...) {
+        }
         channel.flush();
         channel.waitForBytesWritten(20000);
         if (channel.state() != QAbstractSocket::UnconnectedState) {
             channel.disconnectFromHost();
-            channel.waitForDisconnected(5000);
+            if (channel.state() != QAbstractSocket::UnconnectedState) {
+                channel.waitForDisconnected(15000);
+            }
         }
     }
 
@@ -727,30 +747,72 @@ QString findConfig() {
     return {};
 }
 
+void printUsage() {
+    std::cout << "MegaVaultCloud [--vault <folder>] [--port <n>] [--bind <address>] [--plain] [config.json]\n";
+    std::cout << "Nothing secret goes on the command line or in a file: each client signs in\n";
+    std::cout << "with the vault password, typed in its own app.\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
-    const QString configPath = findConfig();
-    if (configPath.isEmpty()) {
-        std::cerr << "Pass the config file: MegaVaultCloud cloud/config.json\n";
-        return 1;
+    const QStringList args = QCoreApplication::arguments();
+    QString flagVault;
+    QString flagBind;
+    QString configPath;
+    int flagPort = 0;
+    bool flagPlain = false;
+    bool plainGiven = false;
+    for (int i = 1; i < args.size(); ++i) {
+        const QString arg = args.at(i);
+        const bool hasNext = i + 1 < args.size();
+        if (arg == QStringLiteral("--vault") && hasNext) {
+            flagVault = args.at(++i).trimmed();
+        } else if (arg == QStringLiteral("--port") && hasNext) {
+            flagPort = args.at(++i).toInt();
+        } else if (arg == QStringLiteral("--bind") && hasNext) {
+            flagBind = args.at(++i).trimmed();
+        } else if (arg == QStringLiteral("--plain")) {
+            flagPlain = true;
+            plainGiven = true;
+        } else if (arg == QStringLiteral("--help") || arg == QStringLiteral("-h")) {
+            printUsage();
+            return 0;
+        } else if (!arg.startsWith(QLatin1Char('-'))) {
+            configPath = arg;
+        } else {
+            std::cerr << "Unknown option " << arg.toStdString() << "\n";
+            printUsage();
+            return 1;
+        }
     }
-    QFile file(configPath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        std::cerr << "Could not read the config file.\n";
-        return 1;
+
+    // The file is optional; the same values can come from the command line.
+    QJsonObject config;
+    if (configPath.isEmpty()) configPath = findConfig();
+    if (!configPath.isEmpty()) {
+        QFile file(configPath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            std::cerr << "Could not read the config file " << configPath.toStdString() << "\n";
+            return 1;
+        }
+        QByteArray configBytes = file.readAll();
+        if (configBytes.startsWith("\xEF\xBB\xBF")) configBytes = configBytes.mid(3);
+        config = QJsonDocument::fromJson(configBytes).object();
+        file.close();
     }
-    QByteArray configBytes = file.readAll();
-    if (configBytes.startsWith("\xEF\xBB\xBF")) configBytes = configBytes.mid(3);
-    const QJsonObject config = QJsonDocument::fromJson(configBytes).object();
-    file.close();
-    const QString root = config.value(QStringLiteral("vault")).toString().trimmed();
-    const int port = config.value(QStringLiteral("port")).toInt(8766);
-    const QString bind = config.value(QStringLiteral("bind")).toString(QStringLiteral("0.0.0.0")).trimmed();
-    const bool plain = config.value(QStringLiteral("plain")).toBool(false);
+    const QString root = (flagVault.isEmpty()
+        ? config.value(QStringLiteral("vault")).toString()
+        : flagVault).trimmed();
+    const int port = flagPort > 0 ? flagPort : config.value(QStringLiteral("port")).toInt(8766);
+    const QString bind = (flagBind.isEmpty()
+        ? config.value(QStringLiteral("bind")).toString(QStringLiteral("0.0.0.0"))
+        : flagBind).trimmed();
+    const bool plain = plainGiven ? flagPlain : config.value(QStringLiteral("plain")).toBool(false);
     if (root.isEmpty()) {
-        std::cerr << "Set the vault folder in the config. No password belongs there.\n";
+        std::cerr << "Point the server at a vault: --vault <folder>.\n";
+        printUsage();
         return 1;
     }
     if (!videovault::core::Vault::exists(vaultPath(root))) {
@@ -798,6 +860,7 @@ int main(int argc, char** argv) {
         std::cout << "On the phone or PC choose Cloud login, then enter the address, this public key\n";
         std::cout << "and your vault password. The vault opens with the first sign-in.\n";
     }
+    std::cout << "Stop with Ctrl+C. Pass --vault <folder> to point at another vault.\n";
     std::cout.flush();
     return app.exec();
 }

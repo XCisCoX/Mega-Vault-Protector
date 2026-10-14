@@ -148,7 +148,9 @@ bool writeRaw(TlsChannel* socket, const char* data, int size) {
         const qint64 wrote = socket->write(data + off, size - off);
         if (wrote <= 0) return false;
         off += static_cast<int>(wrote);
-        if (!socket->waitForBytesWritten(20000)) return false;
+        // TlsChannel::write already flushed to the socket, so a false wait means
+        // there is nothing pending — not that this chunk failed.
+        socket->waitForBytesWritten(20000);
     }
     return true;
 }

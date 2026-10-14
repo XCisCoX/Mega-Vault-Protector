@@ -1194,6 +1194,9 @@ fun VaultScreen(
             if (selecting) {
                 selectedIds = if (v.id in selectedIds) selectedIds - v.id else selectedIds + v.id
             } else {
+                // This file's local copy goes first, so the tick is there when
+                // the viewer comes back, without the rest of the sync competing.
+                CloudFiles.request(v.id)
                 onPlay(v.id, v.name, shown)
             }
         }

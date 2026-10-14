@@ -138,6 +138,11 @@ class MainActivity : ComponentActivity() {
                         runCatching { CoreBridge.nativeLock() }
                     }
                 }
+                // The cloud copy of the library waits while anything is open, so
+                // a video, a still or a song never shares the link with the sync.
+                LaunchedEffect(screen) {
+                    CloudFiles.viewerOpen = screen !is Screen.Vault
+                }
                 var notice by remember { mutableStateOf<String?>(null) }
                 LaunchedEffect(notice) {
                     if (notice != null) {
