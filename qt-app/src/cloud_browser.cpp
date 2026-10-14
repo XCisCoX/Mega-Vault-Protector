@@ -658,20 +658,20 @@ void CloudBrowser::showFolder(std::int64_t folderId) {
             if (row.folder && row.id == folderId) parent = row.parent;
         }
         auto* up = new QListWidgetItem(QStringLiteral(".."), list_);
-        up->setData(Qt::UserRole, parent);
+        up->setData(Qt::UserRole, static_cast<qlonglong>(parent));
         up->setData(Qt::UserRole + 1, true);
         up->setData(Qt::UserRole + 2, true);
     }
     for (const CloudRow& row : rows_) {
         if (!row.folder || row.parent != folderId) continue;
         auto* item = new QListWidgetItem(row.name, list_);
-        item->setData(Qt::UserRole, row.id);
+        item->setData(Qt::UserRole, static_cast<qlonglong>(row.id));
         item->setData(Qt::UserRole + 1, true);
     }
     for (const CloudRow& row : rows_) {
         if (row.folder || row.parent != folderId) continue;
         auto* item = new QListWidgetItem(row.name + QStringLiteral("    ") + formatBytes(row.size), list_);
-        item->setData(Qt::UserRole, row.id);
+        item->setData(Qt::UserRole, static_cast<qlonglong>(row.id));
         item->setData(Qt::UserRole + 1, false);
         if (isSynced(row)) item->setIcon(greenTick());
     }
