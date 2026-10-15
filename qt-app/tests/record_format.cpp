@@ -141,6 +141,226 @@ int main() {
             && valueKindLabel(ValueKind::Plain).isEmpty(),
         "Badge labels must be the expected strings, empty for Plain.");
 
+    // ---- version detection ----
+    {
+        expect(recordFormatVersion(QByteArray("{\"mvp_record\":1,\"fields\":[]}")) == 1,
+            "Version 1 content must report version 1.");
+        expect(recordFormatVersion(QByteArray("{\"mvp_record\":2,\"fields\":[]}")) == 2,
+            "Version 2 content must report version 2.");
+        expect(recordFormatVersion(QByteArray("{\"mvp_record\":9,\"fields\":[]}")) == 0,
+            "A version this build does not know must be refused, not guessed at.");
+        expect(recordFormatVersion(QByteArray("{\"other\":1}")) == 0,
+            "Another document is not a record.");
+        expect(recordFormatVersion(QByteArray("%PDF-1.4")) == 0,
+            "Content that is not a record has no version.");
+    }
+
+    // ---- version 1 content keeps working (migration, no data loss) ----
+    {
+        const QByteArray stored = QByteArray(
+            "{\"mvp_record\":1,\"title\":\"Old record\",\"fields\":["
+            "{\"name\":\"key\",\"value\":\"api-key-value\",\"secret\":true},"
+            "{\"name\":\"note\",\"value\":\"plain text\"}]}");
+        RecordDocument migrated;
+        expect(parseRecord(stored, &migrated),
+            "A version 1 record must still parse.");
+        expect(migrated.title == QStringLiteral("Old record")
+                && migrated.fields.size() == 2U,
+            "Version 1 content must keep its title and fields.");
+        expect(migrated.fields.at(0).secret && !migrated.fields.at(0).json
+                && migrated.fields.at(0).value == QStringLiteral("api-key-value"),
+            "Version 1 values must arrive as untouched text with their secret flag.");
+        expect(!migrated.fields.at(1).secret, "Version 1 secret defaults to false.");
+
+        const QByteArray rewritten = serializeRecord(migrated);
+        expect(recordFormatVersion(rewritten) == 2,
+            "Saving migrated content must write the current version.");
+        RecordDocument again;
+        expect(parseRecord(rewritten, &again) && again.title == migrated.title
+                && sameFields(again, migrated),
+            "Version 1 content must survive a rewrite with no data loss.");
+    }
+
+    // ---- JSON values of every common type ----
+    {
+        struct Case {
+            const char* text;
+            const char* expected;
+            const char* what;
+        };
+        const Case cases[] = {
+            {"42", "\"value\":42", "A number must stay a number."},
+            {"-1.5", "\"value\":-1.5", "A negative decimal must stay a number."},
+            {"\"text\"", "\"value\":\"text\"", "A JSON string must stay a string."},
+            {"true", "\"value\":true", "True must stay a boolean."},
+            {"false", "\"value\":false", "False must stay a boolean."},
+            {"null", "\"value\":null", "Null must stay null."},
+            {"{\"a\":1,\"b\":[1,2]}", "\"value\":{\"a\":1,\"b\":[1,2]}",
+                "An object must stay an object."},
+            {"[1,2,3]", "\"value\":[1,2,3]", "An array must stay an array."},
+        };
+        for (const auto& item : cases) {
+            RecordDocument doc;
+            doc.title = QStringLiteral("t");
+            RecordField field;
+            field.name = QStringLiteral("j");
+            field.json = true;
+            field.value = QString::fromUtf8(item.text);
+            doc.fields.push_back(field);
+
+            const QByteArray bytes = serializeRecord(doc);
+            expect(asStd(bytes).find(item.expected) != std::string::npos, item.what);
+            RecordDocument back;
+            expect(parseRecord(bytes, &back) && back.fields.size() == 1U
+                    && back.fields.at(0).json
+                    && back.fields.at(0).value == QString::fromUtf8(item.text),
+                "A JSON value must round-trip unchanged.");
+        }
+
+        // A text field whose content looks like JSON stays text.
+        RecordDocument text_doc;
+        text_doc.fields.push_back(
+            RecordField{QStringLiteral("looks"), QStringLiteral("{\"a\":1}"), false});
+        const QByteArray text_bytes = serializeRecord(text_doc);
+        expect(asStd(text_bytes).find("\"value\":\"{\\\"a\\\":1}\"") != std::string::npos,
+            "A text field must keep JSON-looking text as a string.");
+        RecordDocument text_back;
+        expect(parseRecord(text_bytes, &text_back) && !text_back.fields.at(0).json
+                && text_back.fields.at(0).value == QStringLiteral("{\"a\":1}"),
+            "JSON-looking text must come back as text, not as an object.");
+    }
+
+    // ---- what counts as one JSON value ----
+    {
+        const char* good[] = {"42", "-1.5", "0", "12345678901234567890", "\"hi\"",
+            "true", "false", "null", "{}", "[]", "{\"a\":[1,{\"b\":null}]}",
+            "  [1]  ", "\"[1,2]\""};
+        for (const char* text : good) {
+            expect(isValidJsonValue(QString::fromUtf8(text)),
+                "A single JSON value must be accepted.");
+        }
+        const char* bad[] = {"", "   ", "abc", "{", "}", "[1,2", "1,2",
+            "{\"a\":1}{}", "{\"a\":}", "'single'", "NaN", "\"unterminated",
+            "{\"a\":1,}"};
+        for (const char* text : bad) {
+            expect(!isValidJsonValue(QString::fromUtf8(text)),
+                "Text that is not one JSON value must be rejected.");
+        }
+    }
+
+    // ---- a JSON field that does not parse is reported, not stored broken ----
+    {
+        RecordDocument doc;
+        doc.title = QStringLiteral("t");
+        RecordField field;
+        field.name = QStringLiteral("Config");
+        field.json = true;
+        field.value = QStringLiteral("{oops");
+        doc.fields.push_back(field);
+
+        const QString problem = recordProblem(doc);
+        expect(!problem.isEmpty() && problem.contains(QStringLiteral("Config")),
+            "An invalid JSON field must be reported by name.");
+        expect(recordProblem(original).isEmpty(),
+            "A record whose fields are text has no problem.");
+        expect(!recordProblem(doc).contains(QStringLiteral("hidden")),
+            "The report must not invent detail it does not have.");
+
+        // The container stays readable and the typed text is kept.
+        const QByteArray bytes = serializeRecord(doc);
+        expect(recordFormatVersion(bytes) == 2,
+            "Content written from an unfinished JSON field is still a record.");
+        RecordDocument back;
+        expect(parseRecord(bytes, &back) && back.fields.size() == 1U
+                && back.fields.at(0).value == QStringLiteral("{oops"),
+            "A field whose JSON does not parse must be stored as text, not lost.");
+        expect(!back.fields.at(0).json,
+            "The json marker must be dropped when the text was stored as text.");
+
+        RecordDocument good;
+        good.fields.push_back(RecordField{QStringLiteral("a"), QStringLiteral("plain"), false});
+        expect(recordProblem(good).isEmpty(), "A text-only record must pass validation.");
+        RecordDocument good_json;
+        RecordField json_field;
+        json_field.name = QStringLiteral("j");
+        json_field.json = true;
+        json_field.value = QStringLiteral("{\"a\":1}");
+        good_json.fields.push_back(json_field);
+        expect(recordProblem(good_json).isEmpty(), "Valid JSON must pass validation.");
+    }
+
+    // ---- members this build does not know survive an edit ----
+    {
+        const QByteArray stored = QByteArray(
+            "{\"mvp_record\":2,\"title\":\"t\",\"color\":\"red\",\"fields\":["
+            "{\"name\":\"n\",\"value\":\"v\",\"secret\":false,\"weight\":7}]}");
+        RecordDocument doc;
+        expect(parseRecord(stored, &doc), "Content with unknown members must parse.");
+        expect(doc.extras.value(QStringLiteral("color")).toString() == QStringLiteral("red")
+                && doc.fields.size() == 1U
+                && doc.fields.at(0).extras.value(QStringLiteral("weight")).toInt() == 7,
+            "Unknown members must be kept on the document and on the field.");
+
+        const QByteArray rewritten = serializeRecord(doc);
+        expect(asStd(rewritten).find("\"color\":\"red\"") != std::string::npos
+                && asStd(rewritten).find("\"weight\":7") != std::string::npos,
+            "Unknown members must be written back out.");
+        RecordDocument back;
+        expect(parseRecord(rewritten, &back)
+                && back.extras.value(QStringLiteral("color")).toString() == QStringLiteral("red")
+                && back.fields.at(0).extras.value(QStringLiteral("weight")).toInt() == 7,
+            "Unknown members must survive a full round trip.");
+    }
+
+    // ---- large values ----
+    {
+        RecordDocument doc;
+        doc.title = QStringLiteral("big");
+        RecordField prose;
+        prose.name = QStringLiteral("prose");
+        prose.value = QString(1024 * 1024, QLatin1Char('x'));
+        doc.fields.push_back(prose);
+        RecordField list;
+        list.name = QStringLiteral("payload");
+        list.json = true;
+        list.value = QStringLiteral("{\"pad\":\"")
+            + QString(1024 * 1024, QLatin1Char('y')) + QStringLiteral("\"}");
+        doc.fields.push_back(list);
+
+        const QByteArray bytes = serializeRecord(doc);
+        RecordDocument back;
+        expect(parseRecord(bytes, &back) && back.fields.size() == 2U,
+            "A megabyte-sized record must round-trip.");
+        expect(back.fields.at(0).value.size() == 1024 * 1024,
+            "A megabyte of text must come back whole.");
+        expect(back.fields.at(1).json
+                && back.fields.at(1).value.contains(QString(1024 * 1024, QLatin1Char('y'))),
+            "A megabyte of JSON must come back whole and still parse.");
+        expect(recordProblem(back).isEmpty(),
+            "A large but valid record must not be reported as a problem.");
+    }
+
+    // ---- the field badge ----
+    {
+        RecordField json_field;
+        json_field.name = QStringLiteral("j");
+        json_field.json = true;
+        json_field.value = QStringLiteral("42");
+        expect(recordFieldKindLabel(json_field) == QStringLiteral("json"),
+            "A JSON field must be labelled json even when its text looks numeric.");
+
+        RecordField secret_field;
+        secret_field.value = QStringLiteral("hunter2");
+        secret_field.secret = true;
+        expect(recordFieldKindLabel(secret_field) == QStringLiteral("password"),
+            "A secret text field must stay labelled password.");
+
+        RecordField url_field;
+        url_field.value = QStringLiteral("https://example.com");
+        expect(recordFieldKindLabel(url_field) == QStringLiteral("URL"),
+            "A text field must keep its inferred kind.");
+    }
+
     if (failures != 0) {
         std::cerr << failures << " record format check(s) failed.\n";
         return EXIT_FAILURE;

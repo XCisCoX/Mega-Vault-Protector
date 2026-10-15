@@ -215,11 +215,13 @@ void RecordFieldCard::applyMask() {
 }
 
 void RecordFieldCard::refreshKind() {
-    const ValueKind kind = classifyValue(field_.value, field_.secret);
-    const QString label = valueKindLabel(kind);
+    // The badge is read off the field rather than the raw text, so a field that
+    // is marked as JSON keeps saying so while its text is being edited.
+    const QString label = recordFieldKindLabel(field_);
     badge_->setText(label);
     badge_->setVisible(!label.isEmpty());
 
+    const ValueKind kind = classifyValue(field_.value, field_.secret);
     QFont font = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
     switch (kind) {
     case ValueKind::Secret:
@@ -231,6 +233,9 @@ void RecordFieldCard::refreshKind() {
     case ValueKind::Email:
     case ValueKind::Multiline:
         break;
+    }
+    if (field_.json) {
+        font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     }
     if (value_->font() != font) {
         value_->setFont(font);
@@ -538,6 +543,13 @@ void RecordWindow::save() {
     if (document.title.isEmpty()) {
         setStatus(QStringLiteral("Give the record a title before saving."), true);
         titleEdit_->setFocus();
+        return;
+    }
+    // A value marked as JSON has to parse before it is stored: the container
+    // would otherwise hold text that claims to be JSON and is not.
+    const QString problem = recordProblem(document);
+    if (!problem.isEmpty()) {
+        setStatus(problem, true);
         return;
     }
     const QByteArray bytes = serializeRecord(document);
