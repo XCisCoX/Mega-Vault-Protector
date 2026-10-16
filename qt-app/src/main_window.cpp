@@ -537,7 +537,6 @@ struct LoadedText {
 struct TextSaveOutcome {
     bool ok{false};
     bool already{false};
-    bool removed{false};
     std::int64_t id{0};
     qlonglong size{0};
     QString error;
@@ -6882,11 +6881,16 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
         LoadedText loaded;
         QByteArray data;
         std::uint64_t offset = 0U;
+        bool read_failed = false;
         while (static_cast<std::uint64_t>(data.size()) < cap) {
             const auto room = cap - static_cast<std::uint64_t>(data.size());
             const auto want = std::min<std::uint64_t>(256U * 1024U, room);
             auto chunk = vault->read_video_range(video_id, offset, static_cast<std::size_t>(want));
-            if (!chunk || chunk.value().empty()) {
+            if (!chunk) {
+                read_failed = true;
+                break;
+            }
+            if (chunk.value().empty()) {
                 break;
             }
             const auto& bytes = chunk.value();
@@ -6894,11 +6898,21 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
             data.append(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(take));
             offset += take;
             if (take < bytes.size()) {
-                loaded.truncated = true;
                 break;
             }
-            if (bytes.size() < want) {
-                break;
+        }
+        // Neither stopping at the cap nor a short read proves the end of the
+        // file: a file of exactly the cap leaves nothing more to read, while a
+        // longer one can only be recognised by looking. One byte past what was
+        // read decides it, because treating a partial read as complete would let
+        // Save write back a shortened copy. A read that failed leaves the length
+        // unknown, which is equally unsafe to edit.
+        if (read_failed) {
+            loaded.truncated = true;
+        } else {
+            auto probe = vault->read_video_range(video_id, offset, 1U);
+            if (!probe || !probe.value().empty()) {
+                loaded.truncated = true;
             }
         }
         loaded.body = QString::fromUtf8(data);
@@ -6960,6 +6974,9 @@ void MainWindow::saveOpenText(const bool closeAfter) {
     const QString title = openTextTitle_.isEmpty() ? QStringLiteral("Note.txt") : openTextTitle_;
     const std::int64_t previous = openTextId_;
     const std::int64_t folderId = openTextFolderId_;
+    // A note that is already in the vault keeps the name it has; only a new one
+    // is sanitized into a safe name.
+    const QString safeTitle = previous > 0 ? title : noteFileName(title);
     const int generation = page->generation();
     closeTextAfterSave_ = closeAfter;
     openTextBusy_ = true;
@@ -6986,20 +7003,6 @@ void MainWindow::saveOpenText(const bool closeAfter) {
             resetAutoLock();
             return;
         }
-        if (outcome.removed) {
-            if (auto* icon = findListItemById(iconList_, previous)) {
-                delete iconList_->takeItem(iconList_->row(icon));
-            }
-            if (auto* tree = findTreeItemById(detailsTree_, previous)) {
-                delete detailsTree_->takeTopLevelItem(detailsTree_->indexOfTopLevelItem(tree));
-            }
-            if (galleryCache_ != nullptr) {
-                galleryCache_->thumbs.erase(previous);
-                galleryCache_->media.erase(previous);
-                galleryCache_->kinds.erase(previous);
-            }
-            decoratedIds_.erase(previous);
-        }
         const bool collapsed = outcome.already && outcome.id != previous;
         if (current) {
             page->markSaved();
@@ -7011,7 +7014,11 @@ void MainWindow::saveOpenText(const bool closeAfter) {
                 openTextTitle_ = title;
             }
         }
-        if (!collapsed && findListItemById(iconList_, outcome.id) == nullptr) {
+        if (previous > 0 && outcome.id == previous) {
+            // Edited in place: the row is already listed, but the size it shows
+            // and the library total are now stale.
+            refreshGallery();
+        } else if (!collapsed && findListItemById(iconList_, outcome.id) == nullptr) {
             revealVideo(
                 outcome.id,
                 title,
@@ -7033,41 +7040,39 @@ void MainWindow::saveOpenText(const bool closeAfter) {
             lockVault();
         }
     });
-    watcher->setFuture(QtConcurrent::run([vault, title, utf8, previous, folderId] {
+    watcher->setFuture(QtConcurrent::run([vault, safeTitle, utf8, previous, folderId] {
         TextSaveOutcome outcome;
         try {
-        const QString safe = noteFileName(title);
-        std::error_code mkdirError;
-        const auto directory = std::filesystem::temp_directory_path() / "mvp-notes";
-        std::filesystem::create_directories(directory, mkdirError);
-        const auto source = directory / safe.toStdWString();
-        QFile file(QString::fromStdWString(source.wstring()));
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            outcome.error = QStringLiteral("The note could not be saved.");
-            return outcome;
-        }
-        if (file.write(utf8) != utf8.size()) {
-            file.close();
-            std::filesystem::remove(source, mkdirError);
-            outcome.error = QStringLiteral("The note could not be saved.");
-            return outcome;
-        }
-        file.close();
-        bool already = false;
-        auto imported = vault->import_file(source, {}, folderId, &already);
-        std::filesystem::remove(source, mkdirError);
-        if (!imported) {
-            outcome.error = vaultErrorText(imported.error());
-            return outcome;
-        }
-        outcome.ok = true;
-        outcome.already = already;
-        outcome.id = imported.value();
-        outcome.size = utf8.size();
-        if (previous > 0 && outcome.id != previous) {
-            auto gone = vault->remove_video(previous);
-            outcome.removed = static_cast<bool>(gone);
-        }
+            // The content goes to the core in memory. A note is never written to
+            // disk in the clear, not even for a moment in the system temp folder.
+            const std::span<const unsigned char> content(
+                reinterpret_cast<const unsigned char*>(utf8.constData()),
+                static_cast<std::size_t>(utf8.size()));
+            const std::string name = safeTitle.toStdString();
+            if (previous > 0) {
+                // Editing the note that is open: rewrite it in place, so the
+                // item keeps its id, folder, tags and place in the library
+                // instead of being replaced by a copy of itself.
+                const auto replaced = vault->replace_video_content(previous, content, name);
+                if (!replaced) {
+                    outcome.error = vaultErrorText(replaced.error());
+                    return outcome;
+                }
+                outcome.ok = true;
+                outcome.id = previous;
+                outcome.size = utf8.size();
+                return outcome;
+            }
+            bool already = false;
+            auto imported = vault->import_bytes(content, name, folderId, &already);
+            if (!imported) {
+                outcome.error = vaultErrorText(imported.error());
+                return outcome;
+            }
+            outcome.ok = true;
+            outcome.already = already;
+            outcome.id = imported.value();
+            outcome.size = utf8.size();
         } catch (const std::exception&) {
             outcome = {};
             outcome.error = QStringLiteral("The note could not be saved.");
