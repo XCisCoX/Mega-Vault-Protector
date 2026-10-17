@@ -134,6 +134,14 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
         if (speed > 0) delay((bytes.toLong() * 1000 / speed).coerceAtMost(30_000))
     }
     fun setSpeed(bytesPerSecond: Long) { require(bytesPerSecond >= 0); state.put("speed", bytesPerSecond); save() }
+    private fun resolveSafeStoreFile(name: String): File {
+        require(name.isNotBlank()) { "Invalid file path" }
+        require(!name.contains('\u0000')) { "Invalid file path" }
+        val base = store.directory.canonicalFile
+        val candidate = File(base, name).canonicalFile
+        require(candidate.path.startsWith(base.path + File.separator)) { "Invalid file path" }
+        return candidate
+    }
     /** A bounded pass. Caller retries only while this unlocked screen is STARTED. */
     suspend fun pass() {
         unlocked()
@@ -178,7 +186,7 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
         state.remove("notice"); save()
     }
     private suspend fun upload(entry: JSONObject) {
-        val file = File(store.directory, entry.getString("file"))
+        val file = resolveSafeStoreFile(entry.getString("file"))
         check(file.length() == entry.getLong("size") && fileHash(file) == entry.getString("blob")) { "Pending package damaged; keep original local file" }
         val hash = entry.getString("blob")
         val size = entry.getLong("size")
