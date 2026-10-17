@@ -77,9 +77,21 @@ Sharing and swapping need both devices on the same network. The self-hosted clou
 
 Copies wait in a queue and run one at a time, because the vault writes one package at a time. You can leave the other library, open your own, and add more copies while a transfer is running. **Transfers** lists what is copying and what is waiting. Cancel removes a waiting item immediately, and stops the item that is currently copying.
 
-**Self-hosted cloud.** The desktop build also produces a second program, `MegaVaultCloud`, which serves one vault from a machine you control. It is not in the release archives: [docs/cloud-ssl.md](docs/cloud-ssl.md) explains how to build the CMake target, configure it, and connect. On the login card, **Cloud login** takes the server address, the certificate fingerprint printed at startup, and the vault password. Clients browse folders and files and show a green tick for cached copies. The desktop cloud browser opens cached files through the system's associated application rather than the local-vault viewer.
+### Optional self-hosted sync
 
-The server must be reachable from the client; Internet access requires your own network and TLS setup. Unlike read-only LAN swapping, cloud deletion affects the shared vault. Trust the server operator: the server unlocks the vault and retains its password in memory, and clients cache decrypted files. This is not end-to-end encrypted storage against an untrusted server.
+The self-hosted sync design keeps a local vault on each device and transfers
+end-to-end encrypted vault packages through an optional relay. Pairing uses a
+separate device credential; the server must never receive your vault password
+or the shared package recovery secret. Selected files remain usable locally
+when the relay is offline. Interrupted transfers resume, and conflicting edits
+are preserved rather than silently overwritten.
+
+See [setup, pairing, security and backups](docs/self-hosted-sync.md), the
+[architecture decision](docs/sync-architecture.md), and the
+[protocol contract](docs/sync-protocol.md). This replaces the old trusted-server
+`MegaVaultCloud` workflow, not PC/LAN sharing. Development-build verification
+and the documented MVP limits still matter; server tests alone do not prove
+native client UI behavior.
 
 ## Screenshots
 
