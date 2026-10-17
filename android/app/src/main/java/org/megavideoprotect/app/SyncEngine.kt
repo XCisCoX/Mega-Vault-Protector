@@ -39,6 +39,10 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
     private val queue: JSONArray get() = state.optJSONArray("queue") ?: JSONArray().also { state.put("queue", it) }
     private val known: JSONObject get() = state.optJSONObject("known") ?: JSONObject().also { state.put("known", it) }
     private fun save() = store.save(state)
+    private fun downloadCacheFileForBlob(blob: String): File {
+        require(blob.matches(Regex("^[a-f0-9]{64}$"))) { "Invalid blob identifier for cache path" }
+        return File(store.directory, "$blob.download")
+    }
     fun configured() = state.optString("endpoint").isNotEmpty()
     fun endpoint() = state.optString("endpoint")
     fun pin() = state.optString("pin")
@@ -261,7 +265,7 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
         val receipt = receipt() ?: error("No pending import")
         val blob = receipt.getString("blob")
         require(SyncPolicy.validSecret(blob)) { "Invalid blob identifier in pending receipt" }
-        val target = File(store.directory, "$blob.download")
+        val target = downloadCacheFileForBlob(blob)
         check(target.length() == receipt.getLong("size") && fileHash(target) == blob) { "Cached encrypted package damaged; download selection must be retried" }
         val before = vault.files().map { it.id }.toSet()
         receipt.put("before", JSONArray(before.sorted())).put("phase", "started"); save()
@@ -296,7 +300,7 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
         known.put(id, JSONObject().put("id", id).put("local", localId).put("revision", receipt.getLong("revision"))
             .put("blob", blob).put("signature", file.signature))
         state.remove("receipt"); state.remove("error"); save()
-        File(store.directory, "$blob.download").delete()
+        downloadCacheFileForBlob(blob).delete()
     }
 }
 private fun SyncHttp.jsonBytesPut(hash: String, offset: Long, size: Long, bytes: ByteArray) =
