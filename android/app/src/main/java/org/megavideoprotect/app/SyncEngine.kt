@@ -259,8 +259,10 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
     suspend fun resumeImport() {
         unlocked(); currentCoroutineContext().ensureActive()
         val receipt = receipt() ?: error("No pending import")
-        val target = File(store.directory, "${receipt.getString("blob")}.download")
-        check(target.length() == receipt.getLong("size") && fileHash(target) == receipt.getString("blob")) { "Cached encrypted package damaged; download selection must be retried" }
+        val blob = receipt.getString("blob")
+        require(SyncPolicy.validSecret(blob)) { "Invalid blob identifier in pending receipt" }
+        val target = File(store.directory, "$blob.download")
+        check(target.length() == receipt.getLong("size") && fileHash(target) == blob) { "Cached encrypted package damaged; download selection must be retried" }
         val before = vault.files().map { it.id }.toSet()
         receipt.put("before", JSONArray(before.sorted())).put("phase", "started"); save()
         val importedCount = try { vault.import(target, state.getString("key")) }
@@ -284,15 +286,17 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
         check(receipt.optString("phase") == "imported") { "Retry import successfully before linking a local file" }
         val file = vault.files().single { it.id == localId }
         val id = receipt.getString("id")
+        val blob = receipt.getString("blob")
+        require(SyncPolicy.validSecret(blob)) { "Invalid blob identifier in pending receipt" }
         val old = known.optJSONObject(id)
         if (old != null && old.optLong("local", -1) != localId && old.has("signature")) {
             val retained = state.optJSONObject("retained") ?: JSONObject().also { state.put("retained", it) }
             retained.put(old.getLong("local").toString(), old.getString("signature"))
         }
         known.put(id, JSONObject().put("id", id).put("local", localId).put("revision", receipt.getLong("revision"))
-            .put("blob", receipt.getString("blob")).put("signature", file.signature))
+            .put("blob", blob).put("signature", file.signature))
         state.remove("receipt"); state.remove("error"); save()
-        File(store.directory, "${receipt.getString("blob")}.download").delete()
+        File(store.directory, "$blob.download").delete()
     }
 }
 private fun SyncHttp.jsonBytesPut(hash: String, offset: Long, size: Long, bytes: ByteArray) =
