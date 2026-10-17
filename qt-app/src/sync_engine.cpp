@@ -1,288 +1,1228 @@
 #include "videovault/app/sync_engine.hpp"
-#include "videovault/app/sync_protocol.hpp"
-#include "videovault/app/sync_state.hpp"
-#include "videovault/app/sync_package.hpp"
+
+#include "videovault/app/sync_client.hpp"
 #include "videovault/core/vault.hpp"
-#include <QtConcurrent/QtConcurrentRun>
-#include <QFutureWatcher>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QSslCertificate>
-#include <QSslError>
+
+#include <QCryptographicHash>
+#include <QDir>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
-#include <QDir>
-#include <QSaveFile>
-#include <QStandardPaths>
-#include <QLockFile>
-#include <QCryptographicHash>
+#include <QFutureWatcher>
 #include <QJsonDocument>
-#include <QThread>
-#include <QElapsedTimer>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QHash>
+#include <QSet>
+#include <QStandardPaths>
+#include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
+
+#include <algorithm>
+#include <atomic>
 #include <sodium.h>
-#include <stdexcept>
-#include <set>
-#include <map>
+
 namespace videovault::app {
-using namespace sync;
+
 namespace {
-std::filesystem::path fsPath(const QString& p) {
+
+using sync::Failure;
+using sync::RecordRef;
+
+constexpr qint64 kMaxPackage = 1024LL * 1024 * 1024;  // the server's per-package limit
+constexpr qint64 kChunk = 1024 * 1024;                 // the server's GET range limit
+constexpr char kOutgoing[] = "/outgoing";
+constexpr char kStaging[] = "/staging";
+
+[[noreturn]] void fail(const QString& message) { throw Failure(message); }
+
+std::filesystem::path fsPath(const QString& path) {
 #ifdef Q_OS_WIN
- return std::filesystem::path(p.toStdWString());
+    return std::filesystem::path(path.toStdWString());
 #else
- return std::filesystem::u8path(p.toUtf8().constData());
+    return std::filesystem::u8path(path.toUtf8().constData());
 #endif
 }
-QString qtPath(const std::filesystem::path& p) {
+
+QString qtPath(const std::filesystem::path& path) {
 #ifdef Q_OS_WIN
- return QString::fromStdWString(p.wstring());
+    return QString::fromStdWString(path.wstring());
 #else
- auto utf8=p.u8string(); return QString::fromUtf8(reinterpret_cast<const char*>(utf8.c_str()));
+    const auto utf8 = path.u8string();
+    return QString::fromUtf8(reinterpret_cast<const char*>(utf8.c_str()), int(utf8.size()));
 #endif
 }
-void error(const QString& s) { throw std::runtime_error(s.toUtf8().constData()); }
-template<class T> T required(core::Result<T> r) { if(!r) error(QString::fromUtf8(core::user_message(r.error().code).data(),int(core::user_message(r.error().code).size()))); return std::move(r.value()); }
-QJsonArray array(const QStringList& list) { QJsonArray a; for(const auto& x:list) a.append(x); return a; }
-QStringList strings(const QJsonArray& a) { QStringList s; for(const auto& v:a) s.append(v.toString()); return s; }
-struct Response { int code{}; QByteArray bytes; QList<QNetworkReply::RawHeaderPair> headers; QJsonObject json() const { QJsonParseError e; auto d=QJsonDocument::fromJson(bytes,&e); if(e.error!=QJsonParseError::NoError || !d.isObject()) error("Server returned invalid JSON."); return d.object(); } QByteArray header(const QByteArray& k) const { for(auto h:headers) if(h.first.toLower()==k.toLower()) return h.second; return {}; } };
+
+QString coreMessage(core::VaultErrorCode code) {
+    const std::string_view text = core::user_message(code);
+    return QString::fromUtf8(text.data(), int(text.size()));
 }
-QString SyncEngine::relativePath(const core::VideoInfo& v,const std::vector<core::FolderInfo>& folders) {
- QStringList parts{QString::fromStdString(v.display_name)}; auto id=v.folder_id; std::set<std::int64_t> visited;
- while(id) { if(!visited.insert(id).second) error("Local folder cycle; sync stopped."); bool found=false; for(const auto& f:folders) if(f.id==id) { parts.prepend(QString::fromStdString(f.name)); id=f.parent_id; found=true; break; } if(!found) error("Local folder is missing; sync stopped."); }
- return parts.join('/');
+
+bool ensureDirectory(const QString& path) {
+    if (!QDir().mkpath(path)) return false;
+    QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    return true;
 }
-QString SyncEngine::fingerprint(const core::VideoInfo& v,const std::vector<core::FolderInfo>& folders) {
- QJsonArray tags; for(const auto& t:v.tags) tags.append(QString::fromStdString(t));
- QJsonArray values{QString::fromLatin1(QByteArray(reinterpret_cast<const char*>(v.package_sha256.data()),32).toHex()),relativePath(v,folders),tags};
- return QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(values).toJson(QJsonDocument::Compact),QCryptographicHash::Sha256).toHex());
+
+QString packageHex(const core::VideoInfo& video) {
+    return QString::fromLatin1(
+        QByteArray(reinterpret_cast<const char*>(video.package_sha256.data()), 32).toHex());
 }
-class SyncSession {
-public:
- std::shared_ptr<QLockFile> lock;
- ~SyncSession() { if(!recovery.isEmpty()) { recovery.detach(); sodium_memzero(recovery.data(),recovery.size()*sizeof(QChar)); } }
- std::shared_ptr<core::Vault> vault; QString directory,recovery,status,infoTitle,infoBody; QJsonObject state; QJsonArray catalog; std::shared_ptr<std::atomic_bool> stop; bool failed=false,auth=false,library=false;
- void check() { if(stop->load() || !vault->is_unlocked()) error("Sync paused: unlock the local vault and enter its recovery key to resume."); }
- void save() { check(); saveState(directory+"/state.enc",recovery,state); }
- Response request(const QByteArray& method,const QString& path,const QByteArray& body={},const QList<QPair<QByteArray,QByteArray>>& headers={},bool authorized=true) {
-  check(); QUrl base(state["url"].toString()); if(!validServer(base)) error("Invalid server URL; use HTTPS (HTTP is permitted only for literal loopback).");
-  base.setPath(path.section('?',0,0)); base.setQuery(path.contains('?')?path.section('?',1):QString());
-  QNetworkAccessManager manager; QNetworkRequest req(base);
-  // Never follow redirects, particularly with a device bearer token.
-  req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
-  req.setRawHeader("Content-Type",method=="PUT"?"application/octet-stream":"application/json");
-  if(authorized) { auto token=state["token"].toString(); if(!isHex(token,64)) error("Pair this device first."); req.setRawHeader("Authorization","Bearer "+token.toLatin1()); }
-  for(auto h:headers) req.setRawHeader(h.first,h.second);
-  QNetworkReply* reply=nullptr;
-  // QNAM must know HEAD semantics: sendCustomRequest("HEAD") may wait for a
-  // Content-Length body that a valid HEAD response deliberately never sends.
-  if(method=="HEAD") reply=manager.head(req);
-  else if(method=="GET") reply=manager.get(req);
-  else if(method=="POST") reply=manager.post(req,body);
-  else if(method=="PUT") reply=manager.put(req,body);
-  else reply=manager.sendCustomRequest(req,method,body);
-  QEventLoop loop; QTimer deadline,cancel; deadline.setSingleShot(true); deadline.setInterval(20000); cancel.setInterval(100);
-  QByteArray received; bool tooLarge=false,pinMismatch=false,timedOut=false; const int limit=path.startsWith("/v2/blobs/")?2*1024*1024:16*1024*1024;
-  auto read=[&] { auto b=reply->readAll(); if(received.size()+b.size()>limit) { tooLarge=true; reply->abort(); } else received+=b; };
-  QObject::connect(reply,&QIODevice::readyRead,&loop,read);
-  const auto pin=state["pin"].toString();
-  auto matches=[&] { return !pin.isEmpty() && QString::fromLatin1(reply->sslConfiguration().peerCertificate().digest(QCryptographicHash::Sha256).toHex())==pin; };
-  QObject::connect(reply,&QNetworkReply::encrypted,&loop,[&] { if(!pin.isEmpty() && !matches()) { pinMismatch=true; reply->abort(); } });
-  QObject::connect(reply,QOverload<const QList<QSslError>&>::of(&QNetworkReply::sslErrors),&loop,[&](const QList<QSslError>&) {
-   if(matches()) reply->ignoreSslErrors();
-   else if(!pin.isEmpty()) { pinMismatch=true; reply->abort(); }
-  });
-  QObject::connect(&deadline,&QTimer::timeout,&loop,[&] { timedOut=true; reply->abort(); });
-  QObject::connect(&cancel,&QTimer::timeout,&loop,[&] { if(stop->load() || !vault->is_unlocked()) reply->abort(); });
-  QObject::connect(reply,&QNetworkReply::finished,&loop,&QEventLoop::quit);
-  deadline.start(); cancel.start(); loop.exec(); read(); check();
-  Response r; r.code=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(); r.bytes=received; r.headers=reply->rawHeaderPairs();
-  if(tooLarge) error("Server response exceeds the protocol limit.");
-  if(pinMismatch) error("TLS certificate pin mismatch. Verify server identity before re-pairing.");
-  if(timedOut) error("Server timed out; encrypted queue retained for retry.");
-  if(r.code==401) { auth=true; error("Device token revoked or expired. Re-pair this device; recovery key and pending work stay local."); }
-  if(r.code==409 || r.code==404) return r;
-  if(reply->error()!=QNetworkReply::NoError || r.code<200 || r.code>=300) error(QString("Sync request failed (HTTP %1). Check TLS, connectivity, server quota and Retry.").arg(r.code));
-  if(state["bandwidth"].toInt()>0 && path.startsWith("/v2/blobs/") && (method=="PUT" || method=="GET")) {
-   // Pace encrypted blob traffic only. Control and pairing remain responsive.
-   int ms=int((qint64(body.size()+r.bytes.size())*1000)/(state["bandwidth"].toInt()*1024LL));
-   while(ms>0) { check(); QThread::msleep(qMin(ms,100)); ms-=100; }
-  }
-  return r;
- }
- void pair(const QUrl& url,const QString& pin,const QString& name,const QString& code) {
-  if(!validServer(url) || (!pin.isEmpty() && (!isHex(pin,64) || url.scheme()!="https"))) error("Enter a valid HTTPS origin and optional 64 lowercase hex certificate SHA-256 pin.");
-  if(code.trimmed().isEmpty() || name.trimmed().isEmpty()) error("Enter a one-use pairing code and non-sensitive device label.");
-  if(!state["url"].toString().isEmpty() && QUrl(state["url"].toString())!=url) error("This vault is bound to another server. Do not switch a durable queue to another relay; use a separate vault/profile.");
-  state["url"]=url.toString(); state["pin"]=pin;
-  auto health=request("GET","/healthz",{},{},false).json(); if(health["protocol"].toInt()!=2 || !health["ok"].toBool()) error("This is not a sync v2 relay. Legacy vault-password cloud login is disabled.");
-  auto paired=request("POST","/v2/pair",QJsonDocument(QJsonObject{{"code",code},{"name",name}}).toJson(QJsonDocument::Compact),{},false).json();
-  if(!isHex(paired["device_id"].toString(),32) || !isHex(paired["token"].toString(),64)) error("Pairing response is invalid.");
-  state["device"]=paired["device_id"]; state["token"]=paired["token"]; state["device_name"]=name; save(); status="Device paired. Select local files and remote object IDs to sync.";
- }
- void manifest() {
-  auto doc=request("GET","/v2/objects").json(); if(!doc["objects"].isArray() || doc["objects"].toArray().size()>10000) error("Invalid or oversized remote manifest.");
-  catalog=doc["objects"].toArray(); std::set<QString> ids; auto high=state["highest"].toObject(); auto acknowledged=state["maps"].toObject();
-  for(auto v:catalog) { if(!v.isObject() || !validRecord(v.toObject())) error("Invalid remote object record."); auto r=v.toObject(); auto id=r["id"].toString(); if(!ids.insert(id).second) error("Duplicate remote object id."); if(!acceptRevision(r,high[id].toDouble(),acknowledged[id].toObject()["revision"].toDouble())) error("Remote revision rollback detected. Local copies and queue preserved."); high[id]=r["revision"]; }
-  for(auto it=acknowledged.begin();it!=acknowledged.end();++it) if(!ids.count(it.key())) error("An acknowledged object is missing from the relay. Possible rollback; local originals preserved.");
-  for(auto it=high.begin();it!=high.end();++it) if(!ids.count(it.key())) error("Previously observed remote object is missing. Possible rollback; local copies preserved.");
-  state["highest"]=high; save();
- }
- void stage() {
-  auto videos=required(vault->list_videos()); auto folders=required(vault->list_folders()); auto maps=state["maps"].toObject(); auto queue=state["queue"].toArray(); auto selected=strings(state["selected_local"].toArray()); auto suppressed=state["suppressed"].toObject();
-  for(const auto& v:videos) {
-   check(); auto local=QString::number(v.id); if(!selected.contains(local)) continue;
-   bool pending=false; for(auto p:queue) if(p.toObject()["local"].toString()==local) pending=true; if(pending) continue;
-   auto fp=SyncEngine::fingerprint(v,folders); if(suppressed[local].toString()==fp) continue;
-   QString id; QJsonObject mapping; for(auto it=maps.begin();it!=maps.end();++it) if(it.value().toObject()["local"].toString()==local) { id=it.key(); mapping=it.value().toObject(); break; }
-   if(mapping["fingerprint"].toString()==fp) continue;
-   if(id.isEmpty()) id=randomHex(); auto op=randomHex(); auto name=op+".mvpk"; auto partial=directory+"/"+name+".staging";
-   required(vault->export_package(fsPath(partial),recovery.toStdString(),{{v.id,SyncEngine::relativePath(v,folders).toStdString()}},{},false,[this](double){check();})); check();
-   // Verify local metadata did not change during export; next retry snapshots it again.
-   auto after=required(vault->list_videos()); bool same=false; auto afterFolders=required(vault->list_folders()); for(auto item:after) if(item.id==v.id) same=SyncEngine::fingerprint(item,afterFolders)==fp;
-   if(!same) { QFile::remove(partial); error("Local item changed while staging; retry to snapshot its current version."); }
-   QFile f(partial); if(!f.open(QIODevice::ReadOnly)) error("Cannot read staged encrypted package.");
-   QSaveFile durable(directory+"/"+name); durable.setDirectWriteFallback(false); if(!durable.open(QIODevice::WriteOnly)) error("Cannot persist encrypted queue package."); durable.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
-   while(!f.atEnd()) { check(); auto b=f.read(1024*1024); if(b.isEmpty() && f.error()!=QFile::NoError) error("Read failure staging queue"); if(durable.write(b)!=b.size()) error("Disk full staging encrypted queue"); }
-   if(!durable.commit()) error("Cannot durably commit encrypted package."); f.close(); QFile::remove(partial);
-   auto blob=fileHash(directory+"/"+name); auto size=QFileInfo(directory+"/"+name).size();
-   queue.append(QJsonObject{{"id",id},{"local",local},{"fingerprint",fp},{"base",mapping["revision"].toDouble()},{"operation",op},{"path",name},{"blob",blob},{"size",double(size)}});
-   state["queue"]=queue; save();
-  }
- }
- void upload(QJsonObject p) {
-  auto path=directory+"/"+p["path"].toString(); const auto blob=p["blob"].toString(); const auto size=qint64(p["size"].toDouble());
-  if(!isHex(blob,64) || QFileInfo(path).size()!=size || fileHash(path)!=blob) error("Queued encrypted package is missing or corrupt. Restore its backup; do not discard pending local edits.");
-  auto head=request("HEAD","/v2/blobs/"+blob); qint64 offset=0;
-  if(head.code!=404) { bool ok=false; offset=head.header("X-Upload-Offset").toLongLong(&ok); if(!ok || offset<0 || offset>size) error("Invalid server upload offset."); if(head.header("X-Blob-Complete")=="true" && offset!=size) error("Invalid completed blob size."); }
-  QFile f(path); if(!f.open(QIODevice::ReadOnly)) error("Cannot open queued encrypted package."); int mismatches=0;
-  while(offset<size) {
-   check(); if(!f.seek(offset)) error("Cannot seek queued package."); auto chunk=f.read(qMin<qint64>(1024*1024,size-offset)); if(chunk.isEmpty()) error("Encrypted queue read failed.");
-   auto r=request("PUT",QString("/v2/blobs/%1?offset=%2").arg(blob).arg(offset),chunk,{{"X-Blob-Size",QByteArray::number(size)}}); auto json=r.json();
-   bool ok=json["offset"].isDouble(); auto next=qint64(json["offset"].toDouble()); if(!ok || double(next)!=json["offset"].toDouble() || next<0 || next>size) error("Invalid upload acknowledgement.");
-   if(r.code==409) { if(++mismatches>3) error("Repeated upload offset conflict; retry later."); offset=next; continue; }
-   if(next!=offset+chunk.size() && !(next==size && json["complete"].toBool())) error("Upload acknowledgement skipped bytes."); offset=next;
-   if(offset==size && !json["complete"].toBool()) error("Server did not finalize encrypted blob.");
-  }
- }
- void publish() {
-  while(!state["queue"].toArray().isEmpty()) {
-   check(); auto queue=state["queue"].toArray(); auto p=queue.first().toObject(); upload(p);
-   QJsonObject payload{{"base_revision",p["base"]},{"blob",p["blob"]},{"size",p["size"]},{"deleted",false},{"operation_id",p["operation"]}};
-   auto r=request("POST","/v2/objects/"+p["id"].toString(),QJsonDocument(payload).toJson(QJsonDocument::Compact));
-   if(r.code==409) {
-    auto current=r.json()["current"].toObject(); if(!validRecord(current) || current["id"]!=p["id"]) error("Invalid conflict response; encrypted queue retained.");
-    // Archive original request verbatim; only its edited copy gets a new identity.
-    auto archive=state["conflicts"].toArray(); archive.append(p); state["conflicts"]=archive;
-    auto copy=conflictCopy(p,randomHex(),randomHex()); queue[0]=copy; state["queue"]=queue;
-    auto maps=state["maps"].toObject(); auto old=maps[p["id"].toString()].toObject(); old.remove("local"); maps[p["id"].toString()]=old; state["maps"]=maps;
-    save(); status="Conflict copy preserved and published separately; remote history and local originals kept."; continue;
-   }
-   auto committed=r.json(); if(!validRecord(committed) || committed["id"]!=p["id"] || committed["blob"]!=p["blob"] || committed["size"]!=p["size"] || committed["revision"].toDouble()!=p["base"].toDouble()+1) error("Invalid object commit acknowledgement; retry uses the same operation ID.");
-   auto maps=state["maps"].toObject(); maps[p["id"].toString()]=QJsonObject{{"local",p["local"]},{"fingerprint",p["fingerprint"]},{"revision",committed["revision"]},{"blob",p["blob"]}}; state["maps"]=maps;
-   queue.removeAt(0); state["queue"]=queue; save();
-   bool retained=false; for(auto c:state["conflicts"].toArray()) if(c.toObject()["path"]==p["path"]) retained=true;
-   if(!retained) QFile::remove(directory+"/"+p["path"].toString());
-  }
- }
- void download(const QJsonObject& r) {
-  auto id=r["id"].toString(); auto blob=r["blob"].toString(); auto size=qint64(r["size"].toDouble()); auto path=directory+"/download-"+blob+".mvpk";
-  QFile f(path); if(!f.open(QIODevice::ReadWrite)) error("Cannot open encrypted download staging file."); f.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
-  if(f.size()>size) { f.close(); error("Encrypted download cache size is invalid; preserve it for diagnosis or remove this blob manually before retry."); }
-  auto offset=f.size();
-  while(offset<size) {
-   check(); auto end=qMin<qint64>(offset+1024*1024-1,size-1);
-   auto reply=request("GET","/v2/blobs/"+blob,{},{{"Range",QString("bytes=%1-%2").arg(offset).arg(end).toLatin1()}});
-   if(reply.code!=206 || reply.header("Content-Range")!=QString("bytes %1-%2/%3").arg(offset).arg(end).arg(size).toLatin1() || reply.bytes.size()!=end-offset+1) error("Invalid ranged download response; encrypted partial retained.");
-   if(!f.seek(offset) || f.write(reply.bytes)!=reply.bytes.size() || !f.flush()) error("Cannot persist encrypted download; check free space."); offset=end+1;
-  }
-  f.close(); if(fileHash(path)!=blob) { QFile::remove(path); error("Downloaded encrypted blob hash mismatch; local originals unchanged. Retry downloads it again."); }
-  // Never advance revision until authentication/import and exact ID resolution succeed.
-  auto identity=inspectPackage(path,recovery); check();
-  auto before=required(vault->list_videos()); auto foldersBefore=required(vault->list_folders()); std::vector<std::int64_t> imported;
-  library=true;
-  required(vault->import_package(fsPath(path),recovery.toStdString(),0,[this](double){check();},[&](std::int64_t local,const std::string&,std::uint64_t,std::int64_t) { imported.push_back(local); })); check(); library=true;
-  auto after=required(vault->list_videos()); auto folders=required(vault->list_folders());
-  if(imported.empty()) {
-   // Core's content dedup may return zero without callbacks. Authenticate/hash the
-   // one-file MVPK, then compare actual local content in bounded memory; never infer
-   // identity from a name, size alone, or unrelated gallery differences.
-   for(const auto& v:after) {
-    if(v.original_size!=identity.size) continue;
-    QCryptographicHash hash(QCryptographicHash::Sha256); quint64 offset=0;
-    while(offset<v.original_size) { check(); auto bytes=required(vault->read_video_range(v.id,offset,std::size_t(qMin<quint64>(1024*1024,v.original_size-offset)))); if(bytes.empty()) error("Cannot resolve deduplicated local content."); hash.addData(reinterpret_cast<const char*>(bytes.data()),int(bytes.size())); offset+=bytes.size(); sodium_memzero(bytes.data(),bytes.size()); }
-    if(QString::fromLatin1(hash.result().toHex())==identity.plaintextHash) imported.push_back(v.id);
-   }
-   std::sort(imported.begin(),imported.end()); imported.erase(std::unique(imported.begin(),imported.end()),imported.end());
-  }
-  if(imported.size()!=1) error("Package imported/deduplicated but exact local ID cannot be resolved safely. Originals preserved; revision not acknowledged. Choose a known copy or recover from an independent vault.");
-  auto maps=state["maps"].toObject(); auto previous=maps[id].toObject(); auto suppressed=state["suppressed"].toObject();
-  if(!previous["local"].toString().isEmpty() && previous["local"].toString()!=QString::number(imported.front())) {
-   // Old content remains in the library and is not echoed as a new object.
-   for(auto v:before) if(QString::number(v.id)==previous["local"].toString()) suppressed[previous["local"].toString()]=SyncEngine::fingerprint(v,foldersBefore);
-  }
-  QString fp; for(auto v:after) if(v.id==imported.front()) fp=SyncEngine::fingerprint(v,folders); if(fp.isEmpty()) error("Imported local ID missing; revision not acknowledged.");
-  maps[id]=QJsonObject{{"local",QString::number(imported.front())},{"fingerprint",fp},{"revision",r["revision"]},{"blob",blob}}; state["maps"]=maps; state["suppressed"]=suppressed;
-  auto local=strings(state["selected_local"].toArray()); if(!local.contains(QString::number(imported.front()))) local.append(QString::number(imported.front())); state["selected_local"]=array(local); save(); QFile::remove(path);
- }
- void receive() {
-  auto selected=strings(state["selected_remote"].toArray()); auto maps=state["maps"].toObject();
-  // Choosing a local file selects its acknowledged object bidirectionally.
-  // Unknown remote IDs still require explicit selection: never download-all.
-  auto localSelected=strings(state["selected_local"].toArray());
-  for(auto it=maps.begin();it!=maps.end();++it) if(localSelected.contains(it.value().toObject()["local"].toString()) && !selected.contains(it.key())) selected.append(it.key());
-  for(auto v:catalog) { auto r=v.toObject(); auto id=r["id"].toString(); if(!selected.contains(id)) continue; auto previous=maps[id].toObject(); if(r["revision"].toDouble()<=previous["revision"].toDouble()) continue;
-   if(r["deleted"].toBool()) { auto notices=state["deletions"].toObject(); if(state["delete_ack"].toObject()[id].toDouble()<r["revision"].toDouble()) notices[id]=r["revision"]; state["deletions"]=notices; save(); continue; }
-   download(r); maps=state["maps"].toObject();
-  }
- }
- void run() {
-  check(); save(); stage(); publish(); manifest(); receive();
-  if(!state["queue"].toArray().isEmpty()) error("Pending encrypted uploads remain.");
-  if(!state["deletions"].toObject().isEmpty()) status="Remote deletion notice: local copies preserved. Acknowledge the notice explicitly (no local files will be removed).";
-  else if(!state["conflicts"].toArray().isEmpty()) status="Selected files synced; conflict copies and original queued bytes preserved. Tags are local-only.";
-  else status="Selected files synced. Names and folders included; tags are local-only.";
- }
+
+QStringList pathParts(const QString& path) {
+    QStringList parts;
+    for (const auto& part : path.split(QLatin1Char('/'))) {
+        if (!part.isEmpty()) parts.append(part);
+    }
+    return parts;
+}
+
+QString folderPathOf(const core::VideoInfo& video, const std::vector<core::FolderInfo>& folders) {
+    QStringList parts;
+    std::int64_t parent = video.folder_id;
+    QSet<std::int64_t> visited;
+    while (parent != 0) {
+        if (visited.contains(parent)) return {};  // a cycle: the caller reports it
+        visited.insert(parent);
+        bool found = false;
+        for (const auto& folder : folders) {
+            if (folder.id != parent) continue;
+            parts.prepend(QString::fromStdString(folder.name));
+            parent = folder.parent_id;
+            found = true;
+            break;
+        }
+        if (!found) return {};
+    }
+    return parts.join(QLatin1Char('/'));
+}
+
+QString sortedTags(const QStringList& tags) {
+    QStringList clean = tags;
+    clean.removeDuplicates();
+    std::sort(clean.begin(), clean.end(), [](const QString& left, const QString& right) {
+        return left.compare(right, Qt::CaseInsensitive) < 0;
+    });
+    return clean.join(QLatin1Char(','));
+}
+
+// What the dialog lists: every local item with its record state, and every
+// record that has no local copy yet (pending, or removed on another device).
+QJsonArray buildItems(const std::shared_ptr<core::Vault>& vault, const sync::SyncState& state) {
+    QJsonArray rows;
+    auto videos = vault->list_videos();
+    auto folders = vault->list_folders();
+    if (!videos || !folders) return rows;
+    QSet<qint64> seen;
+    for (const auto& video : videos.value()) {
+        const qint64 localId = video.id;
+        seen.insert(localId);
+        const RecordRef* live = state.liveRecordFor(localId);
+        QString recordId;
+        QString stateText = QStringLiteral("queued");
+        QString package;
+        int version = 0;
+        if (live != nullptr) {
+            recordId = live->id;
+            stateText = QStringLiteral("synced");
+            package = live->package;
+            version = live->version;
+        } else {
+            for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+                if (entry->localId != localId) continue;
+                recordId = entry->id;
+                stateText = QStringLiteral("removed");
+                package = entry->package;
+                version = entry->version;
+                break;
+            }
+        }
+        rows.append(QJsonObject{{QStringLiteral("record"), recordId},
+                                {QStringLiteral("local"), double(localId)},
+                                {QStringLiteral("name"), QString::fromStdString(video.display_name)},
+                                {QStringLiteral("path"), folderPathOf(video, folders.value())},
+                                {QStringLiteral("state"), stateText},
+                                {QStringLiteral("package"), package},
+                                {QStringLiteral("size"), double(video.package_size)},
+                                {QStringLiteral("version"), version}});
+    }
+    for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+        if (entry->localId != 0 && seen.contains(entry->localId)) continue;
+        const QString stateText = entry->deleted ? QStringLiteral("removed") : QStringLiteral("pending");
+        rows.append(QJsonObject{{QStringLiteral("record"), entry->id},
+                                {QStringLiteral("local"), 0.0},
+                                {QStringLiteral("name"), entry->name},
+                                {QStringLiteral("path"), entry->path},
+                                {QStringLiteral("state"), stateText},
+                                {QStringLiteral("package"), entry->package},
+                                {QStringLiteral("size"), double(entry->size)},
+                                {QStringLiteral("version"), entry->version}});
+    }
+    return rows;
+}
+
+struct TransferRow {
+    QString name;
+    QString direction;
+    QString state;
+    qint64 done{0};
+    qint64 total{0};
 };
-SyncEngine::SyncEngine(std::shared_ptr<core::Vault> vault,const QString& directory,QObject* parent):QObject(parent),vault_(std::move(vault)),stop_(std::make_shared<std::atomic_bool>(false)) {
- auto canonical=QFileInfo(qtPath(vault_->root_path())).canonicalFilePath(); if(canonical.isEmpty()) canonical=qtPath(vault_->root_path());
- directory_=directory.isEmpty()?QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/sync-v2/"+QString::fromLatin1(QCryptographicHash::hash(canonical.toUtf8(),QCryptographicHash::Sha256).toHex()):directory;
- if(!QDir().mkpath(directory_)) { status_="Cannot create private sync state directory."; failed_=true; }
- QFile::setPermissions(directory_,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
- lock_=std::make_shared<QLockFile>(directory_+"/session.lock"); lock_->setStaleLockTime(0); if(!lock_->tryLock(0)) { status_="Another process owns this vault's sync state. Close it before syncing."; failed_=true; }
- timer_.setSingleShot(true); connect(&timer_,&QTimer::timeout,this,&SyncEngine::syncNow);
+
+}  // namespace
+
+// Everything one operation needs, built from an immutable snapshot so the
+// worker never touches the engine object. The vault and the client live and die
+// inside the worker thread. It is at namespace scope because the engine holds it
+// in a shared_ptr<Job> that the UI thread reads while the worker runs.
+class Job {
+public:
+    Job(std::shared_ptr<core::Vault> vault, sync::Keys keys, QString directory, sync::SyncState state,
+        int pageLimit)
+        : vault_(std::move(vault)), keys_(std::move(keys)), directory_(std::move(directory)),
+          state(std::move(state)), pageLimit_(pageLimit) {}
+
+    ~Job() { keys_.wipe(); }
+
+    Job(const Job&) = delete;
+    Job& operator=(const Job&) = delete;
+
+    void stop() { stopped_.store(true); }
+
+    sync::SyncState state;
+    QJsonArray items;
+    QJsonArray vaults;
+    QJsonObject stats;
+    QString status;
+    bool failed{false};
+    bool libraryChanged{false};
+
+    QJsonArray transfersSnapshot() const {
+        QMutexLocker lock(&transfersMutex_);
+        QJsonArray rows;
+        for (const auto& row : transfers_) {
+            rows.append(QJsonObject{{QStringLiteral("name"), row.name},
+                                    {QStringLiteral("direction"), row.direction},
+                                    {QStringLiteral("state"), row.state},
+                                    {QStringLiteral("done"), double(row.done)},
+                                    {QStringLiteral("total"), double(row.total)}});
+        }
+        return rows;
+    }
+
+    // -- operations --------------------------------------------------------
+
+    void signIn(sync::Client& client, const QString& email, const QString& password,
+                const QString& label) {
+        bump("signedin");
+        // The address and the email are kept even when the attempt fails, so a
+        // typo in the password does not clear a working server URL. A token
+        // from another server is never offered to this one.
+        if (state.server != client.server()) state.clearToken();
+        state.server = client.server();
+        state.email = email;
+        client.protocol();
+        client.login(email, password);
+        const QJsonObject issued = client.issueToken(label);
+        const QString token = client.token();
+        if (token.isEmpty()) fail(QStringLiteral("The server did not return a device token."));
+        state.clearToken();
+        state.token = token;
+        state.tokenId = issued.value(QStringLiteral("id")).toString();
+        save();
+        listVaults(client);
+        status = QStringLiteral("Signed in as %1.").arg(email);
+    }
+
+    void listVaults(sync::Client& client) {
+        const QJsonObject body = client.vaults();
+        if (!body.value(QStringLiteral("vaults")).isArray()) {
+            fail(QStringLiteral("The server returned an invalid vault list."));
+        }
+        vaults = body.value(QStringLiteral("vaults")).toArray();
+        bump("vaults");
+        if (status.isEmpty()) {
+            status = vaults.isEmpty() ? QStringLiteral("This account has no vault yet. Create one on the website.")
+                                      : QStringLiteral("%1 vault(s) on this account.").arg(vaults.size());
+        }
+    }
+
+    void syncPass(sync::Client& client) {
+        client.protocol();
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        if (state.folder.isEmpty()) fail(QStringLiteral("Choose the local folder to sync first."));
+
+        publishLocal(client);
+        pull(client);
+        receiveQueued(client);
+        tombstoneMissing(client);
+        items = buildItems(vault_, state);
+        status = summary();
+    }
+
+    void receiveOne(sync::Client& client, const QString& recordId) {
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        auto it = state.records.find(recordId);
+        if (it == state.records.end()) fail(QStringLiteral("That item is not known to this device yet; sync first."));
+        downloadRecord(client, recordId);
+        items = buildItems(vault_, state);
+        status = summary();
+    }
+
+    void tombstoneOne(sync::Client& client, const QString& recordId) {
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        const RecordRef answer = client.tombstone(state.vaultId, recordId);
+        auto it = state.records.find(recordId);
+        if (it != state.records.end()) {
+            it->deleted = true;
+            if (answer.version > 0) it->version = answer.version;
+            if (answer.updated > 0) it->updated = answer.updated;
+        }
+        state.pendingDownload.removeAll(recordId);
+        bump("tombstoned");
+        save();
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Removed on every device. It stays in Removed items until it is deleted permanently.");
+    }
+
+    void restoreOne(sync::Client& client, const QString& recordId) {
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        const RecordRef answer = client.restore(state.vaultId, recordId);
+        auto it = state.records.find(recordId);
+        if (it == state.records.end()) {
+            state.records.insert(answer.id, answer);
+        } else {
+            it->deleted = false;
+            if (answer.version > 0) it->version = answer.version;
+            if (answer.updated > 0) it->updated = answer.updated;
+            if (it->localId == 0 && !it->package.isEmpty()) queueDownload(it->id);
+        }
+        bump("restored");
+        save();
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Restored. It will appear on the other devices on their next sync.");
+    }
+
+    void purgeOne(sync::Client& client, const QString& recordId) {
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        const auto it = state.records.find(recordId);
+        const qint64 localId = it == state.records.end() ? 0 : it->localId;
+        client.purge(state.vaultId, recordId);
+        state.records.remove(recordId);
+        state.pendingDownload.removeAll(recordId);
+        // The local copy goes only when no other record still claims it, so
+        // "delete permanently" can never take an item that is still shared.
+        if (localId != 0 && state.liveRecordFor(localId) == nullptr && !claimedByOther(localId)) {
+            if (vault_->remove_video(localId).has_value()) libraryChanged = true;
+        }
+        bump("purged");
+        save();
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Deleted permanently, on the server and on this device.");
+    }
+
+private:
+    // -- state helpers -----------------------------------------------------
+
+    void bump(const char* counter) {
+        const QString name = QString::fromLatin1(counter);
+        stats.insert(name, stats.value(name).toInt() + 1);
+    }
+
+    void checkStop() const {
+        if (stopped_.load()) throw sync::Cancelled{};
+    }
+
+    void save() const { sync::saveState(directory_ + QStringLiteral("/state.enc"), keys_.state, state); }
+
+    QString outgoing() const { return directory_ + QString::fromLatin1(kOutgoing); }
+    QString staging() const { return directory_ + QString::fromLatin1(kStaging); }
+
+    bool claimedByOther(qint64 localId) const {
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->localId == localId) return true;
+        }
+        return false;
+    }
+
+    void queueDownload(const QString& recordId) {
+        if (!state.pendingDownload.contains(recordId)) state.pendingDownload.append(recordId);
+    }
+
+    void dropPending(const QString& recordId) { state.pendingDownload.removeAll(recordId); }
+
+    // Content addressing is what binds a record to a local item: the package
+    // hash identifies the item even when the import deduplicated it.
+    // The local item's own package hash, read fresh from the library.
+    QString localPackageOf(qint64 localId) const {
+        auto videos = vault_->list_videos();
+        if (!videos) return {};
+        for (const auto& video : videos.value()) {
+            if (video.id == localId) return packageHex(video);
+        }
+        return {};
+    }
+
+    // A record whose package this device already holds through another record:
+    // that is how a conflict copy binds without downloading the same bytes
+    // again, because content addressing makes the package shared.
+    qint64 localIdForServerPackage(const QString& package) const {
+        if (package.isEmpty()) return 0;
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->package == package && entry->localId != 0 && itemExists(entry->localId)) {
+                return entry->localId;
+            }
+        }
+        return 0;
+    }
+
+    qint64 localIdByName(const QString& name) const {
+        auto videos = vault_->list_videos();
+        if (!videos) return 0;
+        qint64 found = 0;
+        for (const auto& video : videos.value()) {
+            if (QString::fromStdString(video.display_name) != name) continue;
+            if (found != 0) return 0;  // two items share the name: do not guess
+            found = video.id;
+        }
+        return found;
+    }
+
+    bool itemExists(qint64 localId) const {
+        auto videos = vault_->list_videos();
+        if (!videos) return false;
+        for (const auto& video : videos.value()) {
+            if (video.id == localId) return true;
+        }
+        return false;
+    }
+
+    // -- reading the local library ----------------------------------------
+
+    QStringList tagsOf(qint64 localId) const {
+        QStringList tags;
+        auto list = vault_->tags_for_video(localId);
+        if (!list) return tags;
+        for (const auto& tag : list.value()) tags.append(QString::fromStdString(tag.name));
+        return tags;
+    }
+
+    std::int64_t folderFor(const QString& path) {
+        std::int64_t parent = 0;
+        for (const auto& part : pathParts(path)) {
+            auto folders = vault_->list_folders();
+            if (!folders) fail(QStringLiteral("Cannot read the local folders."));
+            std::int64_t found = 0;
+            for (const auto& folder : folders.value()) {
+                if (folder.parent_id == parent && QString::fromStdString(folder.name) == part) {
+                    found = folder.id;
+                    break;
+                }
+            }
+            if (found == 0) {
+                auto created = vault_->create_folder(parent, part.toStdString());
+                if (!created) {
+                    fail(QStringLiteral("Cannot create the folder \"%1\": %2")
+                             .arg(part, coreMessage(created.error().code)));
+                }
+                found = created.value();
+            }
+            parent = found;
+        }
+        return parent;
+    }
+
+    // -- upload --------------------------------------------------------
+
+    QString exportItem(const core::VideoInfo& video, const QString& relative) {
+        if (!ensureDirectory(outgoing())) fail(QStringLiteral("Cannot create the sync directory."));
+        const QString temporary =
+            outgoing() + QStringLiteral("/export-") + sync::randomHex(8) + QStringLiteral(".mvpk");
+        auto exported = vault_->export_package(fsPath(temporary), keys_.package.toStdString(),
+                                               {{video.id, relative.toStdString()}}, {}, false);
+        if (!exported) {
+            QFile::remove(temporary);
+            fail(QStringLiteral("Cannot export \"%1\": %2")
+                     .arg(QString::fromStdString(video.display_name), coreMessage(exported.error().code)));
+        }
+        checkStop();
+        const QString package = sync::fileSha256(temporary);
+        const QString stored = outgoing() + QLatin1Char('/') + package + QStringLiteral(".mvpk");
+        QFile::remove(stored);
+        if (!QFile::rename(temporary, stored)) {
+            QFile::remove(temporary);
+            fail(QStringLiteral("Cannot keep the exported package in the sync directory."));
+        }
+        return package;
+    }
+
+    void publishLocal(sync::Client& client) {
+        auto videos = vault_->list_videos();
+        if (!videos) fail(QStringLiteral("Cannot read the local library."));
+        auto folders = vault_->list_folders();
+        if (!folders) fail(QStringLiteral("Cannot read the local folders."));
+
+        for (const auto& video : videos.value()) {
+            checkStop();
+            const qint64 localId = video.id;
+            const QString name = QString::fromStdString(video.display_name);
+            const QString path = folderPathOf(video, folders.value());
+            const QString package = packageHex(video);
+            const QStringList tags = tagsOf(localId);
+            const QVector<const RecordRef*> claims = liveClaims(localId);
+            if (!claims.isEmpty()) {
+                bool matched = false;
+                for (const auto* claim : claims) {
+                    if (claim->localPackage == package && claim->name == name && claim->path == path
+                        && sortedTags(claim->tags) == sortedTags(tags)) {
+                        matched = true;
+                    }
+                }
+                if (matched) {
+                    bump("unchanged");
+                    items = buildItems(vault_, state);  // keep the panel honest while it walks
+                    continue;
+                }
+                if (claims.size() > 1) {
+                    // A conflict copy already carries this content: republishing
+                    // would mint another copy on every pass.
+                    bump("conflict held");
+                    continue;
+                }
+                publish(client, video, name, path, tags, *claims.first());
+            } else if (hasClaim(localId)) {
+                // Only a tombstone claims it: the user has to restore it, so a
+                // pass never resurrects something another device removed.
+                bump("removed");
+                continue;
+            } else {
+                publish(client, video, name, path, tags, RecordRef{});
+            }
+            items = buildItems(vault_, state);
+        }
+        if (!videos.value().empty()) save();
+    }
+
+    QVector<const RecordRef*> liveClaims(qint64 localId) const {
+        QVector<const RecordRef*> claims;
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->localId == localId && !entry->deleted) claims.append(&entry.value());
+        }
+        return claims;
+    }
+
+    bool hasClaim(qint64 localId) const {
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->localId == localId) return true;
+        }
+        return false;
+    }
+
+    // Exports, uploads the blob, then writes the record. A stale base_version
+    // becomes a conflict copy: the local version is re-issued under a new
+    // record id, so neither side is overwritten and nothing is lost.
+    void publish(sync::Client& client, const core::VideoInfo& video, const QString& name,
+                 const QString& path, const QStringList& tags, const RecordRef& existing) {
+        const bool update = !existing.id.isEmpty();
+        const QString localPackage = packageHex(video);
+        // A rename, a move or a tag change does not touch the bytes: the record
+        // keeps pointing at the package the server already has (exporting again
+        // would mint a second copy of the same content, because a package is
+        // sealed with a fresh nonce every time).
+        const bool bytesSame = update && !existing.package.isEmpty() && existing.localPackage == localPackage;
+        const QString relative = path.isEmpty() ? name : path + QLatin1Char('/') + name;
+        const int index = beginTransfer(name, QStringLiteral("Upload"), 0);
+        QString source;
+        QString remotePackage = existing.package;
+        qint64 remoteSize = existing.size;
+        try {
+            if (!bytesSame) {
+                const QString package = exportItem(video, relative);
+                source = outgoing() + QLatin1Char('/') + package + QStringLiteral(".mvpk");
+                const qint64 size = QFileInfo(source).size();
+                updateTransfer(index, 0, size);
+
+                // Blob first: a record never points at a package the server
+                // does not have, so a reader never sees a dangling row.
+                client.putBlob(state.vaultId, package, source,
+                               [&](qint64 done, qint64 total) {
+                                   updateTransfer(index, done, total);
+                                   return !stopped_.load();
+                               });
+                remotePackage = package;
+                remoteSize = size;
+            }
+
+            RecordRef record;
+            record.id = update ? existing.id : sync::newRecordId();
+            record.name = name;
+            record.path = path;
+            record.tags = tags;
+            record.package = remotePackage;
+            record.size = remoteSize;
+            record.localId = video.id;
+            const int base = update ? existing.version : 0;
+            writeRecord(client, record, base, video.id, localPackage, index);
+            if (!source.isEmpty()) QFile::remove(source);
+        } catch (const sync::Cancelled&) {
+            if (!source.isEmpty()) QFile::remove(source);
+            endTransfer(index, QStringLiteral("stopped"));
+            throw;
+        } catch (...) {
+            if (!source.isEmpty()) QFile::remove(source);
+            endTransfer(index, QStringLiteral("failed"));
+            throw;
+        }
+    }
+
+    void writeRecord(sync::Client& client, RecordRef record, int base, qint64 localId,
+                     const QString& localPackage, int index) {
+        const QString operation = sync::operationId(record.id, base, record.package, record.name,
+                                                    record.path, record.tags);
+        try {
+            RecordRef stored = client.write(state.vaultId, record, base, operation);
+            stored.localId = localId;
+            stored.localPackage = localPackage;
+            state.records.insert(stored.id, stored);
+            bump(base == 0 ? "uploaded" : "updated");
+            endTransfer(index, QStringLiteral("done"));
+            save();
+            return;
+        } catch (const sync::Conflict& conflict) {
+            if (base == 0) {
+                // A brand new id colliding is not a version race; retry once
+                // with a fresh id rather than giving up on the item.
+                record.id = sync::newRecordId();
+                const QString retry = sync::operationId(record.id, 0, record.package, record.name,
+                                                        record.path, record.tags);
+                RecordRef stored = client.write(state.vaultId, record, 0, retry);
+                stored.localId = localId;
+                stored.localPackage = localPackage;
+                state.records.insert(stored.id, stored);
+                bump("uploaded");
+                endTransfer(index, QStringLiteral("done"));
+                save();
+                return;
+            }
+            // MEGA's answer: keep both. The local version goes up under a new
+            // record id with the suffix, and the server's row is left alone.
+            record.id = sync::newRecordId();
+            record.name = sync::conflictCopyName(record.name);
+            record.localId = localId;
+            const QString copyOperation = sync::operationId(record.id, 0, record.package, record.name,
+                                                            record.path, record.tags);
+            RecordRef stored = client.write(state.vaultId, record, 0, copyOperation);
+            stored.localId = localId;
+            stored.localPackage = localPackage;
+            state.records.insert(stored.id, stored);
+            if (conflict.present) {
+                auto current = state.records.find(conflict.current.id);
+                if (current == state.records.end()) {
+                    RecordRef kept = conflict.current;
+                    kept.localId = kept.package == record.package ? localId : 0;
+                    state.records.insert(kept.id, kept);
+                } else {
+                    current->version = conflict.current.version;
+                    current->name = conflict.current.name;
+                    current->updated = conflict.current.updated;
+                }
+            }
+            bump("conflicts");
+            endTransfer(index, QStringLiteral("conflict copy"));
+            save();
+            const QString serverName = conflict.present ? conflict.current.name : record.name;
+            status = QStringLiteral("The server already had a newer version of \"%1\". Both were kept: "
+                                    "this device's copy is \"%2\".")
+                         .arg(serverName, stored.name);
+        }
+    }
+
+    // -- pull ----------------------------------------------------------
+
+    void pull(sync::Client& client) {
+        const int limit = qBound(1, pageLimit_, 1000);
+        int pages = 0;
+        for (;;) {
+            checkStop();
+            const qint64 before = state.cursor;
+            const sync::Client::Page page = client.records(state.vaultId, state.cursor, limit);
+            bump("pages");
+            for (const auto& record : page.records) {
+                checkStop();
+                apply(record);
+            }
+            if (page.cursor > state.cursor) state.cursor = page.cursor;
+            save();
+            if (page.records.size() < limit) break;
+            if (state.cursor <= before) break;
+            if (++pages > 100000) fail(QStringLiteral("The server kept returning pages of records."));
+        }
+        stats.insert(QStringLiteral("records"), double(state.records.size()));
+    }
+
+    void apply(const RecordRef& incoming) {
+        RecordRef record = incoming;
+        const auto existing = state.records.constFind(record.id);
+        bool contentChanged = false;
+        if (existing != state.records.constEnd()) {
+            record.localId = existing->localId;
+            record.localPackage = existing->localPackage;
+            if (existing->version == record.version && existing->deleted == record.deleted
+                && existing->package == record.package && existing->name == record.name
+                && existing->path == record.path && sortedTags(existing->tags) == sortedTags(record.tags)) {
+                bump("unchanged_record");  // already present and matching: untouched
+                return;
+            }
+            // The same record with a different package means the content was
+            // edited on another device: the local bytes are stale.
+            contentChanged = !existing->package.isEmpty() && existing->package != record.package;
+            if (record.localId != 0 && !itemExists(record.localId)) record.localId = 0;
+        }
+        state.records.insert(record.id, record);
+        bump("changed_record");
+
+        if (record.deleted) {
+            dropPending(record.id);
+            return;
+        }
+        if (record.package.isEmpty()) return;
+        if (contentChanged || record.localId == 0 || !itemExists(record.localId)) {
+            queueDownload(record.id);
+            return;
+        }
+        dropPending(record.id);
+        record.localPackage = localPackageOf(record.localId);
+        state.records.insert(record.id, record);
+        reconcileLocal(record);
+    }
+
+    // The record is a label for a local item: a rename, a move or a tag change
+    // on another device lands here. When two records claim the same item (a
+    // conflict copy) nothing is forced, so neither side's name is lost.
+    void reconcileLocal(const RecordRef& record) {
+        int claims = 0;
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->localId == record.localId && !entry->deleted) ++claims;
+        }
+        if (claims > 1) return;
+
+        auto videos = vault_->list_videos();
+        auto folders = vault_->list_folders();
+        if (!videos || !folders) return;
+        const core::VideoInfo* found = nullptr;
+        for (const auto& video : videos.value()) {
+            if (video.id == record.localId) { found = &video; break; }
+        }
+        if (found == nullptr) return;
+        if (QString::fromStdString(found->display_name) != record.name) {
+            vault_->rename_video(record.localId, record.name.toStdString());
+            libraryChanged = true;
+        }
+        const QString path = folderPathOf(*found, folders.value());
+        if (path != record.path) {
+            const std::int64_t folder = folderFor(record.path);
+            if (vault_->move_video(record.localId, folder).has_value()) libraryChanged = true;
+        }
+        // Tags travel with the record, so a tag added on another device lands.
+        const QStringList local = tagsOf(record.localId);
+        auto localTags = vault_->tags_for_video(record.localId);
+        if (localTags) {
+            for (const auto& tag : localTags.value()) {
+                const QString name = QString::fromStdString(tag.name);
+                bool keep = false;
+                for (const auto& wanted : record.tags) {
+                    if (wanted.compare(name, Qt::CaseInsensitive) == 0) keep = true;
+                }
+                if (!keep) vault_->remove_tag(record.localId, tag.id);
+            }
+        }
+        for (const auto& tag : record.tags) {
+            bool present = false;
+            for (const auto& have : local) {
+                if (have.compare(tag, Qt::CaseInsensitive) == 0) present = true;
+            }
+            if (!present) vault_->add_tag(record.localId, tag.toStdString());
+        }
+    }
+
+    // -- download ------------------------------------------------------
+
+    void receiveQueued(sync::Client& client) {
+        const QStringList queued = state.pendingDownload;
+        for (const auto& id : queued) {
+            checkStop();
+            downloadRecord(client, id);
+            items = buildItems(vault_, state);
+        }
+    }
+
+    void downloadRecord(sync::Client& client, const QString& recordId) {
+        auto it = state.records.find(recordId);
+        if (it == state.records.end()) {
+            dropPending(recordId);
+            return;
+        }
+        if (it->deleted) {
+            dropPending(recordId);
+            return;
+        }
+        if (it->package.isEmpty()) {
+            dropPending(recordId);
+            return;
+        }
+        if (it->localId != 0 && itemExists(it->localId)) {
+            dropPending(recordId);
+            return;
+        }
+        const RecordRef record = it.value();
+        const qint64 previousLocal = record.localId;
+        if (!sync::isPackage(record.package)) fail(QStringLiteral("A record carries an invalid package address."));
+
+        const int index = beginTransfer(record.name, QStringLiteral("Download"), record.size);
+        try {
+            const sync::Client::BlobState head = client.head(state.vaultId, record.package);
+            if (!head.exists) {
+                // The record was published before its bytes: wait, do not fail.
+                bump("waiting");
+                endTransfer(index, QStringLiteral("waiting for the other device"));
+                return;
+            }
+            if (!head.complete) {
+                bump("waiting");
+                endTransfer(index, QStringLiteral("waiting for the other device"));
+                return;
+            }
+            if (head.size <= 0 || head.size > kMaxPackage) fail(QStringLiteral("The server reported an invalid package size."));
+            if (!ensureDirectory(staging())) fail(QStringLiteral("Cannot create the sync directory."));
+
+            const QString partial = staging() + QLatin1Char('/') + record.package + QStringLiteral(".part");
+            QFile file(partial);
+            if (!file.open(QIODevice::ReadWrite)) fail(QStringLiteral("Cannot open the download staging file."));
+            qint64 offset = file.size();
+            if (offset > head.size) {
+                file.resize(0);
+                offset = 0;
+            }
+            if (offset > 0) bump("resumed");
+            updateTransfer(index, offset, head.size);
+            while (offset < head.size) {
+                checkStop();
+                const qint64 last = qMin<qint64>(offset + kChunk, head.size - 1);
+                const QByteArray chunk = client.getRange(state.vaultId, record.package, offset, last, head.size);
+                if (!file.seek(offset) || file.write(chunk) != chunk.size() || !file.flush()) {
+                    fail(QStringLiteral("Cannot write the downloaded package; check free space."));
+                }
+                offset += chunk.size();
+                updateTransfer(index, offset, head.size);
+            }
+            file.close();
+            // Verify before the core is allowed to import a single byte.
+            if (sync::fileSha256(partial) != record.package) {
+                QFile::remove(partial);
+                fail(QStringLiteral("A downloaded package does not match its address; it was discarded and will be fetched again."));
+            }
+            importPackage(partial, record, previousLocal);
+            QFile::remove(partial);
+            bump("downloaded");
+            endTransfer(index, QStringLiteral("done"));
+        } catch (const sync::Cancelled&) {
+            endTransfer(index, QStringLiteral("stopped"));  // the partial stays for the next pass
+            throw;
+        } catch (...) {
+            endTransfer(index, QStringLiteral("failed"));
+            throw;
+        }
+    }
+
+    // Imports the verified package and binds the record to the item it landed
+    // in. Importing re-seals the content, so the item's own package hash is not
+    // the server's: the ids the core reports are what identify it, with a name
+    // and shared-package fallback for content the vault already had.
+    void importPackage(const QString& packagePath, const RecordRef& record, qint64 previousLocal) {
+        std::vector<std::int64_t> stored;
+        auto imported = vault_->import_package(
+            fsPath(packagePath), keys_.package.toStdString(), 0, {},
+            [&stored](std::int64_t id, const std::string&, std::uint64_t, std::int64_t) {
+                stored.push_back(id);
+            });
+        if (!imported) {
+            fail(QStringLiteral("Cannot import a package: %1").arg(coreMessage(imported.error().code)));
+        }
+        libraryChanged = true;
+        qint64 localId = stored.empty() ? 0 : stored.front();
+        if (localId == 0) localId = localIdForServerPackage(record.package);
+        if (localId == 0) localId = localIdByName(record.name);
+        if (localId == 0) fail(QStringLiteral("The imported package did not appear in the library."));
+        auto it = state.records.find(record.id);
+        if (it == state.records.end()) {
+            RecordRef bound = record;
+            bound.localId = localId;
+            bound.localPackage = localPackageOf(localId);
+            state.records.insert(bound.id, bound);
+        } else {
+            it->localId = localId;
+            it->localPackage = localPackageOf(localId);
+        }
+        bump("imported");
+        dropPending(record.id);
+        // A record that arrived with new content replaces the item it used to
+        // map to, but only when nothing else still claims that item.
+        if (previousLocal != 0 && previousLocal != localId && !claimedByOther(previousLocal)
+            && state.liveRecordFor(previousLocal) == nullptr) {
+            if (vault_->remove_video(previousLocal).has_value()) libraryChanged = true;
+        }
+        const RecordRef bound = state.records.value(record.id);
+        reconcileLocal(bound);
+        save();
+    }
+
+    // -- deletes -------------------------------------------------------
+
+    void tombstoneMissing(sync::Client& client) {
+        auto videos = vault_->list_videos();
+        if (!videos) return;
+        QSet<qint64> present;
+        for (const auto& video : videos.value()) present.insert(video.id);
+        QStringList gone;
+        for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
+            if (entry->deleted || entry->localId == 0) continue;
+            if (present.contains(entry->localId)) continue;
+            gone.append(entry->id);
+        }
+        for (const auto& id : gone) {
+            checkStop();
+            const RecordRef answer = client.tombstone(state.vaultId, id);
+            auto entry = state.records.find(id);
+            if (entry == state.records.end()) continue;
+            entry->deleted = true;
+            if (answer.version > 0) entry->version = answer.version;
+            bump("tombstoned");
+            save();
+        }
+    }
+
+    // -- panel --------------------------------------------------------
+
+    int beginTransfer(const QString& name, const QString& direction, qint64 total) {
+        QMutexLocker lock(&transfersMutex_);
+        transfers_.append(TransferRow{name, direction, QStringLiteral("queued"), 0, total});
+        return transfers_.size() - 1;
+    }
+
+    void updateTransfer(int index, qint64 done, qint64 total) {
+        QMutexLocker lock(&transfersMutex_);
+        if (index < 0 || index >= transfers_.size()) return;
+        transfers_[index].done = done;
+        if (total > 0) transfers_[index].total = total;
+        transfers_[index].state = QStringLiteral("transferring");
+    }
+
+    void endTransfer(int index, const QString& state) {
+        QMutexLocker lock(&transfersMutex_);
+        if (index < 0 || index >= transfers_.size()) return;
+        transfers_[index].state = state;
+        if (state == QStringLiteral("done")) transfers_[index].done = transfers_[index].total;
+    }
+
+    QString summary() const {
+        const int uploaded = stats.value(QStringLiteral("uploaded")).toInt()
+            + stats.value(QStringLiteral("updated")).toInt();
+        const int imported = stats.value(QStringLiteral("imported")).toInt();
+        const int waiting = stats.value(QStringLiteral("waiting")).toInt();
+        const int conflicts = stats.value(QStringLiteral("conflicts")).toInt();
+        const int removed = stats.value(QStringLiteral("tombstoned")).toInt();
+        const int unchanged = stats.value(QStringLiteral("unchanged")).toInt();
+        if (uploaded + imported + waiting + conflicts + removed == 0) {
+            return QStringLiteral("Up to date: %1 item(s) already matched.").arg(unchanged);
+        }
+        QString text = QStringLiteral("Synced: %1 published, %2 received, %3 waiting for the other device.")
+                           .arg(uploaded).arg(imported).arg(waiting);
+        if (conflicts > 0) text += QStringLiteral(" %1 conflict copy(ies) kept both versions.").arg(conflicts);
+        if (removed > 0) text += QStringLiteral(" %1 item(s) removed on another device.").arg(removed);
+        return text;
+    }
+
+    std::shared_ptr<core::Vault> vault_;
+    sync::Keys keys_;
+    QString directory_;
+    int pageLimit_;
+    std::atomic_bool stopped_{false};
+    mutable QMutex transfersMutex_;
+    QVector<TransferRow> transfers_;
+};
+
+SyncEngine::SyncEngine(std::shared_ptr<core::Vault> vault, sync::Keys keys, const QString& privateDirectory,
+                       QObject* parent)
+    : QObject(parent), vault_(std::move(vault)), keys_(std::move(keys)) {
+    QString canonical = QFileInfo(qtPath(vault_->root_path())).canonicalFilePath();
+    if (canonical.isEmpty()) canonical = qtPath(vault_->root_path());
+    directory_ = privateDirectory.isEmpty() ? stateDirectoryFor(canonical) : privateDirectory;
+    if (!ensureDirectory(directory_)) {
+        status_ = QStringLiteral("Cannot create the private sync directory.");
+        failed_ = true;
+    } else if (keys_.isEmpty()) {
+        status_ = QStringLiteral("Sync is locked: unlock the vault again to derive its sync key.");
+        failed_ = true;
+    } else {
+        try {
+            load();
+            status_ = state_.signedIn()
+                ? QStringLiteral("Signed in as %1. Choose a vault, then press Sync.").arg(state_.email)
+                : QStringLiteral("Sign in with the account that owns the vault.");
+        } catch (const std::exception& error) {
+            failed_ = true;
+            status_ = QString::fromUtf8(error.what());
+        }
+    }
+    refreshItems();
+
+    // While an operation runs, the panel is redrawn from the worker's progress
+    // snapshot; the timer stops as soon as the engine is idle again.
+    pulse_ = new QTimer(this);
+    pulse_->setObjectName(QStringLiteral("syncPulse"));
+    pulse_->setInterval(150);
+    connect(pulse_, &QTimer::timeout, this, [this] {
+        if (busy_) emit changed();
+        else if (pulse_ != nullptr && pulse_->isActive()) pulse_->stop();
+    });
 }
-SyncEngine::~SyncEngine() { stop_->store(true); timer_.stop(); if(!recovery_.isEmpty()) { recovery_.detach(); sodium_memzero(recovery_.data(),recovery_.size()*sizeof(QChar)); } }
-bool SyncEngine::unlock(const QString& recovery) {
- if(busy_ || !vault_->is_unlocked()) return false;
- if(!lock_->isLocked() && !lock_->tryLock(0)) { status_="Another process still owns this vault's sync state. Retry loading the key after it closes."; failed_=true; emit changed(); return false; }
- try { state_=loadState(directory_+"/state.enc",recovery); recovery_=recovery; failed_=false; stop_->store(false); status_="Ready. Pair or Retry to resume the durable encrypted queue."; emit changed(); return true; }
- catch(const std::exception& e) { status_=QString::fromUtf8(e.what()); failed_=true; emit changed(); return false; }
+
+SyncEngine::~SyncEngine() {
+    stop();
+    keys_.wipe();
+    state_.clearToken();
 }
-void SyncEngine::launch(const std::function<void(SyncSession&)>& action) {
- if(busy_ || recovery_.isEmpty() || !vault_->is_unlocked() || !lock_->isLocked()) { status_="Unlock the local vault and load its recovery key first."; failed_=true; emit changed(); return; }
- busy_=true; failed_=false; timer_.stop(); status_="Sync working — encrypted queue remains durable."; emit changed();
- auto worker=std::make_shared<SyncSession>(); worker->lock=lock_; worker->vault=vault_; worker->directory=directory_; worker->recovery=recovery_; worker->state=state_; worker->catalog=catalog_; worker->stop=stop_;
- auto* watcher=new QFutureWatcher<void>(this);
- connect(watcher,&QFutureWatcher<void>::finished,this,[this,watcher,worker] {
-  watcher->deleteLater(); busy_=false; state_=worker->state; catalog_=worker->catalog; failed_=worker->failed; status_=worker->status;
-  if(worker->library) emit libraryChanged(); if(!worker->infoTitle.isEmpty()) emit information(worker->infoTitle,worker->infoBody);
-  if(!stop_->load() && !worker->auth && vault_->is_unlocked() && !state_["token"].toString().isEmpty()) timer_.start(failed_?retryDelay(attempts_++):30000); if(!failed_) attempts_=0;
-  emit changed(); emit finished();
- });
- watcher->setFuture(QtConcurrent::run([worker,action] { try { action(*worker); } catch(const std::exception& e) { worker->failed=true; worker->status=QString::fromUtf8(e.what()); } }));
+
+QString SyncEngine::stateDirectoryFor(const QString& vaultRoot) { return sync::stateDirectoryFor(vaultRoot); }
+
+void SyncEngine::load() {
+    state_ = sync::loadState(directory_ + QStringLiteral("/state.enc"), keys_.state);
 }
-void SyncEngine::pair(const QUrl& u,const QString& p,const QString& n,const QString& c) { launch([=](SyncSession& s){s.pair(u,p,n,c);}); }
-void SyncEngine::syncNow() { timer_.stop(); if(!busy_) stop_->store(false); launch([](SyncSession& s){s.run();}); }
-void SyncEngine::refreshRemote() { launch([](SyncSession& s){s.manifest(); s.status="Remote catalog refreshed. Select object IDs before downloading; names remain encrypted.";}); }
-void SyncEngine::select(const QStringList& local,const QStringList& remote) {
- if(busy_ || recovery_.isEmpty()) return;
- try { for(auto id:remote) if(!isHex(id,32)) error("Invalid selected object ID."); state_["selected_local"]=array(local); state_["selected_remote"]=array(remote); saveState(directory_+"/state.enc",recovery_,state_); failed_=false; emit changed(); } catch(const std::exception& e) { failed_=true; status_=QString::fromUtf8(e.what()); emit changed(); }
+
+void SyncEngine::save() {
+    if (keys_.isEmpty()) return;
+    sync::saveState(directory_ + QStringLiteral("/state.enc"), keys_.state, state_);
 }
-void SyncEngine::setBandwidth(int speed) { if(busy_ || recovery_.isEmpty()) return; state_["bandwidth"]=qBound(0,speed,1048576); try { saveState(directory_+"/state.enc",recovery_,state_); } catch(const std::exception& e) { failed_=true; status_=QString::fromUtf8(e.what()); } emit changed(); }
-void SyncEngine::acknowledgeDeletes() { if(busy_ || recovery_.isEmpty()) return; auto ack=state_["delete_ack"].toObject(); auto notices=state_["deletions"].toObject(); for(auto it=notices.begin();it!=notices.end();++it) ack[it.key()]=it.value(); state_["delete_ack"]=ack; state_["deletions"]=QJsonObject{}; try { saveState(directory_+"/state.enc",recovery_,state_); status_="Deletion notices acknowledged. Local copies remain untouched."; } catch(const std::exception& e) { failed_=true; status_=QString::fromUtf8(e.what()); } emit changed(); }
-void SyncEngine::history(const QString& id) { if(!isHex(id,32)) return; launch([id](SyncSession& s){auto d=s.request("GET","/v2/objects/"+id+"/history").json(); if(!d["versions"].isArray()) error("Invalid remote history"); for(auto v:d["versions"].toArray()) if(!validRecord(v.toObject()) || v.toObject()["id"].toString()!=id) error("Invalid remote history record"); s.infoTitle="Immutable encrypted object history"; s.infoBody=QString::fromUtf8(QJsonDocument(d).toJson(QJsonDocument::Indented)); s.status="History loaded; local library unchanged.";}); }
-void SyncEngine::devices() { launch([](SyncSession& s){auto d=s.request("GET","/v2/devices").json(); if(!d["devices"].isArray()) error("Invalid devices response"); s.infoTitle="Paired devices — revoke through the server CLI"; s.infoBody=QString::fromUtf8(QJsonDocument(d).toJson(QJsonDocument::Indented)); s.status="Devices loaded. Revocation cannot erase already copied data or secrets.";}); }
-void SyncEngine::stop() { stop_->store(true); timer_.stop(); failed_=false; status_="Sync paused. Encrypted pending work and local originals are retained. Sync now / Retry resumes."; emit changed(); }
+
+QJsonArray SyncEngine::transfers() const {
+    const auto job = job_;
+    if (job && busy_) return job->transfersSnapshot();
+    return transfers_;
 }
+
+int SyncEngine::pendingCount() const {
+    int pending = 0;
+    for (const auto& value : items_) {
+        const QString state = value.toObject().value(QStringLiteral("state")).toString();
+        if (state == QStringLiteral("pending") || state == QStringLiteral("queued")) ++pending;
+    }
+    return pending;
+}
+
+void SyncEngine::refreshItems() {
+    if (!vault_ || !vault_->is_unlocked() || busy_) return;
+    items_ = buildItems(vault_, state_);
+}
+
+void SyncEngine::reject(const QString& message) {
+    failed_ = true;
+    status_ = message;
+    emit changed();
+}
+
+void SyncEngine::signIn(const QUrl& server, const QString& email, const QString& password,
+                        const QString& deviceLabel) {
+    if (busy_) return;
+    if (!sync::validServer(server)) {
+        reject(QStringLiteral("Enter the server URL, for example https://vault.example:8766. "
+                              "Plain HTTP is accepted only for 127.0.0.1."));
+        return;
+    }
+    if (!sync::validEmail(email)) {
+        reject(QStringLiteral("Enter the account email address used on the sync server."));
+        return;
+    }
+    if (password.isEmpty()) {
+        reject(QStringLiteral("Enter the account password."));
+        return;
+    }
+    if (keys_.isEmpty()) {
+        reject(QStringLiteral("Sync is locked. Lock and unlock the vault again."));
+        return;
+    }
+    auto secret = std::make_shared<QString>(password);
+    const QString address = email.trimmed();
+    const QString label = deviceLabel.isEmpty() ? QStringLiteral("MegaVault desktop") : deviceLabel;
+    // The address the client talks to is kept before the job starts: the job
+    // only learns it from the answer, and a wrong URL must still be reported.
+    state_.server = server.toString();
+    state_.email = address;
+    launch(QStringLiteral("Signing in..."), Launch::SignedOut,
+           [secret, address, label](Job& job, sync::Client& client) {
+               job.signIn(client, address, *secret, label);
+               secret->fill(QLatin1Char('\0'));
+               secret->clear();
+           });
+    emit changed();
+}
+
+void SyncEngine::refreshVaults() {
+    if (busy_ || !state_.signedIn()) return;
+    launch(QStringLiteral("Reading the vault list..."), Launch::Token,
+           [](Job& job, sync::Client& client) { job.listVaults(client); });
+}
+
+void SyncEngine::signOut() {
+    if (busy_) return;
+    state_.clearToken();
+    state_.vaultId.clear();
+    state_.vaultName.clear();
+    state_.records.clear();
+    state_.pendingDownload.clear();
+    state_.cursor = 0;
+    vaults_ = QJsonArray();
+    save();
+    status_ = QStringLiteral("Signed out. The device token was erased from this computer.");
+    emit changed();
+}
+
+void SyncEngine::chooseVault(const QString& vaultId, const QString& name) {
+    if (busy_) return;
+    if (vaultId == state_.vaultId) {
+        state_.vaultName = name;
+        save();
+        emit changed();
+        return;
+    }
+    state_.vaultId = vaultId;
+    state_.vaultName = name;
+    state_.records.clear();
+    state_.pendingDownload.clear();
+    state_.cursor = 0;
+    save();
+    refreshItems();
+    status_ = QStringLiteral("\"%1\" chosen. Choose the local folder, then press Sync.").arg(name);
+    emit changed();
+}
+
+bool SyncEngine::setLocalFolder(const QString& path) {
+    if (busy_) return false;
+    QString canonical = QFileInfo(path).canonicalFilePath();
+    if (canonical.isEmpty()) {
+        reject(QStringLiteral("That folder does not exist."));
+        return false;
+    }
+    QString root = QFileInfo(qtPath(vault_->root_path())).canonicalFilePath();
+    if (root.isEmpty()) root = qtPath(vault_->root_path());
+    if (QDir::cleanPath(canonical) != QDir::cleanPath(root)) {
+        reject(QStringLiteral("Sync writes into the open vault only. Open \"%1\" as a vault first, then sync.")
+                   .arg(canonical));
+        return false;
+    }
+    state_.folder = root;
+    save();
+    failed_ = false;
+    status_ = QStringLiteral("This vault will sync into %1.").arg(root);
+    emit changed();
+    return true;
+}
+
+void SyncEngine::setPageLimit(int limit) { pageLimit_ = qBound(1, limit, 1000); }
+
+void SyncEngine::syncNow() {
+    launch(QStringLiteral("Syncing..."), Launch::Vault,
+           [](Job& job, sync::Client& client) { job.syncPass(client); });
+}
+
+void SyncEngine::receive(const QString& recordId) {
+    launch(QStringLiteral("Downloading one item..."), Launch::Vault,
+           [recordId](Job& job, sync::Client& client) { job.receiveOne(client, recordId); });
+}
+
+void SyncEngine::tombstone(const QString& recordId) {
+    launch(QStringLiteral("Removing..."), Launch::Vault,
+           [recordId](Job& job, sync::Client& client) { job.tombstoneOne(client, recordId); });
+}
+
+void SyncEngine::restore(const QString& recordId) {
+    launch(QStringLiteral("Restoring..."), Launch::Vault,
+           [recordId](Job& job, sync::Client& client) { job.restoreOne(client, recordId); });
+}
+
+void SyncEngine::purge(const QString& recordId) {
+    launch(QStringLiteral("Deleting permanently..."), Launch::Vault,
+           [recordId](Job& job, sync::Client& client) { job.purgeOne(client, recordId); });
+}
+
+void SyncEngine::stop() {
+    const auto job = job_;
+    if (job) job->stop();
+}
+
+void SyncEngine::launch(const QString& label, Launch requirement,
+                        const std::function<void(Job&, sync::Client&)>& task) {
+    if (busy_) return;
+    if (state_.server.isEmpty()) {
+        reject(QStringLiteral("Sign in first."));
+        return;
+    }
+    QUrl base(state_.server);
+    if (!sync::validServer(base)) {
+        reject(QStringLiteral("The stored server address is not usable; sign in again."));
+        return;
+    }
+    if (requirement != Launch::SignedOut && !state_.signedIn()) {
+        reject(QStringLiteral("Sign in first."));
+        return;
+    }
+    if (requirement == Launch::Vault && state_.vaultId.isEmpty()) {
+        reject(QStringLiteral("Choose a vault first."));
+        return;
+    }
+    const bool needsToken = requirement != Launch::SignedOut;
+    busy_ = true;
+    failed_ = false;
+    status_ = label;
+    if (pulse_ != nullptr && !pulse_->isActive()) pulse_->start();
+    emit changed();
+
+    auto job = std::make_shared<Job>(vault_, keys_, directory_, state_, pageLimit_);
+    job_ = job;
+    auto* watcher = new QFutureWatcher<void>(this);
+    connect(watcher, &QFutureWatcher<void>::finished, this, [this, watcher, job] {
+        watcher->deleteLater();
+        if (job_.get() == job.get()) job_.reset();
+        busy_ = false;
+        state_ = job->state;
+        transfers_ = job->transfersSnapshot();
+        stats_ = job->stats;
+        if (!job->vaults.isEmpty()) vaults_ = job->vaults;
+        if (!job->items.isEmpty()) items_ = job->items;
+        else refreshItems();
+        if (!job->status.isEmpty()) status_ = job->status;
+        failed_ = job->failed;
+        if (job->libraryChanged) emit libraryChanged();
+        emit changed();
+        emit finished();
+    });
+    watcher->setFuture(QtConcurrent::run([job, task, base, needsToken] {
+        // The client, its manager and every reply live and die here.
+        sync::Client client(base, needsToken ? job->state.token : QString());
+        try {
+            task(*job, client);
+        } catch (const sync::Cancelled&) {
+            job->status = QStringLiteral("Stopped. What landed so far is saved and will continue next time.");
+        } catch (const std::exception& error) {
+            job->failed = true;
+            job->status = QString::fromUtf8(error.what());
+        }
+    }));
+}
+
+QString SyncEngine::relativePath(const core::VideoInfo& video, const std::vector<core::FolderInfo>& folders) {
+    QString name = QString::fromStdString(video.display_name);
+    const QString path = folderPathOf(video, folders);
+    return path.isEmpty() ? name : path + QLatin1Char('/') + name;
+}
+
+}  // namespace videovault::app

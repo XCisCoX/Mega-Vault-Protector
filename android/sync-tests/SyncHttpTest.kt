@@ -1,57 +1,65 @@
 package org.megavideoprotect.app
 
-import com.sun.net.httpserver.HttpServer
-import java.net.InetSocketAddress
 import org.json.JSONObject
 
+private val KEY = "b".repeat(64)
+private val PACKAGE = byteArrayOf('a'.code.toByte(), 'b'.code.toByte(), 'c'.code.toByte())
+private val NAME = sha256(PACKAGE) + ".mvpk"
+private val HASH = NAME.substring(0, 64)
+private val OTHER = byteArrayOf(1, 2, 3)
+private val OTHER_NAME = sha256(OTHER) + ".mvpk"
+
+/**
+ * Live loopback HTTP: the bearer is the library key, HEAD exposes the durable
+ * offset, PUT carries X-Total-Size, a Range answer must be 206 with a matching
+ * Content-Range, and a wrong key maps to exactly one message.
+ */
 fun main() {
-    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    val calls = mutableListOf<String>()
-    server.createContext("/") { x ->
-        calls.add(x.requestMethod + " " + x.requestURI.toString())
-        check(x.requestHeaders.getFirst("Authorization") == "Bearer " + "a".repeat(64))
-        val body = when {
-            x.requestURI.path == "/v2/pair" -> {
-                val request = JSONObject(x.requestBody.bufferedReader().readText())
-                check(request.keySet() == setOf("code", "name"))
-                "{\"device_id\":\"${"b".repeat(32)}\",\"token\":\"${"c".repeat(64)}\"}"
-            }
-            x.requestMethod == "HEAD" -> {
-                x.responseHeaders.add("Content-Length", "3")
-                x.responseHeaders.add("X-Upload-Offset", "2")
-                x.responseHeaders.add("X-Blob-Complete", "false")
-                ""
-            }
-            x.requestMethod == "PUT" -> {
-                check(x.requestHeaders.getFirst("X-Blob-Size") == "3")
-                check(x.requestBody.readBytes().contentEquals(byteArrayOf(3)))
-                "{\"offset\":3,\"complete\":true}"
-            }
-            x.requestHeaders.getFirst("Range") != null -> {
-                check(x.requestHeaders.getFirst("Range") == "bytes=1-2")
-                x.responseHeaders.add("Content-Range", "bytes 1-2/3")
-                "bc"
-            }
-            else -> "{\"objects\":[]}"
-        }
-        val bytes = body.toByteArray()
-        x.sendResponseHeaders(if (x.requestHeaders.getFirst("Range") != null) 206 else 200, if (x.requestMethod == "HEAD") -1 else bytes.size.toLong())
-        if (x.requestMethod != "HEAD") x.responseBody.use { it.write(bytes) }
-        x.close()
-    }
-    server.start()
+    val relay = V3Relay(KEY)
     try {
-        val api = SyncHttp("http://127.0.0.1:${server.address.port}", "a".repeat(64), "")
-        check(api.json("GET", "/v2/objects").getJSONArray("objects").length() == 0)
-        check(api.json("POST", "/v2/pair", JSONObject().put("code", "once").put("name", "phone")).getString("token") == "c".repeat(64))
-        val head = api.request("HEAD", "/v2/blobs/${"0".repeat(64)}")
-        check(head.header("X-Upload-Offset") == "2")
-        val put = api.request("PUT", "/v2/blobs/${"0".repeat(64)}?offset=2", byteArrayOf(3), mapOf("X-Blob-Size" to "3"))
+        val api = SyncHttp(relay.endpoint(), KEY)
+
+        val health = api.request("GET", "/healthz")
+        check(health.status == 200 && JSONObject(String(health.bytes)).getInt("protocol") == 3)
+        check(JSONObject(String(api.request("GET", "/v3/files").bytes)).getJSONArray("files").length() == 0)
+
+        relay.addComplete(PACKAGE, NAME)
+        val head = api.request("HEAD", "/v3/files/$NAME")
+        check(head.status == 200)
+        check(head.header("Content-Length") == "3") // header lookup is case-insensitive
+        check(head.header("X-Offset") == "3")
+        check(head.header("X-Complete") == "true")
+        check(head.bytes.isEmpty())
+
+        val put = api.request(
+            "PUT",
+            "/v3/files/$OTHER_NAME?offset=0",
+            OTHER,
+            mapOf("X-Total-Size" to "3"),
+        )
+        check(put.status == 201)
         check(JSONObject(String(put.bytes)).getLong("offset") == 3L)
-        val range = api.request("GET", "/v2/blobs/${"0".repeat(64)}", headers = mapOf("Range" to "bytes=1-2"))
-        check(String(range.bytes) == "bc" && range.status == 206)
-        check(calls.size == 5)
-        check(runCatching { SyncHttp("http://public.example", "", "") }.isFailure)
-        println("SyncHttp: live loopback protocol checks passed")
-    } finally { server.stop(0) }
+        check(relay.rows[OTHER_NAME]?.complete == true)
+
+        val range = api.request("GET", "/v3/files/$NAME", headers = mapOf("Range" to "bytes=1-2"))
+        check(range.status == 206)
+        check(String(range.bytes) == "bc")
+        check(range.header("Content-Range") == "bytes 1-2/3")
+        check(range.header("ETag") == "\"$NAME\"")
+
+        relay.unauthorized = true
+        val rejected = runCatching { api.request("GET", "/v3/files") }.exceptionOrNull()
+        check(rejected is SyncHttp.Failure && rejected.status == 401)
+        check(rejected.message == "The server rejected this library key.")
+        check(SyncHttp.message(401) == SyncHttp.KEY_REJECTED)
+
+        relay.unauthorized = false
+        check(runCatching { SyncHttp("http://vault.example", KEY) }.isFailure)
+        check(runCatching { SyncHttp("https://vault.example", "a".repeat(63)) }.isFailure)
+        check(SyncHttp("http://127.0.0.1:${relay.endpoint().substringAfterLast(':')}", HASH).request("GET", "/healthz").status == 200)
+
+        println("SyncHttp: bearer key, HEAD/offset headers, PUT, Range, 401 and validation passed")
+    } finally {
+        relay.close()
+    }
 }

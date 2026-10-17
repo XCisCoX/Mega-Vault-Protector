@@ -1,225 +1,242 @@
 package org.megavideoprotect.app
 
-import androidx.activity.ComponentActivity
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.repeatOnLifecycle
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.security.SecureRandom
 
-/** Sync is opt-in, screen/lifecycle-bound, and never replaces the local gallery with remote browsing. */
+/**
+ * One small sync section: server URL, library key, Sync. The relay is an
+ * encrypted hash bucket; this screen only exports what is checked and imports
+ * what it has never seen.
+ */
 @Composable
 fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
     val context = LocalContext.current
-    val lifecycle = (context as ComponentActivity).lifecycle
     val scope = rememberCoroutineScope()
     val mutex = remember { Mutex() }
     val vault = remember { NativeSyncVault() }
+
     var engine by remember { mutableStateOf<SyncEngine?>(null) }
-    var address by remember { mutableStateOf("") }
-    var pin by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("Android device") }
-    var recovery by remember { mutableStateOf("") }
-    var showRecovery by remember { mutableStateOf(false) }
-    var configured by remember { mutableStateOf(false) }
+    var server by remember { mutableStateOf("") }
+    var key by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Loading private sync state…") }
-    var notice by remember { mutableStateOf("") }
     var files by remember { mutableStateOf<List<SyncLocalFile>>(emptyList()) }
-    var records by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
-    var localSelection by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    var remoteSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var receipt by remember { mutableStateOf<JSONObject?>(null) }
-    var mappingChoice by remember { mutableStateOf<Long?>(null) }
-    var actionJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var localFilter by remember { mutableStateOf("") }
-    var remoteFilter by remember { mutableStateOf("") }
+    var packages by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var selection by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var filter by remember { mutableStateOf("") }
+    var chosen by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
-    suspend fun snapshot(e: SyncEngine) {
-        val list = if (vault.isUnlocked()) vault.files() else emptyList()
-        withContext(Dispatchers.Main) {
-            configured = e.configured(); status = e.status(); notice = e.notice()
-            files = list; records = e.catalog().map { JSONObject(it.toString()) }; remoteSelection = e.selectedDownloads(); receipt = e.receipt()?.let { JSONObject(it.toString()) }
-            if (address.isEmpty()) { address = e.endpoint(); pin = e.pin() }
-        }
+    suspend fun readLocalFiles(): List<SyncLocalFile>? = withContext(Dispatchers.IO) {
+        runCatching { if (vault.isUnlocked()) vault.files() else null }.getOrNull()
     }
+
     fun action(block: suspend (SyncEngine) -> Unit) {
         if (busy) return
-        busy = true; error = null
-        actionJob = scope.launch {
+        busy = true
+        error = null
+        scope.launch {
             try {
-                withContext(Dispatchers.IO) { mutex.withLock {
-                    val e = engine ?: error("Sync state unavailable")
-                    try { block(e) } finally { snapshot(e) }
-                } }
-            } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
-            catch (failure: Exception) { error = failure.message ?: "Sync failed" }
-            finally { busy = false }
+                withContext(Dispatchers.IO) {
+                    mutex.withLock { block(engine ?: error("Sync state unavailable")) }
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                error = failure.message ?: "Sync failed"
+            } finally {
+                val refreshed = readLocalFiles()
+                busy = false
+                engine?.let { current ->
+                    status = current.status
+                    current.failure?.let { error = it }
+                    packages = current.packages()
+                    selection = current.selectedIds()
+                    if (current.libraryChanged) GalleryCache.clear()
+                }
+                if (refreshed != null) files = refreshed
+            }
         }
     }
+
     LaunchedEffect(vaultRoot) {
         try {
-            withContext(Dispatchers.IO) { mutex.withLock {
-                val e = SyncEngine(AndroidSyncStore(context.applicationContext, vaultRoot), vault)
-                withContext(Dispatchers.Main) { engine = e }
-                snapshot(e)
-            } }
-        } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
-        catch (failure: Exception) { error = "Private state unavailable: ${failure.message}. Pending files are preserved." }
-    }
-    DisposableEffect(lifecycle) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) actionJob?.cancel()
-        }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer); actionJob?.cancel(); GalleryCache.clear() }
-    }
-    LaunchedEffect(engine) {
-        val e = engine ?: return@LaunchedEffect
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            var lastSnapshot = 0L
-            var lastStatus = ""
-            while (true) {
-                try {
-                    withContext(Dispatchers.IO) { mutex.withLock {
-                        if (e.configured() && vault.isUnlocked()) {
-                            e.pass()
-                            val now = System.currentTimeMillis()
-                            val currentStatus = e.status()
-                            if (currentStatus != lastStatus || now - lastSnapshot >= 15_000L) {
-                                snapshot(e); lastSnapshot = now; lastStatus = currentStatus
-                            }
-                        }
-                    } }
-                } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
-                catch (failure: Exception) { error = failure.message ?: "Sync paused" }
-                delay(1000)
+            val created = withContext(Dispatchers.IO) {
+                mutex.withLock { SyncEngine(AndroidSyncStore(context.applicationContext, vaultRoot), vault) }
             }
+            engine = created
+            server = created.savedServer()
+            key = created.savedKey()
+            status = created.status
+            packages = created.packages()
+            selection = created.selectedIds()
+            readLocalFiles()?.let { files = it }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            error = "Private sync state unavailable: ${failure.message}"
         }
     }
-    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        MvpTitle("Encrypted sync v2")
-        MvpButton("Back to local gallery (pause sync)", onClick = { actionJob?.cancel(); onClose() })
-        MvpDescription("Local-first encrypted MVPK relay. Unlock this phone's vault first. Recovery key stays on this device; send it to your other device out-of-band, never as a pairing code.")
-        Text(status, color = Mvp.description)
-        if (notice.isNotEmpty()) Text(notice, color = Mvp.accent)
-        MvpError(error)
-        if (!configured) {
-            MvpInput(address, { address = it }, "HTTPS server URL (no path)")
-            MvpInput(pin, { pin = it }, "Optional certificate SHA-256 pin (lowercase hex)")
-            MvpInput(name, { name = it }, "Non-sensitive device label")
-            MvpInput(code, { code = it }, "Single-use server pairing code", isPassword = true)
-            MvpInput(recovery, { recovery = it }, "Shared recovery key: 64 lowercase hex", isPassword = true)
-            MvpButton("Generate recovery key for a NEW shared library", onClick = {
-                recovery = ByteArray(32).also { SecureRandom().nextBytes(it) }.hex()
-                showRecovery = true
-            }, enabled = !busy)
-            MvpButton(if (showRecovery) "Hide recovery key" else "Show recovery key to copy out-of-band", onClick = { showRecovery = !showRecovery }, enabled = !busy && recovery.isNotEmpty())
-            if (showRecovery && recovery.isNotEmpty()) {
-                androidx.compose.foundation.text.selection.SelectionContainer {
-                    Text("Save/share this key out-of-band before pairing:\n$recovery", color = Mvp.description)
-                }
-            }
-            MvpButton("Pair this local vault", onClick = {
-                val url = address; val certificate = pin; val key = recovery; val pairing = code; val label = name
-                action { e ->
-                    check(vault.isUnlocked()) { "Unlock a local vault first" }
-                    require(SyncPolicy.validSecret(key)) { "Recovery key must be exactly 64 lowercase hex" }
-                    require(label.isNotBlank() && label.length <= 64 && !label.contains('\n') && !label.contains('\r'))
-                    val api = SyncHttp(url, "", certificate)
-                    check(api.json("GET", "/healthz").getInt("protocol") == 2) { "Server is not sync v2" }
-                    val paired = api.json("POST", "/v2/pair", JSONObject().put("code", pairing).put("name", label))
-                    require(SyncPolicy.validId(paired.getString("device_id")))
-                    e.configure(url, certificate, key, paired.getString("token"))
-                    withContext(Dispatchers.Main) { recovery = ""; code = "" }
-                    e.retry(); e.refresh()
+
+    DisposableEffect(Unit) { onDispose { GalleryCache.clear() } }
+
+    Column(
+        Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        MvpTitle("Encrypted sync")
+        MvpButton("Back to local gallery", onClick = onClose)
+        MvpDescription(
+            "Your local vault stays the library. Each shared item is exported as one encrypted .mvpk " +
+                "package under the library key, named by the SHA-256 of its own bytes, so the relay " +
+                "stores opaque packages and never sees a name or a byte of content.",
+        )
+        MvpInput(server, { server = it }, "Server URL, for example https://vault.example:8766", enabled = !busy)
+        MvpInput(key, { key = it }, "Library key: 64 lowercase hex characters", isPassword = !showKey, enabled = !busy)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MvpButton("Sync", onClick = {
+                val url = server
+                val secret = key
+                action { current ->
+                    if (!current.configure(url, secret)) return@action
+                    current.select(selection)
+                    current.syncNow()
                 }
             }, primary = true, enabled = !busy && engine != null)
-        } else {
-            Text("Server: $address", color = Mvp.description)
-            MvpInput(code, { code = it }, "Fresh server code if re-pairing is required", isPassword = true)
-            MvpButton("Re-pair (preserve key, queue and mappings)", onClick = {
-                val pairing = code
-                action { e ->
-                    val paired = SyncHttp(e.endpoint(), "", e.pin()).json("POST", "/v2/pair", JSONObject().put("code", pairing).put("name", "Android device"))
-                    require(SyncPolicy.validId(paired.getString("device_id")))
-                    e.rePair(paired.getString("token")); e.retry()
-                    withContext(Dispatchers.Main) { code = "" }
-                }
-            }, enabled = !busy && code.isNotBlank())
-            MvpButton("Refresh server catalog", onClick = { action { it.refresh() } }, enabled = !busy)
-            MvpButton("Retry pending transfers now", onClick = { action { it.retry(); it.pass() } }, primary = true, enabled = !busy)
-            Column {
-                MvpButton("Unlimited", onClick = { action { it.setSpeed(0) } }, enabled = !busy)
-                MvpButton("1 MiB/s", onClick = { action { it.setSpeed(1024 * 1024) } }, enabled = !busy)
-                MvpButton("256 KiB/s", onClick = { action { it.setSpeed(256 * 1024) } }, enabled = !busy)
-            }
-            if (receipt != null) {
-                MvpButton("Retry cached import (preserve local originals)", onClick = { action { it.resumeImport() } }, enabled = !busy)
-                if (receipt!!.optString("phase") == "failed") {
-                    MvpInput(recovery, { recovery = it }, "Correct initial recovery key locally", isPassword = true)
-                    MvpButton("Correct mistyped initial key (not key rotation)", onClick = {
-                        val key = recovery
-                        action { it.correctInitialRecoveryKey(key); withContext(Dispatchers.Main) { recovery = "" } }
-                    }, enabled = !busy && SyncPolicy.validSecret(recovery))
-                }
-                Text("Confirm the local file imported for object ${receipt!!.getString("id")}. JNI cannot identify deduplicated files. Retry an interrupted/failed import first, then verify the local file before linking; do not link an unrelated file.", color = Mvp.description)
-                MvpInput(localFilter, { localFilter = it }, "Filter local file/folder path")
-                val matching = files.filter { it.path.contains(localFilter, ignoreCase = true) }
-                Text("${matching.size} matching files; displaying first 200. Filter to find others.", color = Mvp.description)
-                matching.take(200).forEach { file -> Row {
-                    Checkbox(mappingChoice == file.id, onCheckedChange = { mappingChoice = if (it) file.id else null }, enabled = !busy)
-                    Text(file.path, color = Mvp.description, modifier = Modifier.weight(1f))
-                } }
-                MvpButton("Confirm existing local file mapping", onClick = { val id = mappingChoice ?: return@MvpButton; action { it.resolveReceipt(id); GalleryCache.clear() } }, enabled = !busy && mappingChoice != null && receipt!!.optString("phase") == "imported")
-            } else {
-                Text("Select local files to upload (folder names shown locally only)", color = Mvp.description)
-                MvpInput(localFilter, { localFilter = it }, "Filter local file/folder path")
-                val matching = files.filter { it.path.contains(localFilter, ignoreCase = true) }
-                Text("${matching.size} matching files; displaying first 200. ${localSelection.size} selected.", color = Mvp.description)
-                MvpButton("Select matching local files/folders", onClick = { localSelection = matching.map { it.id }.toSet() }, enabled = !busy)
-                MvpButton("Clear local selection", onClick = { localSelection = emptySet() }, enabled = !busy)
-                matching.take(200).forEach { file -> Row {
-                    Checkbox(file.id in localSelection, onCheckedChange = { selected -> localSelection = if (selected) localSelection + file.id else localSelection - file.id }, enabled = !busy)
-                    Text(file.path, color = Mvp.description, modifier = Modifier.weight(1f))
-                } }
-                MvpButton("Stage selected encrypted packages", onClick = { val ids = localSelection; action { it.stage(ids); it.retry() } }, enabled = !busy && localSelection.isNotEmpty())
-            }
-            Text("Select opaque remote objects to download; names appear only after local import", color = Mvp.description)
-            MvpInput(remoteFilter, { remoteFilter = it }, "Filter remote object ID")
-            val matchingRemote = records.filter { it.getString("id").contains(remoteFilter) }
-            Text("${matchingRemote.size} matching objects; displaying first 200. Filter to find others. ${remoteSelection.size} selected.", color = Mvp.description)
-            matchingRemote.take(200).forEach { record ->
-                val id = record.getString("id")
-                Row {
-                    Checkbox(id in remoteSelection, onCheckedChange = { selected ->
-                        val selection = if (selected) remoteSelection + id else remoteSelection - id
-                        action { it.selectDownloads(selection); it.retry() }
-                    }, enabled = !busy && !record.getBoolean("deleted"))
-                    Text("$id · rev ${record.getLong("revision")} · ${record.getLong("size")} bytes${if (record.getBoolean("deleted")) " · deleted; local retained" else ""}", color = Mvp.description, modifier = Modifier.weight(1f))
-                }
-                if (record.getBoolean("deleted")) MvpButton("Acknowledge remote deletion (keep local)", onClick = { action { it.acknowledgeDelete(id) } }, enabled = !busy)
+            MvpButton(if (showKey) "Hide key" else "Show key", onClick = { showKey = !showKey })
+        }
+        if (error == null) Text(status, color = Mvp.description)
+        MvpError(error)
+        if (engine?.configured() == true) {
+            MvpDescription("Shared items on this device: ${engine!!.sharedCount()} · packages known here: ${engine!!.knownCount()}")
+        }
+        if (showKey && key.isNotEmpty()) {
+            SelectionContainer { Text(key, color = Mvp.description) }
+        }
+
+        Text("Share these items", color = Mvp.title)
+        MvpInput(filter, { filter = it }, "Filter local file/folder path", enabled = !busy)
+        val matching = files.filter { it.path.contains(filter, ignoreCase = true) }
+        Text(
+            "${matching.size} matching file(s), first 200 shown · ${selection.size} selected",
+            color = Mvp.description,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MvpButton("Select shown", onClick = { selection = selection + matching.take(200).map { it.id } }, enabled = !busy)
+            MvpButton("Clear", onClick = {
+                selection = emptySet()
+                scope.launch { withContext(Dispatchers.IO) { mutex.withLock { engine?.select(emptySet()) } } }
+            }, enabled = !busy)
+        }
+        matching.take(200).forEach { file ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = file.id in selection,
+                    onCheckedChange = { checked ->
+                        val next = if (checked) selection + file.id else selection - file.id
+                        selection = next
+                        scope.launch { withContext(Dispatchers.IO) { mutex.withLock { engine?.select(next) } } }
+                    },
+                    enabled = !busy,
+                )
+                Text(file.path, color = Mvp.description, modifier = Modifier.weight(1f))
             }
         }
-        MvpDescription("Tags are local only; MVPK does not sync tags. Remote updates preserve old local copies. Local removals are never automatically sent as server deletes. Sync pauses when you leave this screen or background the app; reopen and Retry to resume. Native import may use transient plaintext locally; network and sync cache contain encrypted MVPK only.")
-        MvpButton("Back to local gallery (pause sync)", onClick = { actionJob?.cancel(); GalleryCache.clear(); onClose() })
+
+        Text("Packages on the server", color = Mvp.title)
+        if (packages.isEmpty()) {
+            MvpDescription("Press Sync to list the bucket. Names stay opaque; contents appear in the local gallery after import.")
+        } else {
+            MvpDescription("${packages.size} package(s); the first 200 are shown. Select one to delete it for every device.")
+        }
+        packages.take(200).forEach { entry ->
+            val name = entry.optString("name")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = chosen == name, onClick = { chosen = name }, enabled = !busy)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "${name.take(12)}… .mvpk · ${sizeText(entry.optLong("size", 0L))}",
+                        color = Mvp.description,
+                    )
+                    Text(
+                        if (engine?.isKnown(name) == true) "on this device" else "not imported here",
+                        color = if (engine?.isKnown(name) == true) Mvp.description else Mvp.accent,
+                    )
+                }
+            }
+        }
+        MvpButton(
+            "Delete the selected package from the server…",
+            onClick = { confirmDelete = true },
+            enabled = !busy && chosen != null,
+        )
+        MvpDescription(
+            "Deletes only what you select, one package at a time, for every device; local items are never " +
+                "removed. Unchanged items are not uploaded twice. Sync does not run in the background: " +
+                "press Sync after changing what you share.",
+        )
+        MvpButton("Back to local gallery", onClick = onClose)
     }
+
+    if (confirmDelete && chosen != null) {
+        val name = chosen!!
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete a package from the server") },
+            text = {
+                Text(
+                    "This deletes the encrypted package ${name.take(12)}… from the server for every device. " +
+                        "Local items are not deleted. Continue?",
+                )
+            },
+            confirmButton = {
+                MvpButton("Delete", onClick = {
+                    confirmDelete = false
+                    chosen = null
+                    action { current -> current.remove(name) }
+                })
+            },
+            dismissButton = { MvpButton("Cancel", onClick = { confirmDelete = false }) },
+        )
+    }
+}
+
+private fun sizeText(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KiB"
+    else -> String.format(Locale.US, "%.1f MiB", bytes / (1024.0 * 1024.0))
 }

@@ -2,8 +2,42 @@
     email {$ACME_EMAIL}
 }
 
+# The one upstream: the relay. It speaks TLS on its side of this hop because
+# `serve` refuses a plaintext bind on a non-loopback address. Caddy does not
+# verify the throwaway self-signed pair from deployment/tls: the `internal: true`
+# network confines the hop and no client ever talks to it directly.
+(relay) {
+    reverse_proxy server:8766 {
+        transport http {
+            tls
+            tls_insecure_skip_verify
+        }
+    }
+}
+
 {$SYNC_DOMAIN} {
-    reverse_proxy server:8766
     header Strict-Transport-Security "max-age=31536000"
-    # No access logs: URLs, device labels and credentials stay out of logs.
+
+    # Vaults, records and encrypted blobs.
+    handle /v1/* {
+        import relay
+    }
+
+    # Registration, login, logout, sessions and device tokens.
+    handle /auth/* {
+        import relay
+    }
+
+    # Unauthenticated liveness probe.
+    handle /healthz {
+        import relay
+    }
+
+    # The static site: /, /index.html, /app.js, /style.css, /icon.svg.
+    handle {
+        import relay
+    }
+
+    # No access logs: request paths are vault and record ids, and headers carry
+    # session cookies and device tokens.
 }

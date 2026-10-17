@@ -1,48 +1,104 @@
-# Sync architecture decision (issue #3)
+# Sync architecture: an encrypted hash bucket
 
-## Why the old cloud server does not meet the goal
+## Two shapes that did not fit
 
-The former `qt-app/src/cloud_server.cpp` opens a server-side vault using a password received at `/v1/login`, retains that password and vault keys for the process lifetime, and returns decrypted content. Every password holder has deletion authority. It is therefore a trusted-server remote-access service, not end-to-end encrypted sync.
+The app already had a trusted-server remote-access mode
+(`qt-app/src/cloud_server.cpp`, `/v1/login`): the server opens the vault with a
+password it receives, keeps the keys, and returns decrypted content. Any
+password holder can read and delete everything, so it is not end-to-end
+encrypted sync.
 
-The old implementation has no upload or revision protocol, no independently revocable persistent device credentials, and no durable offline write queue. Its server certificate changes at each restart. The desktop browser downloads all files into a plaintext cache keyed only by numeric item ID (not server identity), and a failed item stays in a permanent failed set. These properties make disconnected daily use, restart recovery, large libraries, multiple servers and safe concurrent edits unreliable.
+The first attempt at end-to-end sync was a general-purpose replication
+protocol — pairing codes, device tokens, object revisions, compare-and-swap
+commits, immutable history, tombstones and idempotency operation ids. It kept
+the plaintext away from the server, but every one of those mechanisms was a
+small state machine that could lose, duplicate or mis-order data, and all of
+them existed to serve multi-device conflict resolution that a single user with
+a handful of devices does not need.
 
-The Android legacy cloud mode similarly uses server-side decryption and plaintext cached media. The existing PC/LAN sharing feature is separate: it intentionally trusts the PC hosting an unlocked vault. It is not the new sync security model and is not being removed.
+## The decision
 
-## Chosen model
+Sync is a directory of opaque, already-encrypted packages, each named by the
+SHA-256 of its own bytes, behind a single library key:
 
-The user explicitly chose end-to-end encryption. A single-user, optional, self-hosted service stores opaque encrypted MVPK packages and revision metadata. It has no dependency on the C++ vault core, FFmpeg, SQLCipher or Qt. Python's standard library provides the small server, SQLite stores catalog/device/idempotency state, and immutable files hold encrypted blobs. Use a TLS reverse proxy for internet-facing deployment, or the server's certificate/key options on a private network.
+```
+<data>/blobs/<sha256-of-ciphertext>.mvpk
+```
 
-Clients continue to use their normal local vaults and existing viewers. They export one selected item into an MVPK encrypted using a separate random shared recovery secret, upload the encrypted package, download other revisions, authenticate/decrypt on the device, and import into their own independently encrypted vault. A server pairing code authorizes a device; it does not contain, distribute or recover the decryption secret. Pairing never sends a vault password.
+A device exports one selected item into one `.mvpk` package, uploads it under
+its hash, and periodically lists the bucket. Any name it has not imported yet
+is new to it: download, verify the digest, decrypt locally with the library
+key, import into the local vault. Nothing else is exchanged.
 
-This reuses the project's existing authenticated streaming package format rather than introducing a second cryptosystem or copying a live encrypted SQLite database between devices. Copying whole vault directories while they are open would not safely merge independently edited databases.
+The server stores bytes, a size and a name. It does not parse packages,
+encrypt, decrypt, accept vault passwords, or hold the library key — only
+`sha256(library key)`, which authenticates requests.
 
-## Practical synchronization contract
+Why this is enough:
 
-* Selection is opt-in. Do not upload or download an entire private library merely because a device was paired.
-* A stable object ID links revisions; local vault database IDs are not shared across devices.
-* Stage encrypted bytes plus a pending record durably before starting a network write. Reuse the exact package, object ID and operation ID after interruption.
-* Query the stored upload offset before resuming, transfer bounded blocks, verify SHA-256 and size before import, and only mark a revision seen after import succeeds.
-* Commit against the last acknowledged revision. A stale base produces a conflict, not a last-writer-wins overwrite. Publish a separate conflict copy while preserving both originals and immutable history.
-* Keep local changes during an outage. Retry with bounded backoff; distinguish authentication failures, network failures, conflicts and pending work. The word "Synced" must not hide an error or queued work.
-* Revocation blocks future API access. It cannot erase plaintext or shared secrets already copied by that device.
-* Preserve local files on remote deletion rather than silently deleting an offline edited copy. Deliberate destructive cross-device propagation is deferred.
+- **Content addressing replaces revisions.** The same bytes always have the
+  same name, so a re-upload is a no-op (`200`, nothing written) and there is no
+  manifest to keep in step, no base revision to compare, no conflict response.
+- **Two devices agree because they see the same names.** No merge algorithm,
+  no operation log, no idempotency tokens.
+- **No per-device state.** One key replaces pairing codes, device tokens and a
+  revocation table. The cost is that there is also no per-device revocation.
+- **Storage is a directory.** One SQLite table plus `blobs/`: backup is a copy,
+  recovery is copying back, and there is no server-side schema to migrate
+  between protocol versions beyond a version number.
 
-See [sync-protocol.md](sync-protocol.md) for the endpoint and persistence contract. Setup, recovery and backups are documented in [self-hosted-sync.md](self-hosted-sync.md).
+## What that costs, deliberately
 
-## Threat model and recovery
+- **No history.** Editing an item produces a new package with a new name. The
+  old package stays until someone deletes it, so history is an accident of
+  manual pruning, not a feature.
+- **No delta.** A one-byte change re-uploads the whole package. Transfers are
+  resumable, but not incremental.
+- **No deletion propagation.** `DELETE` removes a package; devices are not
+  told, and a device that still holds the item uploads it again on its next
+  pass.
+- **No conflict resolution.** Two devices that export the same item produce two
+  independent packages. The protocol has no opinion about which is "current".
+- **No revocation by device.** Possession of the key is the only identity.
+  Losing a device means rotating the key and removing the old ciphertext.
+- **Losing the key loses the data.** The operator can reset nothing.
 
-A storage administrator or someone who steals a server backup can see device labels, sizes, transfer timing, random object identifiers and revision relationships. They cannot decrypt properly exported MVPK content, names or directory paths without the separate recovery secret. A compromised paired device can decrypt its selected files and can make authorized changes. A malicious server can withhold data or replay history; remembered decreasing revision numbers can be detected locally, but the MVP has no global rollback/transparency proof.
+Each of these is absent on purpose rather than hidden behind an option. See
+[sync-simple-plan.md](sync-simple-plan.md) for the rewrite that produced this
+design.
 
-Loss of the recovery secret is not reset by the server administrator. Recover from a paired device or the user's separately stored recovery copy. If the secret is lost everywhere, retained encrypted packages cannot be decrypted. After device compromise, revoke its token and establish a new shared secret and new encrypted packages for future data. Old ciphertext remains decryptable with the old secret; do not promise retroactive revocation.
+## Reusing the existing package format
 
-Each local vault retains its own vault password. Changing that password does not change the sync recovery secret or revoke another paired device.
+Clients keep their normal local vaults and viewers. Export and import use the
+project's existing authenticated MVPK package format, with the library key as
+the package secret, so no second cryptosystem is introduced and no live
+encrypted vault database is copied between devices. Copying a whole vault
+directory while it is open could never merge two independently edited
+databases safely.
 
-MVPK import currently uses a temporary plaintext staging file inside the existing core import path before re-encrypting into the destination vault. This is not a persistent sync/media cache. Normal cleanup removes staging files, but process crashes, storage snapshots and filesystem recovery may retain them. The implementation and deployment guide must identify the staging location accurately; OS permissions and full-disk encryption matter. Server E2EE does not make a compromised client safe.
+Because the same secret both encrypts packages and authenticates to the relay,
+the relay's operator sees the digest of the very secret that would decrypt the
+bucket. That is acceptable only because the digest is not invertible and the
+key never leaves the devices; it is also why a stolen data directory is not a
+decryption key.
 
-## Deliberate MVP limits
+## Boundaries
 
-Whole-file encrypted packages are resumable; changing a file requires a new encrypted package, not a binary delta. There is no real-time editing, automatic text merge, multitenancy or team roles. The initial package format carries content, names and directory paths, but not tags or empty-folder-only changes. Do not claim complete metadata parity. Remote history is retained without automatic pruning, so operators must monitor disk use and back up the service. Client sync while the app is closed is not implied by a UI retry timer.
+- Selection is opt-in: a device uploads what the user picked and downloads what
+  it has not imported. There is no "download everything on connect".
+- A device keeps a local ledger of imported names so an unchanged item is never
+  re-exported and an imported package is never re-imported.
+- Import stages each file as plaintext inside the destination vault
+  (`<vault-root>/.import-staging/`) before re-encrypting it. That is a real
+  plaintext window on the client, and it is documented as one.
+- No real-time collaboration, no background service while the app is closed, no
+  multitenancy, no team roles.
 
-## Verification contract
+## Where the details live
 
-Server tests must exercise real requests for pairing, revocation, resumed transfer/restart, hashes, limits, CAS/idempotency/history and consistent backup. Native tests must exercise queue persistence, error/retry state and the actual MVPK export/import boundary. The critical end-to-end scenario is two independent local vaults syncing a file without revealing it to the relay, followed by an offline edit, reconnect and concurrent conflict. A successful build is not a substitute for this scenario or for native UI testing.
+- [sync-protocol.md](sync-protocol.md) — endpoints, status codes, limits,
+  storage and durability, and the full threat model.
+- [self-hosted-sync.md](self-hosted-sync.md) — setup with a URL and a key,
+  backup, recovery, rotation and the operational limits.
+- [../deployment/README.md](../deployment/README.md) — the container
+  deployment with TLS at Caddy.

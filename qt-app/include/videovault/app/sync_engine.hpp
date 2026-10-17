@@ -1,54 +1,140 @@
 #pragma once
-#include <QObject>
-#include <QJsonObject>
+
+#include "videovault/app/sync_state.hpp"
+
 #include <QJsonArray>
-#include <QUrl>
+#include <QJsonObject>
+#include <QObject>
+#include <QString>
 #include <QStringList>
-#include <QTimer>
-#include <atomic>
+#include <QUrl>
+
+#include <functional>
 #include <memory>
 #include <vector>
-#include <functional>
-class QLockFile;
-namespace videovault::core { class Vault; struct VideoInfo; struct FolderInfo; }
+
+class QTimer;
+
+namespace videovault::core {
+class Vault;
+struct FolderInfo;
+struct VideoInfo;
+}
+
 namespace videovault::app {
+
+namespace sync {
+class Client;
+}
+
+class Job;
+
+// The protocol 4 client: accounts, one vault, versioned records and lazy,
+// resumable transfers of content-addressed packages.
+//
+// Signing in uses the account password (POST /auth/login then POST /auth/token)
+// and stores the device token encrypted under the key derived from the *vault*
+// password, so a stolen state file is useless without the vault. The vault
+// password itself is never sent anywhere: the server only ever sees a bearer
+// token and opaque bytes.
+//
+// A pass is optimistic and never destructive. Local items without a record are
+// exported (blob first, then the record with base_version and an operation id),
+// remote records that are not local are queued for a lazy download, and a
+// version conflict never overwrites: the loser is re-published as a new record
+// named "<name> (conflict copy)" so both items survive. Deletes are tombstones,
+// which stay listed as debris the user can restore or purge.
 class SyncEngine final : public QObject {
- Q_OBJECT
+    Q_OBJECT
+
 public:
- explicit SyncEngine(std::shared_ptr<core::Vault> vault,const QString& privateDirectory={},QObject* parent=nullptr);
- ~SyncEngine() override;
- bool unlock(const QString& recovery);
- void pair(const QUrl& url,const QString& pin,const QString& deviceName,const QString& code);
- void select(const QStringList& localIds,const QStringList& remoteIds);
- void syncNow();
- void refreshRemote();
- void history(const QString& object);
- void devices();
- void acknowledgeDeletes();
- void setBandwidth(int kibPerSecond);
- void stop();
- bool busy() const { return busy_; }
- bool failed() const { return failed_; }
- QString status() const { return status_; }
- QString privateDirectory() const { return directory_; }
- QJsonObject state() const { return state_; }
- QJsonArray catalog() const { return catalog_; }
- static QString relativePath(const core::VideoInfo&,const std::vector<core::FolderInfo>&);
- static QString fingerprint(const core::VideoInfo&,const std::vector<core::FolderInfo>&);
+    SyncEngine(std::shared_ptr<core::Vault> vault, sync::Keys keys,
+               const QString& privateDirectory = {}, QObject* parent = nullptr);
+    ~SyncEngine() override;
+
+    // Where this vault's sync state lives, derived from the vault folder.
+    static QString stateDirectoryFor(const QString& vaultRoot);
+
+    // -- sign in ----------------------------------------------------------
+    // Runs on a worker: checks the protocol, logs in, issues one device token
+    // and loads the vault list. The password is wiped as soon as it is used.
+    void signIn(const QUrl& server, const QString& email, const QString& password,
+                const QString& deviceLabel = {});
+    void refreshVaults();
+    void signOut();
+
+    // -- choose -----------------------------------------------------------
+    void chooseVault(const QString& vaultId, const QString& name);
+    // "Choose folder": the local vault this remote vault mirrors. Only the
+    // vault this engine was created for is accepted, because a different folder
+    // is a different local database with a different key.
+    bool setLocalFolder(const QString& path);
+    QString localFolder() const { return state_.folder; }
+
+    // -- work -------------------------------------------------------------
+    void syncNow();                              // publish, pull, then receive
+    void receive(const QString& recordId);       // download one queued item now
+    void tombstone(const QString& recordId);     // reversible delete
+    void restore(const QString& recordId);       // undelete
+    void purge(const QString& recordId);         // delete permanently
+    void stop();
+
+    // The server's page size. 500 is the default; a smaller value makes the
+    // cursor walk visible (and is what the paging test uses).
+    void setPageLimit(int limit);
+
+    bool busy() const { return busy_; }
+    bool failed() const { return failed_; }
+    QString status() const { return status_; }
+    bool signedIn() const { return state_.signedIn(); }
+    QString server() const { return state_.server; }
+    QString email() const { return state_.email; }
+    QString vaultId() const { return state_.vaultId; }
+    QString vaultName() const { return state_.vaultName; }
+
+    QJsonArray vaults() const { return vaults_; }
+    QJsonArray items() const { return items_; }          // records + local items, with state
+    QJsonArray transfers() const;                        // live transfer rows
+    QJsonObject stats() const { return stats_; }
+    QString privateDirectory() const { return directory_; }
+    QString stagingDirectory() const { return directory_ + QStringLiteral("/staging"); }
+    int pendingCount() const;
+
+    // The relative path an item carries inside its package: its folder path and
+    // its name, with '/' separators.
+    static QString relativePath(const core::VideoInfo& video, const std::vector<core::FolderInfo>& folders);
+
+    // What the operation needs before it may start.
+    enum class Launch { SignedOut, Token, Vault };
+
 signals:
- void changed();
- void finished();
- void libraryChanged();
- void information(const QString& title,const QString& body);
+    void changed();
+    void finished();
+    void libraryChanged();
+
 private:
- void launch(const std::function<void(class SyncSession&)>& action);
- std::shared_ptr<core::Vault> vault_;
- QString directory_,recovery_,status_;
- QJsonObject state_;
- QJsonArray catalog_;
- std::shared_ptr<QLockFile> lock_;
- std::shared_ptr<std::atomic_bool> stop_;
- QTimer timer_;
- int attempts_{0}; bool busy_{false},failed_{false};
+    void launch(const QString& label, Launch requirement,
+                const std::function<void(Job&, sync::Client&)>& task);
+    void reject(const QString& message);
+    void save();
+    void load();
+    void refreshItems();
+
+    std::shared_ptr<core::Vault> vault_;
+    sync::Keys keys_;
+    QString directory_;
+    sync::SyncState state_;
+
+    std::shared_ptr<Job> job_;
+    QTimer* pulse_{nullptr};
+    QJsonArray vaults_;
+    QJsonArray items_;
+    QJsonArray transfers_;
+    QJsonObject stats_;
+    QString status_;
+    int pageLimit_{500};
+    bool busy_{false};
+    bool failed_{false};
 };
+
 }

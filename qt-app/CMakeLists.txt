@@ -89,9 +89,11 @@ set(MVP_APP_SOURCES
 )
 
 add_library(MegaVaultSync STATIC
-    src/sync_protocol.cpp src/sync_state.cpp src/sync_package.cpp
-    src/sync_engine.cpp src/sync_dialog.cpp
-    include/videovault/app/sync_engine.hpp)
+    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp
+    include/videovault/app/sync_state.hpp
+    include/videovault/app/sync_client.hpp
+    include/videovault/app/sync_engine.hpp
+    include/videovault/app/sync_page.hpp)
 target_include_directories(MegaVaultSync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(MegaVaultSync PUBLIC cxx_std_20)
 set_target_properties(MegaVaultSync PROPERTIES AUTOMOC ON)
@@ -222,23 +224,21 @@ endif()
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
     enable_testing()
-    add_executable(VideoVaultSyncProtocolTests tests/sync_protocol.cpp src/sync_protocol.cpp)
-    target_include_directories(VideoVaultSyncProtocolTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(VideoVaultSyncProtocolTests PRIVATE Qt5::Core Qt5::Network)
-    target_compile_features(VideoVaultSyncProtocolTests PRIVATE cxx_std_20)
+    # Sync protocol 4: the state file, key derivation and validation run without
+    # a server; the engine test runs against a real sync_server through
+    # tests/run_sync_live.py and skips when it is started without one.
     add_executable(VideoVaultSyncStateTests tests/sync_state.cpp)
     add_executable(VideoVaultSyncEngineTests tests/sync_engine.cpp)
-    add_executable(VideoVaultSyncDialogTests tests/sync_dialog.cpp)
+    add_executable(VideoVaultSyncDialogTests tests/sync_page.cpp)
     foreach(_sync_test VideoVaultSyncStateTests VideoVaultSyncEngineTests VideoVaultSyncDialogTests)
         target_link_libraries(${_sync_test} PRIVATE MegaVaultSync)
-        mvp_copy_runtime_dlls(${_sync_test})
     endforeach()
-    mvp_copy_runtime_dlls(VideoVaultSyncProtocolTests)
-    add_test(NAME sync_protocol COMMAND VideoVaultSyncProtocolTests)
     add_test(NAME sync_state COMMAND VideoVaultSyncStateTests)
     add_test(NAME sync_engine COMMAND VideoVaultSyncEngineTests)
-    add_test(NAME sync_dialog COMMAND VideoVaultSyncDialogTests)
-    set_tests_properties(sync_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(sync_engine PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME sync_page COMMAND VideoVaultSyncDialogTests)
+    set_tests_properties(sync_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp

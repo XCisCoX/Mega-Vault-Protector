@@ -1,7 +1,7 @@
 #include "videovault/app/app_update.hpp"
 #include "videovault/app/batch_worker.hpp"
 #include "videovault/app/sync_engine.hpp"
-#include "videovault/app/sync_dialog.hpp"
+#include "videovault/app/sync_page.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/music_window.hpp"
@@ -71,6 +71,8 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
+#include <QLinearGradient>
 #include <QLinearGradient>
 #include <QPen>
 #include <QPixmap>
@@ -155,6 +157,19 @@ std::filesystem::path pathFromText(const QString& text) {
 
 QString textFromPath(const std::filesystem::path& path) {
     return QString::fromStdWString(path.wstring());
+}
+
+// The sync keys come from the vault password, so they are derived while it is
+// still in the worker's hand; only the derived keys leave this function, never
+// the password. A failure here leaves sync locked and does not block the vault.
+sync::Keys deriveSyncKeys(const std::filesystem::path& root, const std::string& password) {
+    try {
+        const QString folder = textFromPath(root);
+        return sync::deriveKeys(SyncEngine::stateDirectoryFor(folder),
+                                QString::fromUtf8(password.data(), int(password.size())));
+    } catch (...) {
+        return {};
+    }
 }
 
 QPixmap scaledIcon(const char* resource, const int side) {
@@ -689,35 +704,32 @@ QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id
 
 const QPixmap& folderPixmap() {
     static const QPixmap pix = [] {
-        const QPixmap source(":/icons/files_folder.png");
-        QPixmap tinted = tintedIcon(source, QColor(0x4F, 0xA6, 0xF7));
-        if (tinted.isNull()) {
-            QPixmap image(256, 256);
-            image.fill(Qt::transparent);
-            return image;
-        }
-        // The file has a wide empty margin. Crop to the folder itself so a
-        // tile shows a folder, not a small mark in a dark square.
-        const QImage image = tinted.toImage().convertToFormat(QImage::Format_ARGB32);
-        int minX = image.width();
-        int minY = image.height();
-        int maxX = 0;
-        int maxY = 0;
-        for (int y = 0; y < image.height(); ++y) {
-            for (int x = 0; x < image.width(); ++x) {
-                if (qAlpha(image.pixel(x, y)) <= 16) {
-                    continue;
-                }
-                minX = std::min(minX, x);
-                minY = std::min(minY, y);
-                maxX = std::max(maxX, x);
-                maxY = std::max(maxY, y);
-            }
-        }
-        if (maxX > minX && maxY > minY) {
-            tinted = QPixmap::fromImage(image.copy(minX, minY, maxX - minX + 1, maxY - minY + 1));
-        }
-        return tinted.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        // Drawn as vector paths, not the old bitmap resource: tinting and
+        // stretching a small PNG left visibly aliased edges at row size.
+        constexpr int size = 256;
+        QPixmap image(size, size);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal width = size * 0.84;
+        const qreal height = size * 0.62;
+        const qreal left = (size - width) / 2.0;
+        const qreal top = (size - height) / 2.0 + size * 0.06;
+        const qreal radius = size * 0.055;
+        QPainterPath tab;
+        tab.addRoundedRect(QRectF(left, top - size * 0.11, width * 0.44, size * 0.22),
+            radius, radius);
+        painter.fillPath(tab, QColor(0x2F, 0x74, 0xC0));
+        QPainterPath body;
+        body.addRoundedRect(QRectF(left, top, width, height), radius, radius);
+        QLinearGradient shade(0, top, 0, top + height);
+        shade.setColorAt(0.0, QColor(0x63, 0xB4, 0xF7));
+        shade.setColorAt(1.0, QColor(0x33, 0x84, 0xD2));
+        painter.fillPath(body, shade);
+        painter.setPen(QPen(QColor(255, 255, 255, 30), size * 0.008));
+        painter.drawPath(body);
+        painter.end();
+        return image;
     }();
     return pix;
 }
@@ -1454,6 +1466,10 @@ void placePopup(QDialog* popup, const QPoint& globalPosition) {
 
 struct VaultOperationResult {
     bool succeeded{false};
+    // The sync keys, derived inside the worker while the password is still in
+    // hand. Empty when the derivation failed; the vault still opens, sync then
+    // says it is locked.
+    sync::Keys keys;
     // The vault was already open for a swap. The password checked out, so the
     // same vault stays in place instead of being opened a second time.
     bool resumed{false};
@@ -2078,6 +2094,14 @@ QWidget* MainWindow::buildLoginPage() {
     auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
+    // The remembered vault path is longer than this field, and a line edit that
+    // keeps the caret at the end shows only "...\scratch\ux-vault", which reads
+    // as a clipped control. Show the start of the path and keep the whole value
+    // in a tooltip.
+    QObject::connect(loginLocation_, &QLineEdit::textChanged, loginLocation_, [this] {
+        loginLocation_->setCursorPosition(0);
+        loginLocation_->setToolTip(loginLocation_->text());
+    });
     layout->addWidget(loginLocationRow_);
 
     cloudFields_ = new QWidget(card);
@@ -2108,6 +2132,16 @@ QWidget* MainWindow::buildLoginPage() {
     loginPassword_->setEchoMode(QLineEdit::Password);
     loginPassword_->setPlaceholderText(QStringLiteral("Password"));
     layout->addWidget(loginPassword_);
+    // The card's vertical layout was squeezing these rows, so the text fields
+    // and Browse rendered with their bottom halves clipped. Give them a floor
+    // instead of letting the layout compress them below their usable height.
+    for (QLineEdit* field : {loginLocation_, loginPassword_, setupLocation_}) {
+        if (field != nullptr) {
+            field->setMinimumHeight(38);
+        }
+    }
+    browse->setMinimumHeight(38);
+    browse->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     loginError_ = errorLabel(card);
     layout->addWidget(loginError_);
@@ -2116,7 +2150,7 @@ QWidget* MainWindow::buildLoginPage() {
     unlockButton_->setProperty("primary", true);
     auto* cloudButton = new QPushButton(QStringLiteral("Sync setup is available after unlocking a local vault"), card);
     cloudButton->setEnabled(false);
-    cloudButton->setToolTip(QStringLiteral("Legacy remote vault-password login is disabled. Sync v2 never sends your vault password."));
+    cloudButton->setToolTip(QStringLiteral("Legacy remote vault-password login is disabled. Sync never sends your vault password."));
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
     layout->addWidget(unlockButton_);
     layout->addWidget(cloudButton);
@@ -2206,7 +2240,19 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addWidget(importButton_);
     titleRow->addWidget(shareButton_);
     auto* syncButton = new QPushButton(QStringLiteral("Sync"), toolbar);
-    syncButton->setToolTip(QStringLiteral("Self-hosted E2EE sync v2 — local vault stays your library"));
+    syncButton->setObjectName(QStringLiteral("syncSection"));
+    syncButton->setCursor(Qt::PointingHandCursor);
+    syncButton->setFocusPolicy(Qt::NoFocus);
+    // A section entry, drawn like the other text actions in the chrome, not a
+    // boxed button between the round icons.
+    syncButton->setStyleSheet(QStringLiteral(
+        "QPushButton { color: #3390ec; background: transparent; border: none;"
+        " padding: 0 10px; min-height: 32px; max-height: 32px;"
+        " font: 600 13px \"Segoe UI\"; }"
+        "QPushButton:hover { color: #5aa6f0; background: rgba(255, 255, 255, 18);"
+        " border-radius: 16px; }"));
+    syncButton->setToolTip(QStringLiteral("Encrypted sync: sign in to your account, pick a vault, "
+                                         "and let it sync lazily in both directions"));
     connect(syncButton, &QPushButton::clicked, this, &MainWindow::openSync);
     titleRow->addWidget(syncButton);
     titleRow->addWidget(settingsButton_);
@@ -3446,13 +3492,14 @@ void MainWindow::beginCreate() {
     watcher_->setFuture(QtConcurrent::run([root, password, parameters] {
         auto outcome = std::make_shared<VaultOperationResult>();
         auto result = core::Vault::create(root, *password, parameters);
-        clearSecret(*password);
         if (result) {
+            outcome->keys = deriveSyncKeys(root, *password);
             outcome->succeeded = true;
             outcome->vault = std::make_unique<core::Vault>(std::move(result.value()));
         } else {
             outcome->error = result.error();
         }
+        clearSecret(*password);
         return outcome;
     }));
 }
@@ -3494,25 +3541,27 @@ void MainWindow::beginOpen() {
         auto outcome = std::make_shared<VaultOperationResult>();
         if (resumeShare) {
             auto checked = core::Vault::validate_password(root, *password);
-            clearSecret(*password);
             if (!checked) {
                 outcome->error = checked.error();
             } else if (!checked.value()) {
                 outcome->error = core::VaultError{core::VaultErrorCode::WrongPassword, {}};
             } else {
+                outcome->keys = deriveSyncKeys(root, *password);
                 outcome->succeeded = true;
                 outcome->resumed = true;
             }
+            clearSecret(*password);
             return outcome;
         }
         auto result = core::Vault::open(root, *password);
-        clearSecret(*password);
         if (result) {
+            outcome->keys = deriveSyncKeys(root, *password);
             outcome->succeeded = true;
             outcome->vault = std::make_unique<core::Vault>(std::move(result.value()));
         } else {
             outcome->error = result.error();
         }
+        clearSecret(*password);
         return outcome;
     }));
 }
@@ -3542,6 +3591,9 @@ void MainWindow::finishOperation() {
             shareServer_->setLocalVault(vault_);
         }
     }
+    // A fresh set of sync keys for this unlock; the old material is wiped.
+    syncKeys_.wipe();
+    syncKeys_ = outcome->keys;
     QSettings settings;
     settings.setValue(QStringLiteral("vault/location"), textFromPath(vault_->root_path()));
     showUnlocked();
@@ -3730,20 +3782,32 @@ void MainWindow::finishBatch(const bool ok, const QString& message, const int co
 void MainWindow::openSync() {
     if (!vault_ || !vault_->is_unlocked() || pages_->currentWidget() != unlockedPage_) return;
     if (!syncEngine_) {
-        syncEngine_ = new SyncEngine(vault_, {}, this);
+        syncEngine_ = new SyncEngine(vault_, syncKeys_, {}, this);
         connect(syncEngine_, &SyncEngine::libraryChanged, this, [this] { refreshGallery(); refreshTagFilter(); });
         connect(syncEngine_, &SyncEngine::changed, this, [this] {
             if (syncEngine_ && syncEngine_->failed()) showStatus(syncEngine_->status(), true);
         });
     }
-    if (!syncDialog_) {
-        syncDialog_ = new SyncDialog(syncEngine_, vault_, this);
-        connect(syncDialog_, &QObject::destroyed, this, [this] { syncDialog_ = nullptr; });
+    if (!syncPage_) {
+        // The sync surface is a page in the content stack, like the player and
+        // the text reader: same window, same chrome, no second frame.
+        syncPage_ = new SyncPage(syncEngine_, vault_, contentStack_);
+        connect(syncPage_, &SyncPage::closed, this, [this] {
+            if (contentStack_ != nullptr && syncPage_ != nullptr
+                && contentStack_->currentWidget() == syncPage_) {
+                fadeStack(contentStack_, pages_);
+            }
+        });
+        connect(syncPage_, &QObject::destroyed, this, [this] { syncPage_ = nullptr; });
     }
-    syncDialog_->show(); syncDialog_->raise(); syncDialog_->activateWindow();
+    fadeStack(contentStack_, syncPage_);
 }
 void MainWindow::closeSync() {
-    if (syncDialog_) { delete syncDialog_; syncDialog_ = nullptr; }
+    if (contentStack_ != nullptr && syncPage_ != nullptr
+        && contentStack_->currentWidget() == syncPage_ && pages_ != nullptr) {
+        contentStack_->setCurrentWidget(pages_);
+    }
+    if (syncPage_) { contentStack_->removeWidget(syncPage_); delete syncPage_; syncPage_ = nullptr; }
     if (syncEngine_) { syncEngine_->stop(); delete syncEngine_; syncEngine_ = nullptr; }
 }
 
@@ -6470,6 +6534,17 @@ void MainWindow::refreshGallery() {
             .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, total_bytes)))));
         watcher->deleteLater();
         paintGalleryBatch();
+        // The first layout after unlock could paint rows before their final
+        // geometry was known, so the opening screen stayed wrong until the first
+        // selection forced a repaint. Lay out and repaint once the batch lands.
+        if (iconList_ != nullptr) {
+            iconList_->doItemsLayout();
+            iconList_->viewport()->update();
+        }
+        if (detailsTree_ != nullptr) {
+            detailsTree_->doItemsLayout();
+            detailsTree_->viewport()->update();
+        }
     });
     watcher->setFuture(QtConcurrent::run([vault] {
         auto videos = vault->list_videos();
@@ -7108,6 +7183,21 @@ void MainWindow::showUnlocked() {
     refreshTagFilter();
     refreshGallery();
     flushExternalImports();
+    // The first layout pass runs against the pre-show geometry and can inherit
+    // the icon-mode item sizes, which left the opening screen wrong until the
+    // user selected something. Re-run layout once the event loop has settled.
+    QTimer::singleShot(0, this, [this] {
+        layoutLibraryChrome();
+        if (iconList_ != nullptr) {
+            iconList_->doItemsLayout();
+            iconList_->viewport()->update();
+        }
+        if (detailsTree_ != nullptr) {
+            detailsTree_->doItemsLayout();
+            detailsTree_->viewport()->update();
+        }
+        update();
+    });
     beginUpdateCheck();
 }
 
@@ -7226,6 +7316,7 @@ void MainWindow::peerChanged() {
         }
         vault_->lock();
         vault_.reset();
+        syncKeys_.wipe();
         return;
     }
     if (!vault_ || !vault_->is_unlocked()) {
@@ -7865,6 +7956,7 @@ void MainWindow::lockVault() {
         return;
     }
     closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
+    syncKeys_.wipe(); // The derived sync keys die with the unlock.
     // Sharing stays up until Stop sharing, including a swap. The lock screen
     // only hides this library; the other side can still look and copy.
     finishPeerApproval(false);

@@ -1,29 +1,62 @@
 package org.megavideoprotect.app
 
 import java.net.URI
+import java.security.MessageDigest
 
-/** Pure safety decisions shared by transfers and the setup UI. */
+internal fun ByteArray.hex(): String = joinToString("") { "%02x".format(it.toInt() and 255) }
+internal fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).hex()
+
+/**
+ * Pure rules shared by the v3 engine, the HTTP client and the setup screen.
+ * Everything here is checkable without Android: the protocol names a package
+ * by the SHA-256 of its own bytes and authenticates with one 64-hex key.
+ */
 object SyncPolicy {
-    /** core/src/metadata.cpp writes a stable 24-byte vault.ready marker (magic + vault ID).
-     * Include it so recreating a vault at the same path cannot reuse another vault's local IDs. */
+    /** The relay accepts at most one MiB per PUT body; ranges use the same size. */
+    const val CHUNK = 1024 * 1024
+
+    /** A listing is JSON, never a package. */
+    const val MAX_RESPONSE = 8 * 1024 * 1024
+
+    /** The relay's hard package limit is 1 GiB; refuse anything near it early. */
+    const val MAX_PACKAGE = 1024L * 1024 * 1024
+
+    /** Max packages a single listing may carry before the client calls it broken. */
+    const val MAX_PACKAGES = 100_000
+
+    fun isHex(value: String, length: Int): Boolean =
+        value.length == length && value.all { it in '0'..'9' || it in 'a'..'f' }
+
+    /** Exactly 64 lowercase hex characters plus the .mvpk suffix. */
+    fun isPackageName(name: String): Boolean =
+        name.length == 69 && name.endsWith(".mvpk") && isHex(name.substring(0, 64), 64)
+
+    fun packageName(hash: String): String {
+        require(isHex(hash, 64)) { "A package name is the SHA-256 of its bytes." }
+        return "$hash.mvpk"
+    }
+
+    /** HTTPS anywhere; plain HTTP only for a loopback relay (development). */
+    fun validServer(value: String): Boolean = runCatching {
+        val url = URI(value)
+        val host = url.host ?: return false
+        url.userInfo == null && url.query == null && url.fragment == null &&
+            (url.path.isNullOrEmpty() || url.path == "/") &&
+            (url.scheme == "https" ||
+                (url.scheme == "http" && host in setOf("127.0.0.1", "localhost", "[::1]", "::1")))
+    }.getOrDefault(false)
+
+    /**
+     * core/src/metadata.cpp writes a stable 24-byte vault.ready marker (magic +
+     * vault ID). Include it so recreating a vault at the same path cannot reuse
+     * another vault's local-ID ledger.
+     */
     fun vaultNamespace(canonicalRoot: String, readyMarker: ByteArray): String {
         require(readyMarker.size == 24) { "Invalid vault identity marker" }
-        return java.security.MessageDigest.getInstance("SHA-256")
-            .digest(canonicalRoot.toByteArray(Charsets.UTF_8) + byteArrayOf(0) + readyMarker)
-            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        return sha256(canonicalRoot.toByteArray(Charsets.UTF_8) + byteArrayOf(0) + readyMarker)
     }
-    fun validId(value: String) = Regex("[0-9a-f]{32}").matches(value)
-    fun validSecret(value: String) = Regex("[0-9a-f]{64}").matches(value)
-    fun retryMillis(attempt: Int, jitter: Int): Long =
-        minOf(60_000L, 1000L shl attempt.coerceIn(0, 6)) + jitter.coerceIn(0, 999)
-    fun needsDownload(seen: Long, remote: Long) = remote > seen
-    fun importedId(before: Set<Long>, after: Set<Long>): Long? = (after - before).singleOrNull()
-    fun validEndpoint(value: String): Boolean = runCatching {
-        val u = URI(value)
-        u.host != null && u.userInfo == null && u.query == null && u.fragment == null &&
-            (u.path.isNullOrEmpty() || u.path == "/") &&
-            (u.scheme == "https" || (u.scheme == "http" && u.host in setOf("127.0.0.1", "localhost", "[::1]")))
-    }.getOrDefault(false)
+
+    /** Folder chain of one item as "/"-joined package path segments. */
     fun folderPath(id: Long, folders: Map<Long, Pair<Long, String>>): String {
         var cursor = id
         val seen = HashSet<Long>()

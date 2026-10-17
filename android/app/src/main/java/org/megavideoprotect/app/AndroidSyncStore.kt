@@ -12,7 +12,12 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import org.json.JSONObject
 
-/** Per-vault, private encrypted preferences; pending encrypted MVPK lives in no-backup storage. */
+/**
+ * The protocol 3 ledger: server URL, library key and local-id -> package-name
+ * mappings, AES-GCM sealed with a non-exportable per-vault Android Keystore key
+ * and kept inside the app-private no-backup directory. Exported .mvpk files and
+ * resumed downloads are already ciphertext and live in the same directory.
+ */
 class AndroidSyncStore(context: Context, vaultRoot: String) : SyncStateStore {
     private val namespace = run {
         val root = File(vaultRoot).canonicalFile
@@ -20,39 +25,66 @@ class AndroidSyncStore(context: Context, vaultRoot: String) : SyncStateStore {
         check(ready.isFile && ready.length() == 24L) { "Local vault identity unavailable" }
         SyncPolicy.vaultNamespace(root.path, ready.readBytes())
     }
-    private val prefs = context.getSharedPreferences("sync_v2", Context.MODE_PRIVATE)
-    private val alias = "mvp-sync-v2-$namespace"
-    override val directory = File(context.noBackupFilesDir, "sync-v2/$namespace").apply { check(isDirectory || mkdirs()) }
+    private val prefs = context.getSharedPreferences("sync_v3", Context.MODE_PRIVATE)
+    private val alias = "mvp-sync-v3-$namespace"
+    override val directory = File(context.noBackupFilesDir, "sync-v3/$namespace")
+        .apply { check(isDirectory || mkdirs()) }
+
+    init {
+        // Protocol 2 kept a per-device secret and a pending queue here. That
+        // state is obsolete and must not outlive the client that used it.
+        runCatching {
+            context.getSharedPreferences("sync_v2", Context.MODE_PRIVATE).edit().clear().commit()
+            File(context.noBackupFilesDir, "sync-v2/$namespace").deleteRecursively()
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry("mvp-sync-v2-$namespace")
+        }
+    }
+
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(alias, null) as? SecretKey)?.let { return it }
-        check(!prefs.contains(namespace)) { "Sync Keystore key missing; old state cannot be decrypted. Do not reset pending work." }
+        check(!prefs.contains(namespace)) {
+            "The sync ledger cannot be decrypted: its Android Keystore key is missing. Remove the app's sync state to start over."
+        }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setRandomizedEncryptionRequired(true).build())
+            init(
+                KeyGenParameterSpec.Builder(
+                    alias,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setRandomizedEncryptionRequired(true)
+                    .build(),
+            )
         }.generateKey()
     }
+
     override fun load(): JSONObject {
         val sealed = prefs.getString(namespace, null) ?: return JSONObject()
         val bytes = Base64.decode(sealed, Base64.NO_WRAP)
-        require(bytes.size >= 28)
+        require(bytes.size >= 28) { "The sync ledger is damaged." }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
         cipher.updateAAD(namespace.toByteArray(Charsets.UTF_8))
         return JSONObject(String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8))
     }
+
     override fun save(state: JSONObject) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         cipher.updateAAD(namespace.toByteArray(Charsets.UTF_8))
         val bytes = cipher.iv + cipher.doFinal(state.toString().toByteArray(Charsets.UTF_8))
-        check(prefs.edit().putString(namespace, Base64.encodeToString(bytes, Base64.NO_WRAP)).commit()) { "Cannot durably save sync state" }
+        check(prefs.edit().putString(namespace, Base64.encodeToString(bytes, Base64.NO_WRAP)).commit()) {
+            "Cannot durably save the sync ledger."
+        }
     }
 }
 
+/** The existing native MVPK export/import bridge, one item per package. */
 class NativeSyncVault : SyncVault {
     override fun isUnlocked() = !RemoteVault.connected() && CoreBridge.nativeIsUnlocked()
+
     override fun files(): List<SyncLocalFile> {
         check(isUnlocked()) { "Unlock a local vault" }
         val folders = Json.folders(CoreBridge.nativeListFolders())
@@ -60,26 +92,40 @@ class NativeSyncVault : SyncVault {
         return Json.videos(CoreBridge.nativeListVideos()).map { file ->
             val folder = SyncPolicy.folderPath(file.folderId, tree)
             val path = if (folder.isEmpty()) file.name else "$folder/${file.name}"
-            // Core media bytes are immutable for a local ID. Rename, move and tags do not change that ID.
-            // Package hash is separately persisted with this complete local metadata fingerprint.
-            val signature = sha256(org.json.JSONArray().put(file.id).put(file.size).put(file.importedAt)
-                .put(path).put(org.json.JSONArray(file.tags.sorted())).toString().toByteArray(Charsets.UTF_8))
+            // Core media bytes are immutable for a local ID; rename, move and tags
+            // do not change that ID. This fingerprint only decides "unchanged".
+            val signature = sha256(
+                org.json.JSONArray().put(file.id).put(file.size).put(file.importedAt)
+                    .put(path).put(org.json.JSONArray(file.tags.sorted()))
+                    .toString().toByteArray(Charsets.UTF_8),
+            )
             SyncLocalFile(file.id, path, signature)
         }
     }
+
     override fun export(file: SyncLocalFile, target: File, key: String) {
         check(isUnlocked())
         val path = file.path.split('/').joinToString("/") { packageSegment(it) }
         require(path.toByteArray(Charsets.UTF_8).size <= 1024) { "Package path too long" }
-        val directories = path.split('/').dropLast(1).runningFold("") { parent, name -> if (parent.isEmpty()) name else "$parent/$name" }.drop(1)
-        val result = CoreBridge.Result.parse(CoreBridge.nativeExportPackage(target.absolutePath, key, longArrayOf(file.id), arrayOf(path), directories.toTypedArray(), false))
+        val directories = path.split('/').dropLast(1)
+            .runningFold("") { parent, name -> if (parent.isEmpty()) name else "$parent/$name" }
+            .drop(1)
+        val result = CoreBridge.Result.parse(
+            CoreBridge.nativeExportPackage(
+                target.absolutePath,
+                key,
+                longArrayOf(file.id),
+                arrayOf(path),
+                directories.toTypedArray(),
+                false,
+            ),
+        )
         check(result.ok) { result.error.ifBlank { result.detail } }
     }
+
+    /** JNI returns the number of imported items, not their local IDs. */
     override fun import(source: File, key: String): Int {
         check(isUnlocked())
-        // JNI currently returns count only, never an imported ID. Engine reconciles before/after IDs,
-        // and asks for explicit mapping on dedup. Native import can transiently decrypt locally;
-        // the core owns its temporary-directory policy, not this encrypted sync cache.
         val raw = CoreBridge.nativeImportPackage(source.absolutePath, key, 0L)
         val result = CoreBridge.Result.parse(raw)
         check(result.ok) { result.error.ifBlank { result.detail } }

@@ -3,13 +3,41 @@ services:
     build:
       context: ..
       dockerfile: deployment/Dockerfile
-    command: [serve, --host, "0.0.0.0", --port, "8766", --proxy-mode, --quota-bytes, "${SYNC_QUOTA_BYTES:-10737418240}", --max-blob-bytes, "${SYNC_MAX_BLOB_BYTES:-1073741824}", --workers, "16", --request-timeout, "30"]
-    environment:
-      MV_SYNC_PROXY_MODE: "1"
+    # Protocol 4 CLI: `serve` plus a TLS pair. There is no secret in this
+    # argument list — accounts, vaults and device tokens live in the data
+    # directory, so nothing has to be generated before the first start.
+    # The relay binds the container interface, so it has to present TLS on this
+    # hop: `serve` refuses a non-loopback bind without --cert/--key. The pair in
+    # deployment/tls protects the internal network only and no client ever sees
+    # it (see README.md step 1 and Caddyfile).
+    #
+    # The image ENTRYPOINT already supplies `--data /data`; --web names the
+    # static UI copied in by the Dockerfile.
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8766"
+      - --cert
+      - /run/tls/relay-cert.pem
+      - --key
+      - /run/tls/relay-key.pem
+      - --web
+      - /app/sync_web
+      - --quota-bytes
+      - "${SYNC_QUOTA_BYTES:-10737418240}"
+      - --max-file-bytes
+      - "${SYNC_MAX_FILE_BYTES:-1073741824}"
+      - --workers
+      - "16"
+      - --request-timeout
+      - "30"
     networks: [relay]
     volumes:
       - sync_data:/data
-      - sync_backups:/backups
+      - ./tls:/run/tls:ro
+    user: "10001:10001"
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -17,8 +45,21 @@ services:
     pids_limit: 128
     mem_limit: 256m
     restart: unless-stopped
+    # The relay only speaks TLS, so the probe verifies no certificate on this
+    # hop — but it does insist on protocol 4, so an older server answering on
+    # the same volume is caught here instead of by a client.
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=3).read()"]
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, ssl, urllib.request;
+          c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);
+          c.check_hostname = False;
+          c.verify_mode = ssl.CERT_NONE;
+          body = json.load(urllib.request.urlopen('https://127.0.0.1:8766/healthz', context=c, timeout=3));
+          raise SystemExit(0 if body.get('ok') and body.get('protocol') == 4 else 'expected protocol 4')
       interval: 30s
       timeout: 5s
       retries: 3
@@ -45,7 +86,7 @@ networks:
     internal: true
   edge: {}
 volumes:
-  sync_data: {}
-  sync_backups: {}
+  sync_data:
+    name: megavault-sync-data
   caddy_data: {}
   caddy_config: {}

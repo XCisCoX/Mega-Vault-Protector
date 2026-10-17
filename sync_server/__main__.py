@@ -1,182 +1,64 @@
-"""Opaque sync relay. No package decoding or vault secrets enter this module."""
+"""mvpk sync server: accounts, vaults, versioned records and encrypted packages.
+
+Protocol 4.  The server never holds a key, a file name or a byte of plaintext:
+a package is named by the SHA-256 of its own ciphertext and a record is a small
+metadata row that the client wrote.  See ``docs/sync-mega-plan.md``.
+
+    python -m sync_server --data DIR serve
+    python -m sync_server --data DIR account create owner@example.com
+"""
 import argparse
-from contextlib import contextmanager
-import hashlib
+import getpass
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
-import secrets
-import shutil
-import sqlite3
 import socket
+import sqlite3
 import ssl
-import time
+import sys
 import threading
-from urllib.parse import urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, parse_qs
 
-def digest(value):
-    return hashlib.sha256(value.encode()).hexdigest()
+from .store import (CHUNK_BYTES, HEX64, PROTOCOL, RECORD_ID, SESSION_SECONDS, VAULT_ID,
+                    Problem, Store, digest)
 
-def valid(value, length):
-    return isinstance(value, str) and re.fullmatch('[0-9a-f]{%d}' % length, value) is not None
+COOKIE = 'mv_session'
+CSP = ("default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; "
+       "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+DIGITS = re.compile(r'[0-9]{1,19}')
+EMAIL = re.compile(r'[^@\s]{1,64}@[^@\s.]{1,63}(\.[^@\s.]{1,63})+')
+OPERATION = re.compile(r'[A-Za-z0-9._:-]{1,128}')
+STATIC = {
+    '/': ('index.html', 'text/html; charset=utf-8'),
+    '/index.html': ('index.html', 'text/html; charset=utf-8'),
+    '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+    '/style.css': ('style.css', 'text/css; charset=utf-8'),
+    '/icon.svg': ('icon.svg', 'image/svg+xml'),
+}
 
-def sync_directory(path):
-    """Persist directory entries on POSIX; Windows has no directory fsync."""
-    if os.name != 'nt':
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
 
-class Store:
-    def __init__(self, directory):
-        self.root = Path(directory)
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.database = self.root / 'sync.sqlite3'
-        self.blobs = self.root / 'blobs'
-        self.blobs.mkdir(exist_ok=True, mode=0o700)
-        with self.connect() as db:
-            version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 1:
-                raise ValueError('database schema is newer than this server')
-            db.execute('PRAGMA journal_mode=WAL')
-            db.executescript('''
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS codes(hash TEXT PRIMARY KEY, expires REAL NOT NULL);
-                CREATE TABLE IF NOT EXISTS pair_limits(ip TEXT PRIMARY KEY, start REAL NOT NULL, failures INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS blobs(hash TEXT PRIMARY KEY, size INTEGER NOT NULL, offset INTEGER NOT NULL, complete INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS versions(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, revision INTEGER NOT NULL, blob TEXT NOT NULL, size INTEGER NOT NULL, deleted INTEGER NOT NULL, UNIQUE(id,revision));
-                CREATE TABLE IF NOT EXISTS operations(device TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(device,operation));
-                PRAGMA user_version=1;
-                COMMIT;
-            ''')
+def integer(value):
+    """Strict non-negative integer, or None.  Rejects booleans, signs, spaces."""
+    return int(value) if isinstance(value, str) and DIGITS.fullmatch(value) else None
 
-    @contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.database, timeout=5)
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA synchronous=FULL')
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
-
-    def devices(self):
-        with self.connect() as db:
-            return {'devices': [{'id': r['id'], 'name': r['name'], 'revoked': bool(r['revoked'])} for r in db.execute('SELECT * FROM devices ORDER BY id')]}
-
-    def recover(self):
-        """Reconcile filesystem writes interrupted before metadata commit."""
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('SELECT * FROM blobs').fetchall()
-            known = set()
-            for row in rows:
-                h = row['hash']
-                final, partial = self.blobs / h, self.blobs / (h + '.part')
-                known.update((h, h + '.part'))
-                if row['complete']:
-                    if not final.is_file() or final.stat().st_size != row['size']:
-                        raise ValueError('completed blob missing or wrong size')
-                    if partial.exists():
-                        partial.unlink()
-                elif final.exists():
-                    with final.open('rb') as f:
-                        good = hashlib.file_digest(f, 'sha256').hexdigest() == h
-                    if not good or final.stat().st_size != row['size']:
-                        raise ValueError('interrupted finalize digest mismatch')
-                    db.execute('UPDATE blobs SET complete=1,offset=size WHERE hash=?', (h,))
-                    if partial.exists():
-                        partial.unlink()
-                elif partial.exists():
-                    if partial.stat().st_size < row['offset']:
-                        raise ValueError('durable partial data missing')
-                    with partial.open('r+b') as f:
-                        f.truncate(row['offset'])
-                        f.flush()
-                        os.fsync(f.fileno())
-                elif row['offset']:
-                    raise ValueError('durable partial data missing')
-            for path in self.blobs.iterdir():
-                if path.name not in known and re.fullmatch(r'[0-9a-f]{64}(\.part)?', path.name):
-                    path.unlink()
-
-    def backup(self, destination):
-        target = Path(destination).resolve()
-        if target.exists() or target == self.root.resolve() or self.root.resolve() in target.parents:
-            raise ValueError('backup destination must be new and outside data directory')
-        target.parent.mkdir(parents=True, exist_ok=True)
-        stage = target.with_name(target.name + '.staging-' + secrets.token_hex(8))
-        stage.mkdir(mode=0o700)
-        (stage / 'blobs').mkdir(mode=0o700)
-        try:
-            with self.connect() as lock:
-                # Hold writer lock throughout DB snapshot + mutable partial copy.
-                # Copy via a separate read connection to avoid backup's own
-                # write-transaction busy loop. Immutable files are never GC'd.
-                lock.execute('BEGIN IMMEDIATE')
-                with self.connect() as source:
-                    dest = sqlite3.connect(stage / 'sync.sqlite3')
-                    try:
-                        source.backup(dest)
-                        rows = dest.execute('SELECT hash,size,offset,complete FROM blobs').fetchall()
-                        for h, size, offset, complete in rows:
-                            path = self.blobs / (h if complete else h + '.part')
-                            if not path.exists() and not complete:
-                                path = self.blobs / h
-                            output = stage / 'blobs' / (h if complete else h + '.part')
-                            remaining = size if complete else offset
-                            with path.open('rb') as src, output.open('wb') as dst:
-                                while remaining:
-                                    chunk = src.read(min(65536, remaining))
-                                    if not chunk:
-                                        raise ValueError('backup blob is incomplete')
-                                    dst.write(chunk)
-                                    remaining -= len(chunk)
-                                dst.flush()
-                                os.fsync(dst.fileno())
-                            if complete:
-                                with output.open('rb') as f:
-                                    if hashlib.file_digest(f, 'sha256').hexdigest() != h:
-                                        raise ValueError('backup blob digest mismatch')
-                        if dest.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-                            raise ValueError('backup database failed integrity check')
-                        dest.execute('PRAGMA journal_mode=DELETE')
-                    finally:
-                        dest.close()
-            sync_directory(stage / 'blobs')
-            sync_directory(stage)
-            os.rename(stage, target)
-            sync_directory(target.parent)
-        except BaseException:
-            if stage.exists():
-                shutil.rmtree(stage)
-            raise
-
-class Problem(Exception):
-    def __init__(self, status, value):
-        self.status, self.value = status, value
 
 class Server(ThreadingHTTPServer):
-    """Reject excess connections without allocating unbounded threads."""
+    """Bounded workers; one slow client cannot spawn threads without limit."""
+
     daemon_threads = True
     request_queue_size = 32
 
-    def __init__(self, address, store, args, context=None):
+    def __init__(self, address, store, args, context, static):
         self.store = store
-        self.slots = threading.BoundedSemaphore(args.workers)
-        self.request_timeout = args.request_timeout
         self.context = context
+        self.static = static
         self.quota_bytes = args.quota_bytes
-        self.max_blob_bytes = args.max_blob_bytes
-        self.max_objects = args.max_objects
-        self.max_blobs = args.max_blobs
+        self.max_file_bytes = args.max_file_bytes
+        self.request_timeout = args.request_timeout
+        self.slots = threading.BoundedSemaphore(args.workers)
         super().__init__(address, Handler)
 
     def process_request(self, request, address):
@@ -213,257 +95,397 @@ class Server(ThreadingHTTPServer):
             self.slots.release()
 
     def handle_error(self, request, client_address):
-        # Deliberately omit exception/request material from server logs.
+        # Deliberately omit exception, path and header material from logs.
         pass
 
+
 class Handler(BaseHTTPRequestHandler):
+    server_version = 'mvpk-sync/4'
+    protocol_version = 'HTTP/1.1'
+
     def log_message(self, *args):
         pass
 
-    def reply(self, status, value):
+    def version_string(self):
+        return self.server_version  # do not advertise the interpreter version
+
+    @property
+    def store(self):
+        return self.server.store
+
+    # -- plumbing ---------------------------------------------------------
+
+    def reply(self, status, value, headers=()):
         payload = json.dumps(value, separators=(',', ':')).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Cache-Control', 'no-store')
+        for name, header in headers:
+            self.send_header(name, header)
+        if self.close_connection:
+            self.send_header('Connection', 'close')
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(payload)
 
-    def read_bytes(self, limit):
+    def empty(self, status):
+        self.send_response(status)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def read_chunk(self, limit):
         if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
+            self.close_connection = True
             raise Problem(400, {'error': 'one Content-Length required'})
-        raw = self.headers['Content-Length']
-        if not re.fullmatch('[0-9]+', raw):
-            raise ValueError()
-        length = int(raw)
+        length = integer(self.headers['Content-Length'])
+        if length is None:
+            raise Problem(400, {'error': 'invalid Content-Length'})
         if length > limit:
-            raise Problem(413, {'error': 'body too large'})
+            self.close_connection = True
+            raise Problem(413, {'error': 'chunk too large'})
         data = self.rfile.read(length)
         if len(data) != length:
+            self.close_connection = True
             raise Problem(400, {'error': 'incomplete body'})
         return data
 
-    def body(self):
-        value = json.loads(self.read_bytes(65536))
+    def json_body(self, limit=65536):
+        kind = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if kind != 'application/json':
+            # A form or text/plain body cannot be sent cross-site without a
+            # preflight, so this also closes the CSRF door on cookie writes.
+            raise Problem(415, {'error': 'application/json required'})
+        data = self.read_chunk(limit)
+        try:
+            value = json.loads(data)
+        except ValueError:
+            raise Problem(400, {'error': 'invalid JSON'})
         if not isinstance(value, dict):
-            raise ValueError()
+            raise Problem(400, {'error': 'JSON object required'})
         return value
 
-    def reply_records(self, key, rows):
-        """Stream manifests/history without materializing unbounded history."""
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Connection', 'close')
-        self.end_headers()
-        self.wfile.write(('{' + json.dumps(key) + ':[').encode())
-        first = True
-        for row in rows:
-            if not first:
-                self.wfile.write(b',')
-            self.wfile.write(json.dumps(self.record(row), separators=(',', ':')).encode())
-            first = False
-        self.wfile.write(b']}')
+    def secure(self):
+        return bool(self.server.context) or self.headers.get('X-Forwarded-Proto', '').lower() == 'https'
 
-    def auth(self):
+    def cookies(self):
+        jar = {}
+        for header in self.headers.get_all('Cookie', []):
+            for part in header.split(';'):
+                name, _, value = part.strip().partition('=')
+                if name:
+                    jar[name] = value
+        return jar
+
+    def cookie_header(self, token, age):
+        return '%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d%s' % (
+            COOKIE, token, age, '; Secure' if self.secure() else '')
+
+    def only(self, *methods):
+        if self.command not in methods:
+            raise Problem(405, {'error': 'method not allowed'})
+
+    def same_origin(self):
+        """Reject a cookie-authenticated write aimed at us from another site."""
+        origin = self.headers.get('Origin')
+        if origin is not None and urlsplit(origin).netloc != self.headers.get('Host', ''):
+            raise Problem(403, {'error': 'cross-origin request refused'})
+
+    def authenticate(self, bearer_only=False):
+        """The account id behind a device token or a web session cookie."""
         header = self.headers.get('Authorization', '')
-        token = header[7:] if header.startswith('Bearer ') else ''
-        if not valid(token, 64):
+        if header.startswith('Bearer '):
+            account = self.store.token_account(header[7:].strip())
+            if account:
+                return account
             raise Problem(401, {'error': 'unauthorized'})
-        with self.server.store.connect() as db:
-            device = db.execute('SELECT id FROM devices WHERE token_hash=? AND revoked=0', (digest(token),)).fetchone()
-        if device is None:
-            raise Problem(401, {'error': 'unauthorized'})
-        return device['id']
+        if bearer_only:
+            raise Problem(401, {'error': 'device token required'})
+        token = self.cookies().get(COOKIE)
+        account = self.store.session_account(token) if token else None
+        if account:
+            return account
+        raise Problem(401, {'error': 'unauthorized'})
+
+    # -- routes -----------------------------------------------------------
 
     def dispatch(self):
-        if self.command == 'GET' and self.path == '/healthz':
-            return self.reply(200, {'ok': True, 'protocol': 2})
-        if self.command == 'POST' and self.path == '/v2/pair':
-            value = self.body()
-            if set(value) != {'code', 'name'}:
-                raise ValueError()
-            code, name = value.get('code'), value.get('name')
-            if not valid(code, 64) or not isinstance(name, str) or not 1 <= len(name) <= 128 or any(ord(c) < 32 for c in name):
-                raise Problem(400, {'error': 'invalid pairing request'})
-            with self.server.store.connect() as db:
-                db.execute('BEGIN IMMEDIATE')
-                ip = self.client_address[0]
-                now = time.time()
-                db.execute('DELETE FROM pair_limits WHERE start<?', (now-60,))
-                limit = db.execute('SELECT failures FROM pair_limits WHERE ip=?', (ip,)).fetchone()
-                if limit and limit['failures'] >= 10:
-                    raise Problem(429, {'error': 'pairing rate limit'})
-                result = db.execute('DELETE FROM codes WHERE hash=? AND expires>?', (digest(code), time.time()))
-                if result.rowcount != 1:
-                    db.execute('INSERT INTO pair_limits VALUES(?,?,1) ON CONFLICT(ip) DO UPDATE SET failures=failures+1', (ip, now))
-                    db.commit()
-                    raise Problem(401, {'error': 'invalid or expired pairing code'})
-                token, device = secrets.token_hex(32), secrets.token_hex(16)
-                db.execute('INSERT INTO devices(id,name,token_hash) VALUES(?,?,?)', (device, name, digest(token)))
-            return self.reply(200, {'device_id': device, 'token': token})
-        device = self.auth()
         url = urlsplit(self.path)
-        if self.command == 'GET' and url.path == '/v2/objects':
-            with self.server.store.connect() as db:
-                rows = db.execute('SELECT * FROM versions WHERE sequence IN (SELECT MAX(sequence) FROM versions GROUP BY id) ORDER BY sequence')
-                return self.reply_records('objects', rows)
-        object_match = re.fullmatch('/v2/objects/([0-9a-f]{32})(/history)?', url.path)
-        if object_match:
-            oid = object_match[1]
-            if self.command == 'GET' and object_match[2]:
-                with self.server.store.connect() as db:
-                    rows = db.execute('SELECT * FROM versions WHERE id=? ORDER BY revision', (oid,))
-                    return self.reply_records('versions', rows)
-            if self.command == 'POST' and not object_match[2]:
-                return self.commit(oid, device)
-        match = re.fullmatch('/v2/blobs/([0-9a-f]{64})', url.path)
-        if match:
-            return self.blob(match[1], parse_qs(url.query), device)
-        if self.command == 'GET' and self.path == '/v2/devices':
-            return self.reply(200, self.server.store.devices())
+        path, query = url.path, parse_qs(url.query, keep_blank_values=True)
+        if path == '/healthz':
+            self.only('GET', 'HEAD')
+            return self.reply(200, {'ok': True, 'protocol': PROTOCOL})
+        if path.startswith('/auth/'):
+            return self.auth_route(path[len('/auth/'):])
+        if path in STATIC:
+            return self.static(path)
+        if path == '/v1/vaults' or path.startswith('/v1/vaults/'):
+            return self.vault_route(path, query)
         raise Problem(404, {'error': 'not found'})
 
-    @staticmethod
-    def record(row):
-        result = dict(row)
-        result['deleted'] = bool(result['deleted'])
-        return result
+    def static(self, path):
+        self.only('GET', 'HEAD')
+        name, kind = STATIC[path]
+        try:
+            data = (self.server.static / name).read_bytes()
+        except OSError:
+            raise Problem(404, {'error': 'not found'})
+        self.send_response(200)
+        self.send_header('Content-Type', kind)
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        if kind.startswith('text/html'):
+            self.send_header('Content-Security-Policy', CSP)
+            self.send_header('X-Frame-Options', 'DENY')
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(data)
 
-    def commit(self, oid, device):
-        value = self.body()
-        if set(value) != {'base_revision', 'blob', 'size', 'deleted', 'operation_id'}:
-            raise ValueError()
-        base, size, deleted, blob, op = (value[k] for k in ('base_revision', 'size', 'deleted', 'blob', 'operation_id'))
-        if type(base) is not int or type(size) is not int or not 0 <= base < 2**63-1 or not 0 <= size < 2**63 or type(deleted) is not bool or not valid(op, 32):
-            raise ValueError()
-        if (deleted and (blob != '' or size != 0)) or (not deleted and not valid(blob, 64)):
-            raise ValueError()
-        payload = json.dumps({'id': oid, **value}, sort_keys=True, separators=(',', ':'))
-        with self.server.store.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            # Revocation is serialized with commits, including replays.
-            if not db.execute('SELECT 1 FROM devices WHERE id=? AND revoked=0', (device,)).fetchone():
-                raise Problem(401, {'error': 'unauthorized'})
-            replay = db.execute('SELECT * FROM operations WHERE device=? AND operation=?', (device, op)).fetchone()
-            if replay:
-                if replay['payload'] != payload:
-                    raise Problem(409, {'error': 'operation id reused with different payload'})
-                return self.reply(200, json.loads(replay['result']))
-            current = db.execute('SELECT * FROM versions WHERE id=? ORDER BY revision DESC LIMIT 1', (oid,)).fetchone()
-            if current is None and db.execute('SELECT COUNT(DISTINCT id) FROM versions').fetchone()[0] >= self.server.max_objects:
-                raise Problem(507, {'error': 'catalog quota exceeded'})
-            if base != (current['revision'] if current else 0):
-                raise Problem(409, {'current': self.record(current) if current else None})
-            if not deleted:
-                stored = db.execute('SELECT * FROM blobs WHERE hash=? AND complete=1', (blob,)).fetchone()
-                if stored is None or stored['size'] != size:
-                    raise Problem(422, {'error': 'complete matching blob required'})
-            db.execute('INSERT INTO versions(id,revision,blob,size,deleted) VALUES(?,?,?,?,?)', (oid, base+1, blob, size, int(deleted)))
-            result = self.record(db.execute('SELECT * FROM versions WHERE id=? AND revision=?', (oid, base+1)).fetchone())
-            db.execute('INSERT INTO operations VALUES(?,?,?,?)', (device, op, payload, json.dumps(result)))
-        return self.reply(200, result)
+    # -- accounts and sessions --------------------------------------------
 
-    def blob(self, h, query, device):
-        store = self.server.store
-        complete_path, partial = store.blobs / h, store.blobs / (h + '.part')
-        data = self.read_bytes(1048576) if self.command == 'PUT' else None
-        with store.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            if not db.execute('SELECT 1 FROM devices WHERE id=? AND revoked=0', (device,)).fetchone():
-                raise Problem(401, {'error': 'unauthorized'})
-            row = db.execute('SELECT * FROM blobs WHERE hash=?', (h,)).fetchone()
-            # Rename may have completed before a crashed transaction committed.
-            if row and not row['complete'] and complete_path.exists():
-                with complete_path.open('rb') as f:
-                    good = hashlib.file_digest(f, 'sha256').hexdigest() == h
-                if good and complete_path.stat().st_size == row['size']:
-                    db.execute('UPDATE blobs SET complete=1,offset=size WHERE hash=?', (h,))
-                    row = db.execute('SELECT * FROM blobs WHERE hash=?', (h,)).fetchone()
+    def auth_route(self, tail):
+        if tail == 'register':
+            self.only('POST')
+            body = self.json_body()
+            email, password = body.get('email'), body.get('password')
+            if not isinstance(email, str) or len(email) > 190 or not EMAIL.fullmatch(email):
+                raise Problem(400, {'error': 'a valid email address is required'})
+            if not isinstance(password, str) or not 10 <= len(password) <= 200:
+                raise Problem(400, {'error': 'password must be 10 to 200 characters'})
+            return self.reply(201, {'account': self.store.create_account(email.lower(), password)})
+
+        if tail == 'login':
+            self.only('POST')
+            body = self.json_body()
+            email, password = body.get('email'), body.get('password')
+            if not isinstance(email, str) or not isinstance(password, str):
+                raise Problem(400, {'error': 'email and password required'})
+            account = self.store.check_password(email[:190], password[:200])
+            if account is None:
+                raise Problem(401, {'error': 'invalid email or password'})
+            token = self.store.start_session(account['id'])
+            return self.reply(200, {'account': account},
+                              [('Set-Cookie', self.cookie_header(token, SESSION_SECONDS))])
+
+        if tail == 'logout':
+            self.only('POST')
+            self.same_origin()
+            token = self.cookies().get(COOKIE)
+            if token:
+                self.store.end_session(token)
+            return self.reply(200, {'ok': True}, [('Set-Cookie', self.cookie_header('', 0))])
+
+        if tail == 'session':
+            self.only('GET', 'HEAD')
+            return self.reply(200, {'account': self.store.account(self.authenticate())})
+
+        if tail == 'token' or tail.startswith('token/'):
+            return self.token_route(tail)
+        raise Problem(404, {'error': 'not found'})
+
+    def token_route(self, tail):
+        # Issuing a device token is a website action, so the cookie does it.
+        account = self.authenticate()
+        if tail == 'token':
+            if self.command in ('GET', 'HEAD'):
+                return self.reply(200, {'tokens': self.store.tokens(account)})
+            self.only('GET', 'HEAD', 'POST')
+            if self.command == 'POST':
+                self.same_origin()
+                label = self.json_body().get('label', 'device')
+                if not isinstance(label, str) or not 0 < len(label) <= 60 \
+                        or any(ord(c) < 32 for c in label):
+                    raise Problem(400, {'error': 'invalid label'})
+                token = self.store.issue_token(account, label)
+                # The only time the token itself leaves the server.
+                return self.reply(201, {'token': token, 'id': digest(token), 'label': label})
+        identifier = tail[len('token/'):]
+        if not HEX64.fullmatch(identifier):
+            raise Problem(404, {'error': 'no such token'})
+        self.only('DELETE')
+        self.same_origin()
+        self.store.revoke_token(account, identifier)
+        return self.reply(200, {'ok': True})
+
+    # -- vaults, records and blobs ----------------------------------------
+
+    def vault_route(self, path, query):
+        parts = [part for part in path[len('/v1/vaults'):].split('/') if part]
+        # Records and packages belong to devices, which hold a bearer token.
+        # The website has no vault key, so its cookie is not accepted for them.
+        device_only = len(parts) > 1 and parts[1] in ('records', 'blobs')
+        account = self.authenticate(bearer_only=device_only)
+        if not parts:
+            self.only('GET', 'HEAD', 'POST')
+            if self.command in ('GET', 'HEAD'):
+                return self.reply(200, {
+                    'vaults': self.store.vaults(account),
+                    'quota': {'bytes': self.store.usage(account), 'limit': self.server.quota_bytes}})
+            if self.command == 'POST':
+                self.same_origin()
+                vault = self.store.create_vault(account, self.vault_name(self.json_body()))
+                return self.reply(201, {'vault': vault})
+
+        if not parts or not VAULT_ID.fullmatch(parts[0]) or self.store.vault(account, parts[0]) is None:
+            # Unknown and someone else's vault are the same answer on purpose.
+            raise Problem(404, {'error': 'no such vault'})
+        vault = parts[0]
+        if device_only:
+            if parts[1] == 'blobs':
+                return self.blob_route(vault, account, parts, query)
+            return self.record_route(vault, parts, query)
+        if len(parts) == 1:
+            self.only('GET', 'HEAD', 'PATCH', 'DELETE')
+            if self.command in ('GET', 'HEAD'):
+                return self.reply(200, {'vault': self.store.vault(account, vault)})
+            if self.command == 'PATCH':
+                self.same_origin()
+                name = self.vault_name(self.json_body())
+                return self.reply(200, {'vault': self.store.rename_vault(account, vault, name)})
+            if self.command == 'DELETE':
+                self.same_origin()
+                self.store.delete_vault(account, vault)
+                return self.empty(204)
+        raise Problem(404, {'error': 'not found'})
+
+    def vault_name(self, body):
+        name = body.get('name')
+        if not isinstance(name, str) or not name.strip() or len(name) > 120 \
+                or any(ord(c) < 32 for c in name):
+            raise Problem(400, {'error': 'invalid vault name'})
+        return name.strip()
+
+    def record_route(self, vault, parts, query):
+        if len(parts) == 2:
+            self.only('GET', 'HEAD')
+            since = integer((query.get('since') or ['0'])[0])
+            limit = integer((query.get('limit') or ['500'])[0])
+            if since is None or not limit:
+                raise Problem(400, {'error': 'invalid since or limit'})
+            records, cursor = self.store.records(vault, since, min(limit, 1000))
+            return self.reply(200, {'records': records, 'cursor': cursor})
+        if len(parts) < 3 or not RECORD_ID.fullmatch(parts[2]):
+            raise Problem(404, {'error': 'no such record'})
+        record = parts[2]
+        if len(parts) == 3:
+            self.only('GET', 'HEAD', 'PUT', 'DELETE')
+            if self.command in ('GET', 'HEAD'):
+                found = self.store.record(vault, record)
+                if found is None:
+                    raise Problem(404, {'error': 'no such record'})
+                return self.reply(200, {'record': found})
             if self.command == 'PUT':
-                total = int(self.headers.get('X-Blob-Size', '-1'))
-                offsets = query.get('offset', [])
-                if len(offsets) != 1 or not re.fullmatch('[0-9]+', offsets[0]) or total < 0:
-                    raise ValueError()
-                offset = int(offsets[0])
-                if total > self.server.max_blob_bytes:
-                    raise Problem(413, {'error': 'blob too large'})
-                if row and total != row['size']:
-                    raise Problem(409, {'offset': row['offset']})
-                if row and row['complete']:
-                    db.commit()
-                    return self.reply(200, {'offset': total, 'complete': True})
-                actual = row['offset'] if row else 0
-                if offset != actual:
-                    raise Problem(409, {'offset': actual})
-                if actual + len(data) > total or (not data and total != 0):
-                    raise Problem(400, {'error': 'invalid chunk size'})
-                if row is None:
-                    if db.execute('SELECT COUNT(*) FROM blobs').fetchone()[0] >= self.server.max_blobs:
-                        raise Problem(507, {'error': 'blob count quota exceeded'})
-                    used = db.execute('SELECT COALESCE(SUM(size),0) FROM blobs').fetchone()[0]
-                    if used + total > self.server.quota_bytes:
-                        raise Problem(507, {'error': 'storage quota exceeded'})
-                    db.execute('INSERT INTO blobs VALUES(?,?,0,0)', (h, total))
-                with partial.open('r+b' if partial.exists() else 'w+b') as f:
-                    f.truncate(actual)
-                    f.seek(actual)
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                sync_directory(store.blobs)
-                actual += len(data)
-                complete = actual == total
-                if complete:
-                    with partial.open('rb') as f:
-                        good = hashlib.file_digest(f, 'sha256').hexdigest() == h
-                    if not good:
-                        partial.unlink()
-                        db.execute('DELETE FROM blobs WHERE hash=?', (h,))
-                        db.commit()
-                        raise Problem(422, {'error': 'digest mismatch'})
-                    os.replace(partial, complete_path)
-                    sync_directory(store.blobs)
-                db.execute('UPDATE blobs SET offset=?,complete=? WHERE hash=?', (actual, int(complete), h))
-                db.commit()
-                return self.reply(200, {'offset': actual, 'complete': complete})
-            if row is None or (self.command == 'GET' and not row['complete']):
-                raise Problem(404, {'error': 'blob not found'})
-            if self.command == 'HEAD':
-                db.commit()
-                self.send_response(200)
-                self.send_header('Content-Length', str(row['size']))
-                self.send_header('X-Upload-Offset', str(row['offset']))
-                self.send_header('X-Blob-Complete', str(bool(row['complete'])).lower())
-                self.end_headers()
-                return
-            if self.command != 'GET':
-                raise Problem(405, {'error': 'method not allowed'})
-            size = row['size']
+                return self.put_record(vault, record)
+            if self.command == 'DELETE':
+                purge = (query.get('purge') or ['0'])[0] in ('1', 'true', 'yes')
+                if self.store.tombstone(vault, record, purge) is None:
+                    return self.empty(204)
+                return self.reply(200, {'record': self.store.record(vault, record)})
+        if len(parts) == 4 and parts[3] == 'restore':
+            self.only('POST')
+            return self.reply(200, {'record': self.store.restore(vault, record)})
+        raise Problem(404, {'error': 'not found'})
+
+    def put_record(self, vault, record):
+        body = self.json_body()
+        operation = body.get('operation')
+        if not isinstance(operation, str) or not OPERATION.fullmatch(operation):
+            raise Problem(400, {'error': 'operation id required'})
+        base = body.get('base_version')
+        if not isinstance(base, int) or isinstance(base, bool) or not 0 <= base <= 2**62:
+            raise Problem(400, {'error': 'base_version required'})
+        status, payload = self.store.write_record(vault, record, base, self.record_fields(body), operation)
+        self.reply(status, payload)
+
+    def record_fields(self, body):
+        name = body.get('name')
+        if not isinstance(name, str) or not name.strip() or len(name) > 255 \
+                or any(ord(c) < 32 for c in name):
+            raise Problem(400, {'error': 'invalid name'})
+        path = body.get('path') or ''
+        if not isinstance(path, str) or len(path) > 1024 or any(ord(c) < 32 for c in path):
+            raise Problem(400, {'error': 'invalid path'})
+        tags = body.get('tags') or []
+        if not isinstance(tags, list) or len(tags) > 32 \
+                or not all(isinstance(tag, str) and 0 < len(tag) <= 64 for tag in tags):
+            raise Problem(400, {'error': 'invalid tags'})
+        package = body.get('package') or None
+        if package is not None and (not isinstance(package, str) or not HEX64.fullmatch(package)):
+            raise Problem(400, {'error': 'invalid package'})
+        size = body.get('size', 0)
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= self.server.max_file_bytes:
+            raise Problem(400, {'error': 'invalid size'})
+        return {'name': name, 'path': path, 'tags': tags, 'package': package, 'size': size}
+
+    def blob_route(self, vault, account, parts, query):
+        if len(parts) != 3 or not HEX64.fullmatch(parts[2]):
+            raise Problem(404, {'error': 'not found'})
+        name = parts[2] + '.mvpk'
+        if self.command == 'PUT':
+            return self.put_blob(vault, account, name, query)
+        if self.command in ('GET', 'HEAD'):
+            return self.send_blob(vault, name, self.command == 'HEAD')
+        self.only('DELETE')
+        self.store.delete_blob(vault, name)
+        self.empty(204)
+
+    def put_blob(self, vault, account, name, query):
+        data = self.read_chunk(CHUNK_BYTES)
+        total = integer(self.headers.get('X-Total-Size'))
+        offsets = query.get('offset', ['0'])
+        offset = integer(offsets[0]) if len(offsets) == 1 else None
+        if total is None or offset is None:
+            raise Problem(400, {'error': 'X-Total-Size and ?offset=N required'})
+        status, payload = self.store.put_blob_chunk(
+            vault, name, data, total, offset, account,
+            self.server.max_file_bytes, self.server.quota_bytes)
+        self.reply(status, payload)
+
+    def send_blob(self, vault, name, head):
+        row = self.store.blob(vault, name)
+        if row is None:
+            raise Problem(404, {'error': 'not found'})
+        size = row['size']
+        if head:
+            self.send_response(200)
+            self.send_header('Content-Length', str(size))
+            self.send_header('X-Offset', str(row['offset']))
+            self.send_header('X-Complete', 'true' if row['complete'] else 'false')
+            self.end_headers()
+            return
+        if not row['complete']:
+            raise Problem(404, {'error': 'not found'})
         start, end, status = 0, size - 1, 200
         value = self.headers.get('Range')
         if value:
             match = re.fullmatch(r'bytes=(\d+)-(\d*)', value)
             if not match:
                 raise Problem(416, {'error': 'invalid range'})
-            start, end = int(match[1]), int(match[2]) if match[2] else size-1
+            start, end = int(match[1]), int(match[2]) if match[2] else size - 1
             if start >= size or end < start or end >= size:
                 raise Problem(416, {'error': 'invalid range'})
             status = 206
-        with complete_path.open('rb') as f:
-            self.send_response(status)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Content-Length', str(end-start+1))
-            if status == 206:
-                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-            self.end_headers()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Length', str(end - start + 1))
+        self.send_header('ETag', '"%s"' % name)
+        self.send_header('Accept-Ranges', 'bytes')
+        if status == 206:
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+        self.end_headers()
+        remaining = end - start + 1
+        with self.store.blob_path(vault, name).open('rb') as f:
             f.seek(start)
-            remaining = end-start+1
-            while remaining:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
+            while remaining > 0:
+                block = f.read(min(65536, remaining))
+                if not block:
                     break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+                self.wfile.write(block)
+                remaining -= len(block)
+
+    # -- entry point ------------------------------------------------------
 
     def run_request(self):
         try:
@@ -477,83 +499,113 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    do_GET = do_POST = do_PUT = do_HEAD = run_request
+    do_GET = do_PUT = do_HEAD = do_DELETE = do_POST = do_PATCH = run_request
+
+
+# -- command line ---------------------------------------------------------
+
+def read_password(stdin):
+    if stdin:
+        return sys.stdin.readline().rstrip('\r\n')
+    first = getpass.getpass('password: ')
+    if getpass.getpass('repeat: ') != first:
+        raise SystemExit('passwords do not match')
+    return first
+
 
 def main():
     if os.name != 'nt':
         os.umask(0o077)
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data', required=True)
+    parser = argparse.ArgumentParser(prog='sync_server',
+                                     description='Protocol 4 encrypted vault sync server.')
+    parser.add_argument('--data', required=True, metavar='DIR', help='data directory (SQLite + blobs)')
     sub = parser.add_subparsers(dest='command', required=True)
-    serve = sub.add_parser('serve')
+
+    serve = sub.add_parser('serve', help='serve one data directory')
     serve.add_argument('--host', default='127.0.0.1')
     serve.add_argument('--port', type=int, default=8766)
-    serve.add_argument('--quota-bytes', type=int, default=10*1024**3)
-    serve.add_argument('--max-blob-bytes', type=int, default=1024**3)
-    serve.add_argument('--max-objects', type=int, default=10000)
-    serve.add_argument('--max-blobs', type=int, default=100000)
+    serve.add_argument('--cert', metavar='PEM', help='TLS certificate chain')
+    serve.add_argument('--key', metavar='PEM', help='TLS private key')
+    serve.add_argument('--quota-bytes', type=int, default=10 * 1024**3, help='per account')
+    serve.add_argument('--max-file-bytes', type=int, default=1024**3)
     serve.add_argument('--workers', type=int, default=16)
     serve.add_argument('--request-timeout', type=float, default=30)
-    serve.add_argument('--cert')
-    serve.add_argument('--key')
-    serve.add_argument('--proxy-mode', action='store_true', help='private container network only; requires MV_SYNC_PROXY_MODE=1')
-    sub.add_parser('pair-code')
-    sub.add_parser('devices')
-    revoke = sub.add_parser('revoke')
-    revoke.add_argument('device_id')
-    backup = sub.add_parser('backup')
-    backup.add_argument('destination')
+    serve.add_argument('--web', metavar='DIR', help='static web UI directory (default: sync_web/)')
+
+    account = sub.add_parser('account', help='operator account commands')
+    account.add_argument('action', choices=('create',))
+    account.add_argument('email', nargs='?')
+    account.add_argument('--password-stdin', action='store_true', help='read the password from stdin')
+
+    vault = sub.add_parser('vault', help="list an account's vaults")
+    vault.add_argument('action', choices=('list',))
+    vault.add_argument('email')
+
+    token = sub.add_parser('token', help='issue a device token')
+    token.add_argument('action', choices=('issue',))
+    token.add_argument('email')
+    token.add_argument('--label', default='cli')
     args = parser.parse_args()
-    try:
-        store = Store(args.data)
-    except (ValueError, OSError, sqlite3.Error) as e:
-        parser.error(str(e))
-    if args.command == 'pair-code':
-        code = secrets.token_hex(32)
-        with store.connect() as db:
-            db.execute('DELETE FROM codes WHERE expires<=?', (time.time(),))
-            db.execute('INSERT INTO codes VALUES(?,?)', (digest(code), time.time()+600))
-        print(code)
-    elif args.command == 'devices':
-        print(json.dumps(store.devices()))
-    elif args.command == 'revoke':
-        if not valid(args.device_id, 32):
-            parser.error('invalid device id')
-        with store.connect() as db:
-            if db.execute('UPDATE devices SET revoked=1 WHERE id=?', (args.device_id,)).rowcount != 1:
-                parser.error('unknown device')
-    elif args.command == 'backup':
-        try:
-            store.backup(args.destination)
-        except (ValueError, OSError, sqlite3.Error) as e:
-            parser.error(str(e))
-    else:
-        if not 0 < args.quota_bytes < 2**63 or not 0 < args.max_blob_bytes < 2**63 or not 1 <= args.max_objects <= 10000 or not 1 <= args.max_blobs <= 1000000 or not 1 <= args.workers <= 256 or not 0 < args.request_timeout <= 300:
-            parser.error('invalid resource limits')
+
+    if args.command == 'serve':
+        if not 0 < args.max_file_bytes <= 1024**3:
+            parser.error('--max-file-bytes must be between 1 and 1 GiB')
+        if not 0 < args.quota_bytes <= 2**63 - 1:
+            parser.error('--quota-bytes out of range')
+        if not 1 <= args.workers <= 256 or not 0 < args.request_timeout <= 300:
+            parser.error('invalid workers or request timeout')
         if bool(args.cert) != bool(args.key):
             parser.error('TLS requires both --cert and --key')
-        if args.proxy_mode and (os.environ.get('MV_SYNC_PROXY_MODE') != '1' or args.cert):
-            parser.error('proxy mode requires explicit MV_SYNC_PROXY_MODE=1 and no direct TLS')
+        loopback = args.host in ('localhost', '::1')
         try:
-            loopback = ipaddress.ip_address(args.host).is_loopback
+            loopback = loopback or ipaddress.ip_address(args.host).is_loopback
         except ValueError:
-            loopback = False
-        if not loopback and not args.cert and not args.proxy_mode:
-            parser.error('non-loopback binding requires TLS certificate and key')
+            pass
+        if not loopback and not args.cert:
+            parser.error('non-loopback binding requires --cert and --key (TLS)')
         context = None
         if args.cert:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(args.cert, args.key)
+        static = Path(args.web) if args.web else Path(__file__).resolve().parent.parent / 'sync_web'
         try:
-            store.recover()
+            store = Store(args.data)
         except (ValueError, OSError, sqlite3.Error) as e:
             parser.error(str(e))
-        with Server((args.host, args.port), store, args, context) as server:
+        with Server((args.host, args.port), store, args, context, static) as server:
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
+        return
+
+    # Operator commands run against the same directory the server uses.
+    try:
+        store = Store(args.data, recover=False)
+    except (ValueError, OSError, sqlite3.Error) as e:
+        parser.error(str(e))
+    if not args.email:
+        parser.error('an email address is required')
+    found = store.account_by_email(args.email)
+    if args.command == 'account' and args.action == 'create':
+        if found:
+            parser.error('that email is already registered')
+        created = store.create_account(args.email, read_password(args.password_stdin))
+        print('account: ' + created['id'])
+        print('email: ' + created['email'])
+    elif not found:
+        parser.error('no such account')
+    elif args.command == 'vault':
+        for row in store.vaults(found['id']):
+            print('%s\t%s\t%d\t%d' % (row['id'], row['name'], row['bytes'], row['records']))
+    else:
+        token = store.issue_token(found['id'], args.label)
+        print('token: ' + token)
+        print('id: ' + digest(token))
+        print('label: ' + args.label)
+        print('give this to the device now; it is not recoverable', file=sys.stderr)
+
 
 if __name__ == '__main__':
     main()

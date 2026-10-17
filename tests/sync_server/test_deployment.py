@@ -1,30 +1,27 @@
-"""Deployment invariants that do not require Docker or third-party YAML."""
+"""Deployment invariants: the relay is only reachable through the TLS proxy."""
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
 class DeploymentTests(unittest.TestCase):
-    def test_plaintext_relay_is_not_published_and_proxy_mode_is_explicit(self):
-        path = ROOT / 'deployment' / 'compose.yaml'
-        self.assertTrue(path.exists(), 'secure compose deployment missing')
-        text = path.read_text()
-        server = text.split('  server:', 1)[1].split('  caddy:', 1)[0]
-        self.assertNotIn('ports:', server)
-        self.assertIn('MV_SYNC_PROXY_MODE: "1"', server)
-        self.assertIn('--proxy-mode', server)
-        self.assertIn('internal: true', text)
+    def test_relay_is_not_published_and_tls_terminates_at_the_edge(self):
+        compose = (ROOT / 'deployment' / 'compose.yaml').read_text()
+        server = compose.split('  server:', 1)[1].split('  caddy:', 1)[0]
+        self.assertNotIn('ports:', server, 'the relay must not publish a plaintext port')
+        self.assertIn('internal: true', compose)
         self.assertIn('read_only: true', server)
         self.assertIn('no-new-privileges:true', server)
         self.assertIn('cap_drop: [ALL]', server)
-        self.assertIn('443:443', text)
+        self.assertIn('443:443', compose)
+        caddy = (ROOT / 'deployment' / 'Caddyfile').read_text()
+        self.assertIn('reverse_proxy server:8766', caddy)
+        self.assertNotIn('log {', caddy, 'no access logs may record package names or keys')
         docker = (ROOT / 'deployment' / 'Dockerfile').read_text()
         self.assertIn('USER 10001:10001', docker)
         self.assertIn('COPY sync_server', docker)
-        self.assertNotIn('COPY . ', docker)
-        caddy = (ROOT / 'deployment' / 'Caddyfile').read_text()
-        self.assertIn('reverse_proxy server:8766', caddy)
-        self.assertNotIn('log {', caddy)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "videovault/app/sync_state.hpp"
+
 #include <QMainWindow>
 #include <QStringList>
 
@@ -55,7 +57,7 @@ class MusicWindow;
 class PdfWindow;
 class RecordWindow;
 class SyncEngine;
-class SyncDialog;
+class SyncPage;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -409,7 +411,11 @@ private:
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
     SyncEngine* syncEngine_{nullptr};
-    SyncDialog* syncDialog_{nullptr};
+    SyncPage* syncPage_{nullptr};
+    // Derived from the vault password at unlock and never written anywhere:
+    // the package password shared by this vault's devices, and the key that
+    // seals this device's sync state (token and record map). Wiped on lock.
+    sync::Keys syncKeys_;
     // Declared after the vault so sharing stops before the vault is destroyed.
     std::unique_ptr<ShareServer> shareServer_;
     // The swapped phone's library, while it is open. Deletes itself on close.

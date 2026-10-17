@@ -1,29 +1,45 @@
 package org.megavideoprotect.app
 
+/** Pure protocol 3 rules: package names, endpoints, the vault namespace, paths. */
 fun main() {
-    check(SyncPolicy.retryMillis(0, 0) == 1000L)
-    check(SyncPolicy.retryMillis(20, 999) == 60999L)
-    check(SyncPolicy.needsDownload(4, 3).not()) // rollback rejected
-    check(SyncPolicy.needsDownload(4, 4).not())
-    check(SyncPolicy.needsDownload(4, 5))
-    check(SyncPolicy.importedId(setOf(1, 2), setOf(1, 2, 7)) == 7L)
-    check(SyncPolicy.importedId(setOf(1, 2), setOf(1, 2)) == null) // JNI dedup has no ID
-    check(SyncPolicy.importedId(setOf(1), setOf(1, 2, 3)) == null)
-    check(SyncPolicy.validId("a".repeat(32)))
-    check(!SyncPolicy.validId("A".repeat(32)))
-    check(!SyncPolicy.validId("a".repeat(31)))
-    check(SyncPolicy.validSecret("0".repeat(64)))
-    check(!SyncPolicy.validSecret("0".repeat(63)))
-    check(SyncPolicy.validEndpoint("https://example.com:8766"))
-    check(SyncPolicy.validEndpoint("http://127.0.0.1:8766"))
-    check(!SyncPolicy.validEndpoint("http://example.com"))
-    check(!SyncPolicy.validEndpoint("https://user:pass@example.com"))
-    check(!SyncPolicy.validEndpoint("https://example.com/path"))
+    check(SyncPolicy.isHex("0".repeat(64), 64))
+    check(!SyncPolicy.isHex("0".repeat(63), 64))
+    check(!SyncPolicy.isHex("A".repeat(64), 64)) // protocol names are lowercase only
+    check(!SyncPolicy.isHex("g".repeat(64), 64))
+
+    val hash = sha256("package bytes".toByteArray())
+    val name = SyncPolicy.packageName(hash)
+    check(SyncPolicy.isPackageName(name))
+    check(name.length == 69 && name.endsWith(".mvpk"))
+    check(!SyncPolicy.isPackageName(name.uppercase()))
+    check(!SyncPolicy.isPackageName(hash)) // suffix required
+    check(!SyncPolicy.isPackageName(hash + ".mvpk.part"))
+    check(!SyncPolicy.isPackageName("0".repeat(63) + ".mvpk"))
+    check(runCatching { SyncPolicy.packageName("0".repeat(63)) }.isFailure)
+
+    check(SyncPolicy.validServer("https://vault.example:8766"))
+    check(SyncPolicy.validServer("https://vault.example"))
+    check(SyncPolicy.validServer("http://127.0.0.1:8766"))
+    check(SyncPolicy.validServer("http://localhost:8766"))
+    check(SyncPolicy.validServer("http://[::1]:8766"))
+    check(!SyncPolicy.validServer("http://vault.example:8766")) // plain HTTP off loopback
+    check(!SyncPolicy.validServer("https://user:pass@vault.example"))
+    check(!SyncPolicy.validServer("https://vault.example/path"))
+    check(!SyncPolicy.validServer("https://vault.example/?x=1"))
+    check(!SyncPolicy.validServer("ftp://vault.example"))
+    check(!SyncPolicy.validServer(""))
+
     check(SyncPolicy.folderPath(2, mapOf(1L to (0L to "a"), 2L to (1L to "b"))) == "a/b")
+    check(SyncPolicy.folderPath(0, mapOf(1L to (0L to "a"))) == "")
     check(runCatching { SyncPolicy.folderPath(1, mapOf(1L to (1L to "a"))) }.isFailure)
+
     val marker = ByteArray(24) { it.toByte() }
     check(SyncPolicy.vaultNamespace("root", marker) == SyncPolicy.vaultNamespace("root", marker.copyOf()))
-    check(SyncPolicy.vaultNamespace("root", marker) != SyncPolicy.vaultNamespace("root", marker.also { it[23] = 99 }))
+    check(SyncPolicy.vaultNamespace("root", marker) != SyncPolicy.vaultNamespace("root", marker.copyOf().also { it[23] = 99 }))
+    check(SyncPolicy.vaultNamespace("root", marker) != SyncPolicy.vaultNamespace("other", marker))
     check(runCatching { SyncPolicy.vaultNamespace("root", ByteArray(23)) }.isFailure)
-    println("SyncPolicy: identity, endpoints, revisions, dedup, backoff and paths passed")
+
+    check(SyncPolicy.CHUNK == 1024 * 1024)
+    check(SyncPolicy.MAX_PACKAGE == 1024L * 1024 * 1024)
+    println("SyncPolicy: package names, endpoints, namespace and folder paths passed")
 }
