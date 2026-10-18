@@ -721,7 +721,10 @@ private:
         }
         if (found == nullptr) return;
         if (QString::fromStdString(found->display_name) != record.name) {
-            vault_->rename_video(record.localId, record.name.toStdString());
+            // A refused rename leaves the local name as it was: say so through
+            // the library signal instead of claiming a change that did not land.
+            auto renamed = vault_->rename_video(record.localId, record.name.toStdString());
+            if (!renamed) return;
             libraryChanged = true;
         }
         const QString path = folderPathOf(*found, folders.value());
@@ -739,7 +742,7 @@ private:
                 for (const auto& wanted : record.tags) {
                     if (wanted.compare(name, Qt::CaseInsensitive) == 0) keep = true;
                 }
-                if (!keep) vault_->remove_tag(record.localId, tag.id);
+                if (!keep && vault_->remove_tag(record.localId, tag.id).has_value()) libraryChanged = true;
             }
         }
         for (const auto& tag : record.tags) {
@@ -747,7 +750,9 @@ private:
             for (const auto& have : local) {
                 if (have.compare(tag, Qt::CaseInsensitive) == 0) present = true;
             }
-            if (!present) vault_->add_tag(record.localId, tag.toStdString());
+            if (!present && vault_->add_tag(record.localId, tag.toStdString()).has_value()) {
+                libraryChanged = true;
+            }
         }
     }
 
