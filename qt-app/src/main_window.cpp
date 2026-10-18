@@ -7317,12 +7317,11 @@ void MainWindow::beginChangePassword() {
             // Re-seal the sync state under the new password but keep the package
             // key, so packages already on the server stay readable.
             const auto root = vault->root_path();
-            const QString folder =
-#ifdef Q_OS_WIN
-                QString::fromStdWString(root.wstring());
-#else
-                QString::fromUtf8(root.u8string().c_str());
-#endif
+            // Same conversion as the settings page: u8string() is char8_t
+            // under C++20 on GCC, so go through data()/size().
+            const auto utf8 = root.u8string();
+            const QString folder = QString::fromUtf8(
+                reinterpret_cast<const char*>(utf8.data()), int(utf8.size()));
             sync::resealForPasswordChange(sync::stateDirectoryFor(folder),
                                           QString::fromStdString(*current_text),
                                           QString::fromStdString(*next_text));

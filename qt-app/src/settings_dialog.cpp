@@ -406,11 +406,12 @@ void SettingsDialog::beginPasswordChange() {
             // become unreadable. Re-seal the sync state under the new password
             // while both passwords are still at hand.
             const auto root = vault->root_path();
-#ifdef Q_OS_WIN
-            const QString folder = QString::fromStdWString(root.wstring());
-#else
-            const QString folder = QString::fromUtf8(root.u8string().c_str());
-#endif
+            // u8string() is char8_t under C++20 on GCC/clang and char on MSVC,
+            // so reinterpret through data()/size() rather than .c_str(): the
+            // latter compiles only where the element type happens to be char.
+            const auto utf8 = root.u8string();
+            const QString folder = QString::fromUtf8(
+                reinterpret_cast<const char*>(utf8.data()), int(utf8.size()));
             videovault::app::sync::resealForPasswordChange(
                 videovault::app::sync::stateDirectoryFor(folder),
                 QString::fromStdString(*current), QString::fromStdString(*next));
