@@ -116,3 +116,22 @@ __pycache__/
 *.py[cod]
 .venv/
 CMakeUserPresets.json
+
+# ── Sync relay material ───────────────────────────────────────────────────
+# A relay's data directory is a SQLite database plus opaque packages. Point
+# --data at the checkout, run the live harness with the wrong scratch dir, or
+# export a package by hand and real vault ciphertext lands next to the sources.
+/sync_server/data/
+sync.sqlite3
+sync.sqlite3-wal
+sync.sqlite3-shm
+*.mvpk
+*.mvpk.part
+
+# ── Secrets ───────────────────────────────────────────────────────────────
+# Deployment reads these from the environment or the machine, never from Git.
+# .env.example stays tracked: it is the documented shape, not a credential.
+.env
+deployment/.env
+*.pem
+*.key
