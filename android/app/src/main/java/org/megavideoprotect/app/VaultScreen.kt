@@ -2152,7 +2152,7 @@ private fun MusicLibrary(
                 onValueChange = { query = it },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
-                textStyle = TextStyle(color = Mvp.title, fontSize = 15.sp),
+                textStyle = TextStyle(color = Mvp.title, fontSize = 14.sp),
                 cursorBrush = SolidColor(Mvp.accent),
                 decorationBox = { inner ->
                     Box {
@@ -2304,17 +2304,17 @@ private fun GalleryHeader(
                 Modifier
                     .weight(1f)
                     .height(40.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Mvp.glass)
-                    .border(1.dp, Mvp.glassStroke, RoundedCornerShape(20.dp))
-                    .padding(horizontal = 12.dp),
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Mvp.inputBg)
+                    .border(1.dp, Mvp.inputBorder, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
                     painterResource(R.drawable.outline_header_search),
                     contentDescription = null,
                     tint = Mvp.placeholder,
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(8.dp))
                 BasicTextField(
@@ -2327,7 +2327,8 @@ private fun GalleryHeader(
                     decorationBox = { inner ->
                         Box {
                             if (search.isEmpty()) {
-                                Text("Search", color = Mvp.placeholder, fontSize = 15.sp)
+                                Text("Search names or tags", color = Mvp.placeholder, fontSize = 14.sp,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             inner()
                         }
@@ -2550,7 +2551,7 @@ private fun HeaderIcon(
             painterResource(icon),
             contentDescription = label,
             tint = if (enabled) tint else tint.copy(alpha = 0.35f),
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(20.dp),
         )
     }
 }
@@ -3575,7 +3576,7 @@ private fun DetailsView(
         itemsIndexed(videos, key = { _, v -> "${GalleryCache.generation}:${v.id}" }) { index, v ->
             val media = rememberMediaInfo(v.id)
             val picked = v.id in selected
-            val stripe = if (index % 2 == 0) Mvp.inputBg else Mvp.alternateRow
+            val stripe = if (index % 2 == 0) Mvp.alternateRow else Mvp.window
             val rowColor by animateColorAsState(
                 if (picked) Mvp.selection else stripe,
                 tween(180),
@@ -3598,11 +3599,11 @@ private fun DetailsView(
                         onLongPress = { onLongPress(v) },
                         transfer = { dragOf(v) },
                     )
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FileTile(v, 52, square = false)
+                FileTile(v, 44, square = false)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
                         v.name,
@@ -3639,6 +3640,12 @@ private fun DetailsView(
                         )
                     }
                 }
+                Text(
+                    v.sizeText,
+                    color = Mvp.description,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
                 RowActions { onAction(v) }
             }
         }
@@ -3672,8 +3679,8 @@ private fun IconGridView(
         state = GalleryCache.gridScroll("icons:$scrollKey"),
         contentPadding = padding,
         modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
-        horizontalArrangement = Arrangement.spacedBy(1.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp),
+        horizontalArrangement = Arrangement.spacedBy(0.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         item(span = { GridItemSpan(3) }) { ListSortBar(onSort) }
         if (upParentId != null) {
@@ -3707,6 +3714,8 @@ private fun IconGridView(
                 motion
                     .fillMaxWidth()
                     .aspectRatio(1f)
+                    .padding(3.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .vaultDropTarget(onActive = {}, onDrop = onDrop)
                     .explorerItem(
                         onClick = { onOpen(v) },
@@ -3915,7 +3924,7 @@ private fun ListView(
         }
         items(videos, key = { "${GalleryCache.generation}:${it.id}" }) { v ->
             val picked = v.id in selected
-            val stripe = if (videos.indexOf(v) % 2 == 0) Mvp.inputBg else Mvp.alternateRow
+            val stripe = if (videos.indexOf(v) % 2 == 0) Mvp.alternateRow else Mvp.window
             val rowColor by animateColorAsState(
                 if (picked) Mvp.selection else stripe,
                 tween(180),
@@ -3936,17 +3945,20 @@ private fun ListView(
                         onLongPress = { onLongPress(v) },
                         transfer = { dragOf(v) },
                     )
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FileTile(v, 36, square = false)
+                FileTile(v, 40, square = false)
                 Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text(v.name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(v.name, color = Mvp.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     videoPlace[v.id]?.let { place ->
                         Text(place, color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Text("${v.sizeText} · ${v.tags.joinToString(", ")}", color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (v.tags.isNotEmpty()) {
+                        Text(v.tags.joinToString(", "), color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
+                Text(v.sizeText, color = Mvp.description, fontSize = 12.sp, maxLines = 1)
                 RowActions { onAction(v) }
             }
         }
