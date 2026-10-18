@@ -148,7 +148,7 @@ object GalleryCache {
     // Toolbar state — deliberately *not* reset by clear(): which view you were
     // using is a preference, not vault data.
     var viewMode = 0
-    var filterTagId = 0L
+    var filterTagIds: Set<Long> = emptySet()
     var search = ""
     var sortKey by mutableStateOf(SortKey.Name)
     var sortAscending by mutableStateOf(true)
@@ -351,7 +351,7 @@ fun VaultScreen(
     // Initialised from the cache so the chosen view / filter / query come back
     // exactly as they were when the player is dismissed.
     var viewMode by remember { mutableStateOf(GalleryCache.viewMode) }
-    var filterTagId by remember { mutableStateOf(GalleryCache.filterTagId) }
+    var filterTagIds by remember { mutableStateOf(GalleryCache.filterTagIds) }
     var search by remember { mutableStateOf(GalleryCache.search) }
     var error by remember { mutableStateOf<String?>(null) }
     // Long-press starts a selection; further taps add or remove items. Empty
@@ -727,14 +727,30 @@ fun VaultScreen(
 
     var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
     var updateProgress by remember { mutableStateOf<Float?>(null) }
+    var stagedUpdateApk by remember { mutableStateOf<File?>(null) }
     var packagePlan by remember { mutableStateOf<PackagePlan?>(null) }
     var armedPackage by remember { mutableStateOf<PackagePlan?>(null) }
     var packagePassword by remember { mutableStateOf("") }
     var packageCompress by remember { mutableStateOf(true) }
     var packageImportUri by remember { mutableStateOf<Uri?>(null) }
     LaunchedEffect(Unit) {
-        pendingRelease = withContext(Dispatchers.IO) {
-            runCatching { newerRelease(installedVersion(context)) }.getOrNull()
+        val release = withContext(Dispatchers.IO) {
+            runCatching { checkForUpdate(context) }.getOrNull()
+        }
+        pendingRelease = release
+        // "Download automatically" prepares the package quietly; installing
+        // still needs the phone's own installer confirmation, exactly like a
+        // manual update tap.
+        if (release != null && ThemePrefs.downloadAutomatically(context)) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val apk = File(context.cacheDir, "update-${release.version}.apk")
+                    if (!apk.isFile || apk.length() <= 0L) {
+                        downloadRelease(release, apk) { }
+                    }
+                    stagedUpdateApk = apk
+                }
+            }
         }
     }
     fun guardedPackage(): Boolean {
@@ -840,8 +856,15 @@ fun VaultScreen(
         scope.launch {
             val failure = withContext(Dispatchers.IO) {
                 try {
-                    val apk = File(context.cacheDir, "update.apk")
-                    downloadRelease(release, apk) { updateProgress = it }
+                    val staged = stagedUpdateApk
+                    val apk = if (staged != null && staged.isFile && staged.length() > 0L) {
+                        updateProgress = 0.99f
+                        staged
+                    } else {
+                        File(context.cacheDir, "update.apk").also {
+                            downloadRelease(release, it) { progress -> updateProgress = progress }
+                        }
+                    }
                     updateProgress = 1f
                     installRelease(context, apk)
                     null
@@ -1125,7 +1148,7 @@ fun VaultScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Mvp.window),
     ) {
         if (showTransfers) {
             TransferPage(onClose = { showTransfers = false })
@@ -1145,10 +1168,13 @@ fun VaultScreen(
 
         val searching = search.isNotBlank()
         val scope = if (searching) folderSubtree(folders, currentFolderId) else emptySet()
+        // Any selected tag is enough: the filter narrows, it never demands all.
+        val filterNames = tags.filter { it.id in filterTagIds }
+            .map { it.name.lowercase() }
         val filtered = videos.filter { v ->
             val here = if (searching) v.folderId in scope else v.folderId == currentFolderId
             here &&
-                (filterTagId == 0L || v.tags.any { t -> tags.firstOrNull { it.id == filterTagId }?.name?.equals(t, true) == true }) &&
+                (filterNames.isEmpty() || v.tags.any { it.lowercase() in filterNames }) &&
                 (!searching || v.name.contains(search, ignoreCase = true))
         }
         val childFolders = folders.filter { folder ->
@@ -1388,7 +1414,7 @@ fun VaultScreen(
             GalleryHeader(
                 viewMode = viewMode,
                 tags = tags,
-                filterTagId = filterTagId,
+                filterTagIds = filterTagIds,
                 search = search,
                 selectionTitle = when (selectedIds.size) {
                     0 -> null
@@ -1400,9 +1426,13 @@ fun VaultScreen(
                     viewMode = mode
                     GalleryCache.viewMode = mode
                 },
-                onFilterTag = { id ->
-                    filterTagId = id
-                    GalleryCache.filterTagId = id
+                onToggleTag = { id ->
+                    filterTagIds = if (id in filterTagIds) filterTagIds - id else filterTagIds + id
+                    GalleryCache.filterTagIds = filterTagIds
+                },
+                onClearTags = {
+                    filterTagIds = emptySet()
+                    GalleryCache.filterTagIds = emptySet()
                 },
                 onSearch = { text ->
                     search = text
@@ -2069,7 +2099,7 @@ private fun MusicLibrary(
     Column(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Mvp.window)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
@@ -2186,12 +2216,13 @@ private fun MusicLibrary(
 private fun GalleryHeader(
     viewMode: Int,
     tags: List<TagEntry>,
-    filterTagId: Long,
+    filterTagIds: Set<Long>,
     search: String,
     selectionTitle: String?,
     actionsEnabled: Boolean,
     onViewMode: (Int) -> Unit,
-    onFilterTag: (Long) -> Unit,
+    onToggleTag: (Long) -> Unit,
+    onClearTags: () -> Unit,
     onSearch: (String) -> Unit,
     onMusic: () -> Unit,
     onUpdate: () -> Unit,
@@ -2332,7 +2363,7 @@ private fun GalleryHeader(
                 ViewModeButton(R.drawable.msg_list, "List", viewMode == 2) { onViewMode(2) }
             }
             if (tags.isNotEmpty()) {
-                TagFilterButton(tags, filterTagId, onFilterTag)
+                TagFilterButton(tags, filterTagIds, onToggleTag, onClearTags)
             }
         }
         }
@@ -2376,34 +2407,121 @@ private fun ViewModeButton(
 @Composable
 private fun TagFilterButton(
     tags: List<TagEntry>,
-    filterTagId: Long,
-    onFilterTag: (Long) -> Unit,
+    selected: Set<Long>,
+    onToggle: (Long) -> Unit,
+    onClear: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
     Box {
-        ViewModeButton(R.drawable.menu_tag_filter, "Tags", filterTagId != 0L) { open = true }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        "All",
-                        color = if (filterTagId == 0L) Mvp.accent else Mvp.text,
-                        fontSize = 14.sp,
-                    )
-                },
-                onClick = { open = false; onFilterTag(0L) },
-            )
-            tags.forEach { tag ->
-                DropdownMenuItem(
-                    text = {
+        ViewModeButton(R.drawable.menu_tag_filter, "Filter by tags", selected.isNotEmpty()) { open = true }
+        if (open) {
+            Dialog(onDismissRequest = { open = false }) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Mvp.card)
+                        .border(1.dp, Mvp.cardBorder, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tags", color = Mvp.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
                         Text(
-                            tag.name,
-                            color = if (filterTagId == tag.id) Mvp.accent else Mvp.text,
-                            fontSize = 14.sp,
+                            "Clear",
+                            color = if (selected.isEmpty()) Mvp.placeholder else Mvp.accent,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = selected.isNotEmpty()) { onClear() }
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
                         )
-                    },
-                    onClick = { open = false; onFilterTag(tag.id) },
-                )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Mvp.text, fontSize = 15.sp),
+                        cursorBrush = SolidColor(Mvp.accent),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Mvp.inputBg)
+                            .border(1.dp, Mvp.inputBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (query.isEmpty()) {
+                                    Text("Search tags…", color = Mvp.placeholder, fontSize = 15.sp)
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    val shown = tags.filter {
+                        query.isBlank() || it.name.contains(query.trim(), ignoreCase = true)
+                    }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        if (shown.isEmpty()) {
+                            Text(
+                                if (tags.isEmpty()) "No tags yet" else "No matching tags",
+                                color = Mvp.description,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
+                            )
+                        }
+                        shown.forEach { tag ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onToggle(tag.id) }
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    tag.name,
+                                    color = Mvp.text,
+                                    fontSize = 15.sp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text("${tag.videoCount}", color = Mvp.description, fontSize = 13.sp)
+                                Spacer(Modifier.width(10.dp))
+                                if (tag.id in selected) {
+                                    Icon(
+                                        painterResource(R.drawable.msg_check_s),
+                                        contentDescription = "Selected",
+                                        tint = Mvp.accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                } else {
+                                    Box(
+                                        Modifier
+                                            .size(18.dp)
+                                            .clip(CircleShape)
+                                            .border(1.dp, Mvp.placeholder, CircleShape),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        if (selected.isEmpty()) "No selection shows everything."
+                        else "${selected.size} tag${if (selected.size == 1) "" else "s"} selected — items with any of them are shown.",
+                        color = Mvp.description,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+                    )
+                }
             }
         }
     }
@@ -3430,7 +3548,7 @@ private fun DetailsView(
     LazyColumn(
         state = GalleryCache.listScroll("details:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         stickyHeader { DetailSortBar(onSort) }
         if (upParentId != null) {
@@ -3553,7 +3671,7 @@ private fun IconGridView(
         columns = GridCells.Fixed(3),
         state = GalleryCache.gridScroll("icons:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
         horizontalArrangement = Arrangement.spacedBy(1.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
@@ -3771,7 +3889,7 @@ private fun ListView(
     LazyColumn(
         state = GalleryCache.listScroll("list:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         item { ListSortBar(onSort) }
         if (upParentId != null) {

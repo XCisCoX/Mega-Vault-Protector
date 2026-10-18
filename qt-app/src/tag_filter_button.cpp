@@ -216,24 +216,26 @@ void TagFilterButton::showPopup() {
         popup_->setAccessibleName(tr("Tag filter"));
         popup_->installEventFilter(this);
         popup_->setStyleSheet(QStringLiteral(R"(
-            QLabel { color: #f2f2f7; background: transparent; border: none; }
+            QLabel { color: palette(text); background: transparent; border: none; }
             QLabel#tagHeading { font-weight: 600; }
-            QLabel#tagEmptyState { color: #8e8e93; }
+            QLabel#tagEmptyState { color: palette(placeholder-text); }
             QLineEdit#tagSearch {
-                color: #f2f2f7; background: #2c2c2e; border: 1px solid #3a3a3c;
+                color: palette(text); background: palette(alternate-base);
+                border: 1px solid palette(midlight);
                 border-radius: 9px; min-height: 32px; padding: 0 10px;
-                selection-background-color: #3390ec;
+                selection-background-color: palette(highlight);
+                selection-color: palette(highlighted-text);
             }
-            QLineEdit#tagSearch:focus { border-color: #3390ec; }
+            QLineEdit#tagSearch:focus { border-color: palette(highlight); }
             QPushButton#clearTagFilter {
-                color: #3390ec; background: transparent; border: none;
+                color: palette(highlight); background: transparent; border: none;
                 border-radius: 6px; min-height: 28px; padding: 0 6px;
             }
-            QPushButton#clearTagFilter:hover, QPushButton#clearTagFilter:focus { background: #2c2c2e; }
-            QPushButton#clearTagFilter:disabled { color: #636366; }
-            QListWidget#tagList { background: transparent; color: #f2f2f7; border: none; outline: none; }
+            QPushButton#clearTagFilter:hover, QPushButton#clearTagFilter:focus { background: palette(alternate-base); }
+            QPushButton#clearTagFilter:disabled { color: palette(mid); }
+            QListWidget#tagList { background: transparent; color: palette(text); border: none; outline: none; }
             QScrollBar:vertical { background: transparent; width: 8px; }
-            QScrollBar::handle:vertical { background: #48484a; border-radius: 4px; min-height: 24px; }
+            QScrollBar::handle:vertical { background: palette(mid); border-radius: 4px; min-height: 24px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         )"));

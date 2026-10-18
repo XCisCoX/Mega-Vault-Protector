@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -102,6 +101,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // The saved appearance is read once, before the first frame.
+        MvpThemeState.loadOnce(this)
 
         val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
         val locationOptions = runCatching { VaultLocation.options(this) }
@@ -121,7 +122,7 @@ class MainActivity : ComponentActivity() {
         openMusicFromNotification(intent)
 
         setContent {
-            MaterialTheme(colorScheme = MvpColorScheme) {
+            MvpTheme {
                 // A player, picture, PDF, or song returns to the library. The library
                 // walks up one folder, then leaves only after a second press.
                 // Login leaves on one press. Setup has nowhere to go back to.

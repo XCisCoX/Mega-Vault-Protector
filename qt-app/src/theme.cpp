@@ -162,6 +162,8 @@ QPalette lightPalette() {
     palette.setColor(QPalette::HighlightedText, Qt::white);
     palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#8e8e93")));
     palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#8e8e93")));
+    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#d1d1d6")));
+    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#aeaeb2")));
     return palette;
 }
 QString themedStyleSheet(const QString& darkStyle) {

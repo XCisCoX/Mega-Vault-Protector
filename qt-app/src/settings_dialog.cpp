@@ -132,9 +132,13 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
         "QPushButton[settingsAction=\"true\"]:hover { background: palette(alternate-base); }"
         "QPushButton[settingsAction=\"true\"]:focus { border: 1px solid palette(highlight); }"
         "QPushButton[settingsAction=\"true\"]:disabled { color: palette(mid); }"
-        "QLineEdit, QComboBox { background: palette(base); color: palette(text); border: 1px solid palette(button); border-radius: 8px; padding: 6px 10px; min-height: 30px; }"
+        "QLineEdit, QComboBox { background: palette(base); color: palette(text); border: 1px solid palette(midlight); border-radius: 8px; padding: 6px 10px; min-height: 30px; }"
+        "QComboBox { padding-right: 30px; }"
         "QLineEdit:focus, QComboBox:focus { border-color: palette(highlight); }"
+        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 26px; border: none; background: transparent; }"
+        "QComboBox::down-arrow { image: url(:/icons/chevron_down.png); width: 12px; height: 12px; }"
         "QComboBox QAbstractItemView { background: palette(base); color: palette(text); selection-background-color: palette(highlight); selection-color: palette(highlighted-text); }"
+        "QComboBox QAbstractItemView::item { min-height: 30px; padding: 2px 8px; }"
         "QListWidget { background: palette(base); color: palette(text); border: none; }"
         "QListWidget::item { min-height: 46px; border-bottom: 1px solid palette(midlight); }"
         "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
@@ -242,6 +246,7 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     auto* lockCard = card(security);
     auto* lockAfter = new QComboBox(this);
     lockAfter->setObjectName(QStringLiteral("autoLockMinutes"));
+    lockAfter->setMinimumWidth(150);
     const int savedLock = QSettings().value(QStringLiteral("security/autoLockMinutes"), 5).toInt();
     const int minutes[]{0, 5, 15, 60, 240};
     const QStringList lockNames{QStringLiteral("Never"), QStringLiteral("5 minutes"), QStringLiteral("15 minutes"), QStringLiteral("1 hour"), QStringLiteral("4 hours")};
