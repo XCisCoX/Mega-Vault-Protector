@@ -7,7 +7,19 @@
 #include <QPalette>
 #include <QString>
 
+class QApplication;
+
 namespace videovault::app {
+
+// Missing/invalid preferences intentionally retain the original dark theme.
+enum class ThemeMode { System, Light, Dark };
+ThemeMode savedThemeMode();
+void setThemeMode(ThemeMode mode);
+void initializeTheme(QApplication& application);
+bool isDarkTheme();
+QPalette lightPalette();
+// Accepts a DARK source stylesheet; dark mode returns it byte-for-byte.
+QString themedStyleSheet(const QString& darkStyle);
 
 inline QPalette darkPalette() {
     QPalette palette;

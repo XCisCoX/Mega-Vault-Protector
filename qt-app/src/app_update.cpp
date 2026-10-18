@@ -46,6 +46,8 @@ namespace {
 // which the fetch below follows.
 const char* const kLatestReleaseUrl =
     "https://api.github.com/repos/XCisCoX/Mega-Vault-Protector/releases/latest";
+const char* const kReleaseListUrl =
+    "https://api.github.com/repos/XCisCoX/Mega-Vault-Protector/releases?per_page=100";
 
 constexpr int kRedirectLimit = 5;
 constexpr int kConnectTimeoutMs = 8000;
@@ -133,6 +135,14 @@ bool httpsFetch(const QUrl& url, const std::function<bool(qint64, qint64)>& prog
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
     if (!request) {
         reply->error = winHttpError(L"WinHttpOpenRequest");
+        return false;
+    }
+    // Follow redirects ourselves so every hop is checked against the GitHub
+    // allowlist rather than WinHTTP silently visiting an arbitrary host.
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    if (!WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY,
+            &redirectPolicy, sizeof(redirectPolicy))) {
+        reply->error = winHttpError(L"WinHttpSetOption");
         return false;
     }
     WinHttpAddRequestHeaders(request.get(), L"User-Agent: MegaVaultProtect",
@@ -451,7 +461,9 @@ bool httpsFetch(const QUrl&, const std::function<bool(qint64, qint64)>&, QFile*,
 
 #endif
 
-// Follows GitHub's redirect from api.github.com to the asset host, starting the
+[[nodiscard]] bool trustedAssetUrl(const QUrl& url, bool redirect = false);
+
+// Follows GitHub's redirects to the asset host, starting the
 // file over each time so a partial body from the first host is not kept.
 bool httpGet(const QUrl& url, const std::function<bool(qint64, qint64)>& progress,
     QFile* sink, HttpReply* reply) {
@@ -466,9 +478,15 @@ bool httpGet(const QUrl& url, const std::function<bool(qint64, qint64)>& progres
             const QUrl next = current.location.isRelative()
                 ? target.resolved(current.location)
                 : current.location;
-            if (!next.isValid() || next.host().isEmpty()) {
+            const bool trusted = sink != nullptr ? trustedAssetUrl(next, true)
+                : next.isValid() && next.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) == 0
+                    && next.host().compare(QLatin1String("api.github.com"), Qt::CaseInsensitive) == 0
+                    && next.userInfo().isEmpty() && !next.hasFragment()
+                    && (next.port(-1) == -1 || next.port() == 443)
+                    && next.path().startsWith(QLatin1String("/repos/"));
+            if (!trusted) {
                 reply->status = current.status;
-                reply->error = QStringLiteral("GitHub sent an address this build cannot open.");
+                reply->error = QStringLiteral("GitHub redirected the request to an untrusted address.");
                 return false;
             }
             if (sink != nullptr) {
@@ -487,34 +505,78 @@ bool httpGet(const QUrl& url, const std::function<bool(qint64, qint64)>& progres
 
 // --- version handling -------------------------------------------------------
 
-// The parts the phone compares: the three numbers before a dash, plus the beta
-// counter. A build without a beta suffix sorts above one with it.
-[[nodiscard]] std::array<int, 4> versionParts(const QString& text) {
-    QString head = text;
-    const int dash = head.indexOf(QLatin1Char('-'));
-    if (dash >= 0) {
-        head.truncate(dash);
+struct ReleaseVersion {
+    std::array<quint64, 3> numbers{};
+    quint64 betaNumber{0};
+    bool beta{false};
+    bool valid{false};
+};
+
+// Repository tags are vMAJOR.MINOR.PATCH[-beta.N]. Do not treat malformed
+// numbers as zero, or use a finite beta sentinel that could outrank stable.
+[[nodiscard]] ReleaseVersion versionParts(const QString& text) {
+    // \z, not $: PCRE's $ also matches before a trailing newline, which would
+    // let "2.0.4\n" masquerade as a release tag.
+    static const QRegularExpression pattern(
+        QStringLiteral("^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-beta\\.([0-9]+))?\\z"));
+    const auto match = pattern.match(text);
+    ReleaseVersion result;
+    if (!match.hasMatch()) {
+        return result;
     }
-    const QStringList numbers = head.split(QLatin1Char('.'));
-    const QRegularExpressionMatch beta = QRegularExpression(QStringLiteral("beta\\.(\\d+)")).match(text);
-    return { numbers.value(0).toInt(), numbers.value(1).toInt(), numbers.value(2).toInt(),
-        beta.hasMatch() ? beta.captured(1).toInt() : 99 };
+    for (int index = 0; index < 3; ++index) {
+        bool ok = false;
+        result.numbers[index] = match.captured(index + 1).toULongLong(&ok);
+        if (!ok) {
+            return result;
+        }
+    }
+    result.beta = !match.captured(4).isEmpty();
+    if (result.beta) {
+        bool ok = false;
+        result.betaNumber = match.captured(4).toULongLong(&ok);
+        if (!ok) {
+            return result;
+        }
+    }
+    result.valid = true;
+    return result;
 }
 
 [[nodiscard]] QString withoutLeadingV(const QString& tag) {
     return tag.startsWith(QLatin1Char('v')) ? tag.mid(1) : tag;
 }
 
-// The suffix the release assets carry on this platform, used when the exact
-// name is not in the release. Empty when the platform has no package.
-[[nodiscard]] QString assetSuffix() {
-#if defined(MVP_UPDATE_WINHTTP)
-    return QStringLiteral(".zip");
-#elif defined(MVP_UPDATE_SOCKET)
-    return QStringLiteral(".tar.gz");
-#else
-    return {};
-#endif
+// Only the repository's release links may start a download. GitHub's signed
+// CDN URLs are allowed on redirects, never arbitrary HTTPS destinations.
+[[nodiscard]] bool trustedAssetUrl(const QUrl& url, const bool redirect) {
+    if (!url.isValid() || url.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) != 0
+        || !url.userInfo().isEmpty() || url.hasFragment() || (url.port(-1) != -1 && url.port() != 443)) {
+        return false;
+    }
+    const QString host = url.host().toLower();
+    if (host == QLatin1String("github.com")) {
+        const QString prefix = QStringLiteral("/XCisCoX/Mega-Vault-Protector/releases/download/");
+        const QString path = url.path();
+        if (!path.startsWith(prefix, Qt::CaseInsensitive)) {
+            return false;
+        }
+        const auto parts = path.mid(prefix.size()).split(QLatin1Char('/'));
+        if (parts.size() != 2) {
+            return false;
+        }
+        for (const QString& part : parts) {
+            if (part.isEmpty() || part == QLatin1String(".") || part == QLatin1String("..")
+                || part.contains(QLatin1Char('\\')) || part.contains(QChar::Null)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return redirect && !url.path().isEmpty()
+        && (host == QLatin1String("release-assets.githubusercontent.com")
+            || host == QLatin1String("objects.githubusercontent.com")
+            || host == QLatin1String("github-releases.githubusercontent.com"));
 }
 
 [[nodiscard]] bool isReleaseAsset(const QString& name) {
@@ -683,14 +745,18 @@ QString installedVersion() {
 }
 
 bool isNewerVersion(const QString& latest, const QString& current) {
-    const std::array<int, 4> left = versionParts(latest);
-    const std::array<int, 4> right = versionParts(current);
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (left[index] != right[index]) {
-            return left[index] > right[index];
-        }
+    const ReleaseVersion left = versionParts(latest);
+    const ReleaseVersion right = versionParts(current);
+    if (!left.valid || !right.valid) {
+        return false;
     }
-    return false;
+    if (left.numbers != right.numbers) {
+        return left.numbers > right.numbers;
+    }
+    if (left.beta != right.beta) {
+        return !left.beta;
+    }
+    return left.beta && left.betaNumber > right.betaNumber;
 }
 
 QString appUpdateAssetName() {
@@ -719,18 +785,27 @@ QString updateFolder(const QString& version) {
     return base + QStringLiteral("/update/") + sanitized(version);
 }
 
-bool fetchLatestRelease(const QString& current, AppRelease* release, QString* error) {
-    release->version.clear();
-    release->url = QUrl();
-    release->size = 0;
-    if (!appUpdateSupported()) {
-        return false;
-    }
+bool fetchLatestRelease(const QString& current, AppRelease* release, QString* error,
+    const bool includeBeta) {
     if (error != nullptr) {
         error->clear();
     }
+    if (release == nullptr) {
+        if (error != nullptr) {
+            *error = QStringLiteral("No release output was provided.");
+        }
+        return false;
+    }
+    *release = {};
+    if (!appUpdateSupported()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("This build cannot install updates.");
+        }
+        return false;
+    }
     HttpReply reply;
-    if (!httpGet(QUrl(QString::fromLatin1(kLatestReleaseUrl)), nullptr, nullptr, &reply)) {
+    const char* endpoint = includeBeta ? kReleaseListUrl : kLatestReleaseUrl;
+    if (!httpGet(QUrl(QString::fromLatin1(endpoint)), nullptr, nullptr, &reply)) {
         if (error != nullptr) {
             *error = reply.error.isEmpty()
                 ? QStringLiteral("Could not reach GitHub.")
@@ -744,56 +819,111 @@ bool fetchLatestRelease(const QString& current, AppRelease* release, QString* er
         }
         return false;
     }
+    return selectReleaseFromJson(reply.body, current, includeBeta, release, error);
+}
+
+bool selectReleaseFromJson(const QByteArray& body, const QString& current,
+    const bool includeBeta, AppRelease* release, QString* error) {
+    if (error != nullptr) {
+        error->clear();
+    }
+    const auto fail = [&](const QString& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+    if (release == nullptr) {
+        return fail(QStringLiteral("No release output was provided."));
+    }
+    *release = {};
+    if (!versionParts(current).valid) {
+        return fail(QStringLiteral("The installed version is not a recognized release version."));
+    }
     QJsonParseError parse{};
-    const QJsonDocument document = QJsonDocument::fromJson(reply.body, &parse);
-    if (parse.error != QJsonParseError::NoError || !document.isObject()) {
+    const QJsonDocument document = QJsonDocument::fromJson(body, &parse);
+    if (parse.error != QJsonParseError::NoError || (!document.isObject() && !document.isArray())) {
         if (error != nullptr) {
             *error = QStringLiteral("GitHub sent a release list this build cannot read.");
         }
         return false;
     }
-    const QJsonObject root = document.object();
-    const QString tag = withoutLeadingV(root.value(QStringLiteral("tag_name")).toString());
-    if (tag.isEmpty() || !isNewerVersion(tag, current)) {
-        return false;   // this copy already is the latest release
-    }
-
-    // The exact asset name wins; otherwise the first file of the right kind is
-    // taken, the same fallback the phone uses.
-    const QString wanted = appUpdateAssetName();
-    const QString suffix = assetSuffix();
-    QUrl picked;
-    qint64 size = 0;
-    const QJsonArray assets = root.value(QStringLiteral("assets")).toArray();
-    for (const QJsonValue& value : assets) {
-        const QJsonObject asset = value.toObject();
-        const QString name = asset.value(QStringLiteral("name")).toString();
-        const bool exact = isReleaseAsset(name);
-        if (!exact && !(picked.isEmpty() && name.endsWith(suffix))) {
+    const QJsonArray entries = document.isArray() ? document.array() : QJsonArray{document.object()};
+    AppRelease best;
+    QString unavailable;
+    for (const QJsonValue& entry : entries) {
+        if (!entry.isObject()) {
+            return fail(QStringLiteral("GitHub sent an invalid release entry."));
+        }
+        const QJsonObject root = entry.toObject();
+        if (root.contains(QStringLiteral("message"))) {
+            return fail(QStringLiteral("GitHub release API: %1")
+                .arg(root.value(QStringLiteral("message")).toString()));
+        }
+        const auto draft = root.value(QStringLiteral("draft"));
+        const auto prerelease = root.value(QStringLiteral("prerelease"));
+        if ((!draft.isUndefined() && !draft.isBool())
+            || (!prerelease.isUndefined() && !prerelease.isBool())) {
+            return fail(QStringLiteral("GitHub sent invalid release flags."));
+        }
+        if (draft.toBool()) {
             continue;
         }
-        picked = QUrl(asset.value(QStringLiteral("browser_download_url")).toString());
-        size = static_cast<qint64>(asset.value(QStringLiteral("size")).toDouble());
-        if (exact) {
-            break;
+        if (!root.value(QStringLiteral("tag_name")).isString()
+            || root.value(QStringLiteral("tag_name")).toString().isEmpty()
+            || !root.value(QStringLiteral("assets")).isArray()) {
+            return fail(QStringLiteral("GitHub sent an invalid release entry."));
+        }
+        const QString tag = withoutLeadingV(root.value(QStringLiteral("tag_name")).toString());
+        const ReleaseVersion version = versionParts(tag);
+        if (root.value(QStringLiteral("draft")).toBool()
+            || (!includeBeta && (root.value(QStringLiteral("prerelease")).toBool() || version.beta))
+            || !version.valid || !isNewerVersion(tag, current)) {
+            continue;
+        }
+        AppRelease candidate;
+        const QJsonArray assets = root.value(QStringLiteral("assets")).toArray();
+        for (const QJsonValue& value : assets) {
+            const QJsonObject asset = value.toObject();
+            if (!isReleaseAsset(asset.value(QStringLiteral("name")).toString())) {
+                continue;
+            }
+            candidate.url = QUrl(asset.value(QStringLiteral("browser_download_url")).toString());
+            const double size = asset.value(QStringLiteral("size")).toDouble();
+            // JSON numbers are doubles. Guard the conversion (including the
+            // rounded qint64 maximum) instead of overflowing on malformed data.
+            candidate.size = size >= 0 && size < 9223372036854775808.0
+                ? static_cast<qint64>(size) : 0;
+            if (trustedAssetUrl(candidate.url)) {
+                candidate.version = tag;
+                break;
+            }
+        }
+        if (candidate.version.isEmpty()) {
+            if (unavailable.isEmpty() || isNewerVersion(tag, unavailable)) {
+                unavailable = tag;
+            }
+        } else if (best.version.isEmpty() || isNewerVersion(candidate.version, best.version)) {
+            best = candidate;
         }
     }
-    if (picked.isEmpty()) {
+    if (best.version.isEmpty()) {
         if (error != nullptr) {
-            *error = QStringLiteral("Release %1 has no package for this system yet.").arg(tag);
+            *error = unavailable.isEmpty() ? QString()
+                : QStringLiteral("Release %1 has no trusted package for this system yet.").arg(unavailable);
         }
         return false;
     }
-    release->version = tag;
-    release->url = picked;
-    release->size = size;
+    *release = best;
     return true;
 }
 
 bool downloadRelease(const AppRelease& release, const QString& destination,
     const std::function<bool(qint64, qint64)>& progress, QString* error) {
-    if (release.url.isEmpty()) {
-        *error = QStringLiteral("There is nothing to download.");
+    if (!trustedAssetUrl(release.url)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("The update has no trusted GitHub release download address.");
+        }
         return false;
     }
     QDir().mkpath(QFileInfo(destination).absolutePath());

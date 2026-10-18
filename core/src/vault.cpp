@@ -1275,6 +1275,14 @@ Result<std::vector<VideoInfo>> Vault::list_videos() const {
     return videos;
 }
 
+Result<std::uint64_t> Vault::video_size(const std::int64_t video_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    auto row = impl_->database_.query_video(video_id);
+    if (!row) return row.error();
+    return row.value().original_size;
+}
+
 Result<std::filesystem::path> Vault::package_path(const std::int64_t video_id) const {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {

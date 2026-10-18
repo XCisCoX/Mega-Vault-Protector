@@ -1,24 +1,15 @@
 #pragma once
 
-#include <QDialog>
-#include <QEvent>
-#include <QImage>
+#include <QWidget>
 
 #include <memory>
 #include <utility>
 
 class QComboBox;
-class QFrame;
 class QLabel;
 class QLineEdit;
 class QListWidget;
-class QMouseEvent;
-class QPaintEvent;
 class QPushButton;
-class QResizeEvent;
-class QScrollArea;
-class QShowEvent;
-class QVBoxLayout;
 
 template <typename T>
 class QFutureWatcher;
@@ -31,28 +22,24 @@ class Result;
 
 namespace videovault::app {
 
-// Vault settings: change password, manage tags (add/rename/delete), and the
-// player's streaming cache budget (persisted in QSettings; the player picks
-// it up when it opens a video). Tag changes emit settingsChanged() so the
-// main window can refresh the gallery and tag filter.
-class SettingsDialog final : public QDialog {
+// In-window page. The host owns navigation, updating and application theming.
+class SettingsDialog final : public QWidget {
     Q_OBJECT
 public:
     explicit SettingsDialog(
         const std::shared_ptr<videovault::core::Vault>& vault,
         QWidget* parent = nullptr);
-    void reject() override;
+    void reject();
+    void setUpdateStatus(const QString& message, bool busy = false);
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
 
 signals:
     void settingsChanged();
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-    void showEvent(QShowEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-    void mousePressEvent(QMouseEvent* event) override;
-    QSize sizeHint() const override;
-    QSize minimumSizeHint() const override;
+    void closed();
+    void updateCheckRequested();
+    void updatePreferencesChanged();
+    void appearanceChanged();
 
 private:
     void reloadTags();
@@ -65,10 +52,6 @@ private:
     void beginRegenerateMissing();
     void finishRegenerateMissing();
     void setStatus(const QString& message, bool error = false);
-    void fitSheet();
-    void playIntro();
-    bool eventFilter(QObject* watched, QEvent* event) override;
-
     std::shared_ptr<videovault::core::Vault> vault_;
 
     // Security section.
@@ -94,12 +77,8 @@ private:
     QFutureWatcher<std::shared_ptr<std::pair<int, int>>>* regenerateWatcher_{nullptr};
 
     QLabel* status_{nullptr};
-    QImage backdrop_;
-    QFrame* sheet_{nullptr};
-    QScrollArea* scroll_{nullptr};
-    QVBoxLayout* outerLayout_{nullptr};
-    bool closing_{false};
-    bool introPlayed_{false};
+    QPushButton* checkUpdatesButton_{nullptr};
+    QLabel* updateStatus_{nullptr};
 };
 
 } // namespace videovault::app

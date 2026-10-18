@@ -177,8 +177,7 @@ int main(int argc, char* argv[]) {
     QFont appFont(QStringLiteral("Segoe UI"));
     appFont.setPointSize(10);
     application.setFont(appFont);
-    application.setPalette(videovault::app::darkPalette());
-    application.setStyleSheet(videovault::app::appStyleSheet());
+    videovault::app::initializeTheme(application);
 
     QStringList incoming;
     const QStringList arguments = QCoreApplication::arguments();

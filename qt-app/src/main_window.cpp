@@ -13,6 +13,8 @@
 #include "videovault/app/record_document.hpp"
 #include "videovault/app/record_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/tag_filter_button.hpp"
+#include "videovault/app/theme.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -113,6 +115,8 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <deque>
+#include <QThreadPool>
 #include <string>
 #include <utility>
 
@@ -126,6 +130,9 @@ struct FileIdentity {
 
 struct MainWindow::GalleryCache {
     std::unordered_map<std::int64_t, QPixmap> thumbs;
+    std::deque<std::int64_t> thumbOrder;
+    std::unordered_map<std::int64_t, QListWidgetItem*> iconRows;
+    std::unordered_map<std::int64_t, QTreeWidgetItem*> treeRows;
     std::unordered_map<std::int64_t, core::MediaInfo> media;
     std::unordered_map<std::int64_t, FileIdentity> kinds;
     // PDFs whose first page was already read or saved this session.
@@ -203,6 +210,7 @@ QIcon updateGlyph() {
 struct UpdateCheckOutcome {
     QString version;
     QString url;
+    QString error;
     qint64 size{0};
 };
 
@@ -224,6 +232,14 @@ QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
     painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
     painter.fillRect(plate.rect(), color);
     return plate;
+}
+
+void setChromeIcon(QAbstractButton* button, const QIcon& source) {
+    const auto apply = [button, source](const QPalette& palette) {
+        button->setIcon(QIcon(tintedIcon(source.pixmap(32, 32), palette.color(QPalette::ButtonText))));
+    };
+    apply(qApp->palette());
+    QObject::connect(qApp, &QApplication::paletteChanged, button, apply);
 }
 
 QPixmap musicPlaceholder(const int side) {
@@ -837,10 +853,10 @@ public:
             if (selected) {
                 painter->fillRect(row, QColor(51, 144, 236, 70));
             } else if (hovered) {
-                painter->fillRect(row, QColor(255, 255, 255, 16));
+                painter->fillRect(row, isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 12));
             }
             const QRect thumb(row.left() + 14, row.top() + (row.height() - 44) / 2, 44, 44);
-            painter->fillRect(thumb, QColor(28, 28, 30));
+            painter->fillRect(thumb, isDarkTheme() ? QColor(28, 28, 30) : option.palette.color(QPalette::AlternateBase));
             const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
             const int rowKind = index.data(Qt::UserRole + 12).toInt();
             const bool folderRow = rowKind == 1 || rowKind == 2 || rowKind == kKindPhone;
@@ -890,18 +906,18 @@ public:
                 : std::min(metaMetrics.horizontalAdvance(meta) + 12, row.width() / 2);
             const int nameRight = std::max(textLeft + 24, row.right() - 16 - metaWidth);
             painter->setFont(nameFont);
-            painter->setPen(Qt::white);
+            painter->setPen(option.palette.color(QPalette::Text));
             painter->drawText(QRect(textLeft, row.top(), nameRight - textLeft, row.height()),
                 Qt::AlignLeft | Qt::AlignVCenter,
                 nameMetrics.elidedText(name, Qt::ElideRight, nameRight - textLeft));
             if (!meta.isEmpty()) {
                 painter->setFont(metaFont);
-                painter->setPen(QColor(168, 168, 174));
+                painter->setPen(isDarkTheme() ? QColor(168, 168, 174) : QColor(99, 99, 104));
                 painter->drawText(QRect(nameRight, row.top(), metaWidth, row.height()),
                     Qt::AlignRight | Qt::AlignVCenter,
                     metaMetrics.elidedText(meta, Qt::ElideLeft, metaWidth));
             }
-            painter->setPen(QColor(255, 255, 255, 16));
+            painter->setPen(isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 20));
             painter->drawLine(row.left() + 14, row.bottom(), row.right() - 14, row.bottom());
             painter->restore();
             return;
@@ -916,7 +932,7 @@ public:
             painter->setOpacity(0.45);
         }
         const QRect tile = option.rect.adjusted(1, 1, -2, -2);
-        painter->fillRect(tile, QColor(22, 22, 24));
+        painter->fillRect(tile, isDarkTheme() ? QColor(22, 22, 24) : option.palette.color(QPalette::AlternateBase));
         const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
         const int tileKind = index.data(Qt::UserRole + 12).toInt();
         const bool folderTile = tileKind == 1 || tileKind == 2 || tileKind == kKindPhone;
@@ -1164,9 +1180,10 @@ protected:
         QPainter painter(this);
         const bool close = glyph_ == CaptionGlyph::Close;
         if (underMouse()) {
-            painter.fillRect(rect(), close ? QColor(232, 17, 35) : QColor(255, 255, 255, 24));
+            painter.fillRect(rect(), close ? QColor(232, 17, 35)
+                : (isDarkTheme() ? QColor(255, 255, 255, 24) : QColor(0, 0, 0, 18)));
         }
-        painter.setPen(QPen(Qt::white, 1.0));
+        painter.setPen(QPen(close && underMouse() ? QColor(Qt::white) : palette().color(QPalette::WindowText), 1.0));
         painter.setBrush(Qt::NoBrush);
         const QPointF center(width() / 2.0, height() / 2.0);
         switch (glyph_) {
@@ -1479,6 +1496,8 @@ struct VaultOperationResult {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), autoLockTimer_(new QTimer(this)), galleryCache_(std::make_unique<GalleryCache>()) {
+    galleryPool_ = new QThreadPool(this);
+    galleryPool_->setMaxThreadCount(2);
     setWindowTitle(QStringLiteral("Mega Vault Protect"));
 #ifdef Q_OS_WIN
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint
@@ -1494,6 +1513,9 @@ MainWindow::MainWindow(QWidget* parent)
     searchTimer_->setSingleShot(true);
     searchTimer_->setInterval(180);
     connect(searchTimer_, &QTimer::timeout, this, [this] { refreshGallery(); });
+    updateCheckTimer_ = new QTimer(this);
+    updateCheckTimer_->setInterval(6 * 60 * 60 * 1000);
+    connect(updateCheckTimer_, &QTimer::timeout, this, [this] { beginUpdateCheck(); });
     connect(autoLockTimer_, &QTimer::timeout, this, [this] {
         // Never auto-lock in the middle of an import/restore/remove batch:
         // lock() blocks on the vault mutex a worker currently holds and the
@@ -2182,15 +2204,16 @@ QWidget* MainWindow::buildUnlockedPage() {
     viewModeCombo_->addItem(QStringLiteral("Icons"));
     viewModeCombo_->addItem(QStringLiteral("List"));
     viewModeCombo_->hide();
-    tagFilterCombo_ = new QComboBox(toolbar);
-    tagFilterCombo_->setMinimumWidth(150);
+    tagFilterButton_ = new TagFilterButton(toolbar);
+    tagFilterButton_->setMinimumWidth(150);
     searchEdit_ = new QLineEdit(toolbar);
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
     const auto makeIconButton = [](QWidget* parent, const QIcon& icon, const QString& tip, const bool filled) {
         auto* button = new QPushButton(parent);
-        button->setIcon(icon);
+        if (filled) button->setIcon(icon);
+        else setChromeIcon(button, icon);
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(36, 36);
         button->setCursor(Qt::PointingHandCursor);
@@ -2273,11 +2296,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* detailsMode = new QPushButton(modeHost);
     auto* iconsMode = new QPushButton(modeHost);
     auto* listMode = new QPushButton(modeHost);
-    detailsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_details.png")));
+    setChromeIcon(detailsMode, QIcon(QStringLiteral(":/icons/bar_details.png")));
     detailsMode->setToolTip(QStringLiteral("Details"));
-    iconsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_icons.png")));
+    setChromeIcon(iconsMode, QIcon(QStringLiteral(":/icons/bar_icons.png")));
     iconsMode->setToolTip(QStringLiteral("Icons"));
-    listMode->setIcon(QIcon(QStringLiteral(":/icons/bar_list.png")));
+    setChromeIcon(listMode, QIcon(QStringLiteral(":/icons/bar_list.png")));
     listMode->setToolTip(QStringLiteral("List"));
     viewModeGroup_ = new QButtonGroup(toolbar);
     viewModeGroup_->setExclusive(true);
@@ -2309,7 +2332,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     filterRow->addWidget(searchEdit_, 1);
     filterRow->addWidget(sortButton_);
     filterRow->addWidget(modeHost);
-    filterRow->addWidget(tagFilterCombo_);
+    filterRow->addWidget(tagFilterButton_);
     toolbarLayout->addLayout(filterRow);
 
     crumbHost_ = new QWidget(toolbar);
@@ -2590,11 +2613,11 @@ QWidget* MainWindow::buildUnlockedPage() {
             applyGallerySort(chosen->data().toInt());
         }
     });
-    connect(tagFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
-        this, [this](int) {
-            tagFilterId_ = tagFilterCombo_->currentData().toLongLong();
-            tagFilterName_ = tagFilterCombo_->currentData(Qt::UserRole + 1).toString();
-            refreshGallery();
+    connect(tagFilterButton_, &TagFilterButton::selectionChanged,
+        this, [this](const QStringList& tags) {
+            tagFilterNames_ = tags;
+            // Coalesce rapid checkmark changes just like gallery text search.
+            searchTimer_->start();
         });
     connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString& text) {
         searchText_ = text.trimmed();
@@ -3043,35 +3066,15 @@ void MainWindow::refreshTagFilter() {
         if (generation != tagGeneration_ || vault_ != vault) {
             return;
         }
-        const std::int64_t previous = tagFilterId_;
-        tagFilterCombo_->blockSignals(true);
-        tagFilterCombo_->clear();
-        tagFilterCombo_->addItem(QStringLiteral("All items"),
-            QVariant::fromValue<qlonglong>(-1));
-        tagFilterCombo_->setItemData(0, QString(), Qt::UserRole + 1);
-        if (outcome) {
-            for (const auto& tag : outcome.value()) {
-                tagFilterCombo_->addItem(
-                    QStringLiteral("%1 (%2)")
-                        .arg(QString::fromStdString(tag.name))
-                        .arg(tag.video_count),
-                    QVariant::fromValue<qlonglong>(tag.id));
-                tagFilterCombo_->setItemData(
-                    tagFilterCombo_->count() - 1,
-                    QString::fromStdString(tag.name), Qt::UserRole + 1);
-            }
+        // A transient read failure must not silently discard the selection.
+        if (!outcome) return;
+        QVector<TagFilterOption> options;
+        options.reserve(static_cast<int>(outcome.value().size()));
+        for (const auto& tag : outcome.value()) {
+            options.push_back({QString::fromStdString(tag.name),
+                static_cast<quint64>(tag.video_count)});
         }
-        int index = 0;
-        for (int i = 0; i < tagFilterCombo_->count(); ++i) {
-            if (tagFilterCombo_->itemData(i).toLongLong() == previous) {
-                index = i;
-                break;
-            }
-        }
-        tagFilterCombo_->setCurrentIndex(index);
-        tagFilterCombo_->blockSignals(false);
-        tagFilterId_ = tagFilterCombo_->itemData(index).toLongLong();
-        tagFilterName_ = tagFilterCombo_->itemData(index, Qt::UserRole + 1).toString();
+        tagFilterButton_->setTags(options);
     });
     watcher->setFuture(QtConcurrent::run([vault] {
         return std::make_shared<core::Result<std::vector<core::TagInfo>>>(
@@ -3816,42 +3819,125 @@ void MainWindow::openSettings() {
         return;
     }
     setError(galleryStatus_, {});
-    auto* dialog = new SettingsDialog(vault_, this);
-    connect(dialog, &SettingsDialog::settingsChanged, this, [this] {
-        refreshTagFilter();
-        refreshGallery();
-        resetAutoLock();
-    });
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->show();
+    if (!settingsPage_) {
+        auto* page = new SettingsDialog(vault_, contentStack_);
+        settingsPage_ = page;
+        contentStack_->addWidget(page);
+        connect(page, &SettingsDialog::settingsChanged, this, [this] {
+            refreshTagFilter();
+            refreshGallery();
+            resetAutoLock();
+        });
+        connect(page, &SettingsDialog::appearanceChanged, this, [this] {
+            setThemeMode(savedThemeMode());
+            update();
+        });
+        connect(page, &SettingsDialog::updateCheckRequested, this, [this] { beginUpdateCheck(true); });
+        connect(page, &SettingsDialog::updatePreferencesChanged, this, [this] { configureUpdateChecks(); });
+        connect(page, &SettingsDialog::closed, this, [this, page] {
+            if (settingsPage_ != page) return;
+            settingsPage_ = nullptr;
+            contentStack_->setCurrentWidget(pages_);
+            contentStack_->removeWidget(page);
+            page->deleteLater();
+            restoreGalleryFocus();
+            decorateVisible();
+        });
+        connect(page, &QObject::destroyed, this, [this, page] {
+            if (settingsPage_ == page) settingsPage_ = nullptr;
+        });
+    }
+    settingsPage_->setUpdateStatus(updateStatus_.isEmpty()
+        ? QStringLiteral("Installed version %1").arg(installedVersion()) : updateStatus_,
+        updateChecking_ || updateInstalling_);
+    contentStack_->setCurrentWidget(settingsPage_);
+    settingsPage_->setFocus();
 }
 
-void MainWindow::beginUpdateCheck() {
-    if (updateChecked_ || updateButton_ == nullptr || !appUpdateSupported()) {
+void MainWindow::configureUpdateChecks() {
+    const QSettings preferences;
+    const bool automatic = preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool();
+    const bool beta = preferences.value(QStringLiteral("updates/includeBeta"), false).toBool();
+    if (beta != updateChannelBeta_ && !updateVersion_.isEmpty()) {
+        updateVersion_.clear();
+        updateUrl_.clear();
+        updatePayload_.clear();
+        updateButton_->hide();
+    }
+    if (automatic && appUpdateSupported()) {
+        updateCheckTimer_->start();
+        beginUpdateCheck();
+    } else {
+        updateCheckTimer_->stop();
+    }
+}
+
+void MainWindow::beginUpdateCheck(const bool manual) {
+    if (updateChecking_ || updateInstalling_ || updateButton_ == nullptr) return;
+    if (!appUpdateSupported()) {
+        updateStatus_ = QStringLiteral("In-app updates are not available on this platform.");
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
         return;
     }
-    updateChecked_ = true;
+    QSettings preferences;
+    const bool beta = preferences.value(QStringLiteral("updates/includeBeta"), false).toBool();
+    if (!manual) {
+        if (!preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool()) return;
+        const QDateTime last = preferences.value(QStringLiteral("updates/lastCheckUtc")).toDateTime();
+        const qint64 elapsed = last.secsTo(QDateTime::currentDateTimeUtc());
+        if (last.isValid() && elapsed >= 0 && elapsed < 6 * 60 * 60
+            && preferences.value(QStringLiteral("updates/lastCheckBeta"), false).toBool() == beta) return;
+    }
+    preferences.setValue(QStringLiteral("updates/lastCheckUtc"), QDateTime::currentDateTimeUtc());
+    preferences.setValue(QStringLiteral("updates/lastCheckBeta"), beta);
+    updateChecking_ = true;
+    updateChannelBeta_ = beta;
+    updateStatus_ = QStringLiteral("Checking for updates…");
+    if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_, true);
     auto* watcher = new QFutureWatcher<UpdateCheckOutcome>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, beta] {
         const UpdateCheckOutcome outcome = watcher->result();
         watcher->deleteLater();
-        if (outcome.version.isEmpty() || updateButton_ == nullptr) {
-            // Newest release already, or GitHub unreachable. The phone stays
-            // quiet in both cases too, so nothing is shown here either.
+        updateChecking_ = false;
+        const QSettings preferences;
+        if (beta != preferences.value(QStringLiteral("updates/includeBeta"), false).toBool()) {
+            updateStatus_ = QStringLiteral("Update channel changed. Check again for the selected channel.");
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            configureUpdateChecks();
             return;
         }
+        if (!outcome.error.isEmpty()) {
+            updateStatus_ = outcome.error;
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
+        if (outcome.version.isEmpty()) {
+            updateStatus_ = QStringLiteral("You’re up to date · Version %1").arg(installedVersion());
+            updateVersion_.clear();
+            updateUrl_.clear();
+            updatePayload_.clear();
+            updateButton_->hide();
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
+        if (updateVersion_ != outcome.version) updatePayload_.clear();
         updateVersion_ = outcome.version;
         updateUrl_ = outcome.url;
         updateSize_ = outcome.size;
+        updateStatus_ = QStringLiteral("Version %1 is available.").arg(updateVersion_);
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
         updateButton_->setToolTip(
             QStringLiteral("Download and install version %1").arg(updateVersion_));
         updateButton_->show();
+        if (preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool()
+            && preferences.value(QStringLiteral("updates/downloadAutomatically"), false).toBool()) {
+            beginUpdateInstall(true);
+        }
     });
-    watcher->setFuture(QtConcurrent::run([] {
+    watcher->setFuture(QtConcurrent::run([beta] {
         UpdateCheckOutcome outcome;
         AppRelease release;
-        QString error;
-        if (!fetchLatestRelease(installedVersion(), &release, &error)) {
+        if (!fetchLatestRelease(installedVersion(), &release, &outcome.error, beta)) {
             return outcome;
         }
         outcome.version = release.version;
@@ -3861,20 +3947,24 @@ void MainWindow::beginUpdateCheck() {
     }));
 }
 
-void MainWindow::beginUpdateInstall() {
+void MainWindow::beginUpdateInstall(const bool automatic) {
     if (updateInstalling_ || updateVersion_.isEmpty()) {
         return;
     }
     if (!updatePayload_.isEmpty()) {
-        offerUpdateRestart();   // unpacked on an earlier visit
+        if (!automatic) offerUpdateRestart();
         return;
     }
     updateInstalling_ = true;
     updateButton_->setEnabled(false);
-    progressBar_->setRange(0, 1000);
-    progressBar_->setValue(0);
-    progressBar_->show();
-    showStatus(QStringLiteral("Updating…"), false);
+    if (!batchBusy_) {
+        progressBar_->setRange(0, 1000);
+        progressBar_->setValue(0);
+        progressBar_->show();
+    }
+    updateStatus_ = QStringLiteral("Downloading update…");
+    if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_, true);
+    showStatus(updateStatus_, false);
 
     AppRelease release;
     release.version = updateVersion_;
@@ -3884,21 +3974,31 @@ void MainWindow::beginUpdateInstall() {
     // reaching a window that is already gone.
     const QPointer<MainWindow> guard(this);
     auto* watcher = new QFutureWatcher<UpdateInstallOutcome>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, release] {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, release, automatic] {
         const UpdateInstallOutcome outcome = watcher->result();
         watcher->deleteLater();
         updateInstalling_ = false;
-        progressBar_->hide();
+        if (!batchBusy_) progressBar_->hide();
         if (updateButton_ != nullptr) {
             updateButton_->setEnabled(true);
         }
         if (!outcome.error.isEmpty()) {
+            updateStatus_ = outcome.error;
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
             showStatus(outcome.error, true);
             return;
         }
+        if (updateVersion_ != release.version) {
+            updateStatus_ = QStringLiteral("Update channel changed; the old download will not be installed.");
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
         updatePayload_ = outcome.payload;
-        showStatus(QStringLiteral("Version %1 is ready to install.").arg(release.version), false);
-        offerUpdateRestart();
+        updateStatus_ = QStringLiteral("Version %1 is ready. Use the update button to restart and install.").arg(release.version);
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+        showStatus(updateStatus_, false);
+        // Background downloads never quit an open vault without consent.
+        if (!automatic) offerUpdateRestart();
     });
     watcher->setFuture(QtConcurrent::run([release, guard] {
         UpdateInstallOutcome outcome;
@@ -3924,7 +4024,7 @@ void MainWindow::beginUpdateInstall() {
 }
 
 void MainWindow::setUpdateProgress(const qint64 done, const qint64 total) {
-    if (progressBar_ == nullptr) {
+    if (progressBar_ == nullptr || batchBusy_) {
         return;
     }
     if (total > 0) {
@@ -3955,7 +4055,7 @@ void MainWindow::offerUpdateRestart() {
     box.setDefaultButton(restart);
     box.exec();
     if (box.clickedButton() != restart) {
-        showStatus(QStringLiteral("Version %1 installs at the next restart.").arg(release.version), false);
+        showStatus(QStringLiteral("Version %1 is ready. Use the update button when you want to install.").arg(release.version), false);
         return;
     }
     if (batchBusy_) {
@@ -5313,7 +5413,7 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
                 break;
             }
         }
-    } else if (auto* item = findListItemById(iconList_, video_id)) {
+    } else if (auto* item = galleryIconItem(video_id)) {
         current = item->data(Qt::UserRole + 1).toString();
     }
     InWindowSheet prompt(this);
@@ -5701,7 +5801,7 @@ void MainWindow::revealVideo(const qlonglong id, const QString& name, const qlon
     if (!vault_ || !vault_->is_unlocked() || folderId != currentFolderId_) {
         return;
     }
-    if (!tagFilterName_.isEmpty()) {
+    if (!tagFilterNames_.isEmpty()) {
         return;
     }
     if (!searchText_.isEmpty() && !name.contains(searchText_, Qt::CaseInsensitive)) {
@@ -5766,7 +5866,9 @@ void MainWindow::placeVideoRow(const qlonglong id, const QString& name, const ql
     treeItem->setData(0, Qt::UserRole + 12, 0);
     treeItem->setToolTip(0, iconItem->toolTip());
     detailsTree_->insertTopLevelItem(std::min(index, detailsTree_->topLevelItemCount()), treeItem);
-    decorateVideo(id, name, static_cast<quint64>(std::max<qlonglong>(0, size)));
+    galleryCache_->iconRows[id] = iconItem;
+    galleryCache_->treeRows[id] = treeItem;
+    decorateVisible();
     recountLibrary();
 }
 
@@ -5815,7 +5917,45 @@ void MainWindow::recountLibrary() {
     }
 }
 
-void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, const quint64 originalSize) {
+QListWidgetItem* MainWindow::galleryIconItem(const qlonglong id) const {
+    const auto found = galleryCache_->iconRows.find(id);
+    return found == galleryCache_->iconRows.end() ? nullptr : found->second;
+}
+
+QTreeWidgetItem* MainWindow::galleryTreeItem(const qlonglong id) const {
+    const auto found = galleryCache_->treeRows.find(id);
+    return found == galleryCache_->treeRows.end() ? nullptr : found->second;
+}
+
+void MainWindow::rememberGalleryThumbnail(const qlonglong id, const QPixmap& pixmap) {
+    // Row QVariant/QIcon copies also own the decoded pixels. Evict ALL owners,
+    // not just the map, or scrolling through a vault still retains every tile.
+    auto& cache = *galleryCache_;
+    const auto old = std::find(cache.thumbOrder.begin(), cache.thumbOrder.end(), id);
+    if (old != cache.thumbOrder.end()) cache.thumbOrder.erase(old);
+    cache.thumbs[id] = pixmap;
+    cache.thumbOrder.push_back(id);
+    while (cache.thumbOrder.size() > galleryResidentLimit_) {
+        const auto evicted = cache.thumbOrder.front();
+        cache.thumbOrder.pop_front();
+        cache.thumbs.erase(evicted);
+        cache.pdfThumbs.erase(evicted);
+        decoratedIds_.erase(evicted);
+        if (auto* item = galleryIconItem(evicted)) {
+            item->setData(Qt::UserRole + 4, QVariant());
+            item->setIcon(QIcon());
+        }
+        if (auto* item = galleryTreeItem(evicted)) item->setIcon(0, QIcon());
+    }
+}
+
+void MainWindow::galleryTaskFinished() {
+    --galleryTasksInFlight_;
+    QTimer::singleShot(0, this, [this] { decorateVisible(); });
+}
+
+void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, const quint64 originalSize,
+    const bool loadThumbnail) {
     auto applyThumb = [](QListWidgetItem* iconItem, QTreeWidgetItem* treeItem, const QPixmap& source) {
         if (source.isNull()) {
             return;
@@ -5834,13 +5974,13 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
     };
     const auto vault = vault_;
     const auto generation = galleryGeneration_;
-    auto presentIdentity = [this, vault, video_id, name, originalSize, applyThumb, generation](const FileIdentity& identity) {
+    auto presentIdentity = [this, vault, video_id, name, originalSize, applyThumb, generation, loadThumbnail](const FileIdentity& identity) {
         if (generation != galleryGeneration_) {
             return;
         }
         galleryCache_->kinds[video_id] = identity;
-        auto* iconItem = findListItemById(iconList_, video_id);
-        auto* treeItem = findTreeItemById(detailsTree_, video_id);
+        auto* iconItem = galleryIconItem(video_id);
+        auto* treeItem = galleryTreeItem(video_id);
         if (iconItem == nullptr && treeItem == nullptr) {
             return;
         }
@@ -5848,9 +5988,17 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             iconItem->setData(Qt::UserRole + 15, identity.label);
             iconItem->setData(Qt::UserRole + 16, identity.route);
         }
+        // Metadata sorts do not need off-screen decoded previews.
+        if (!loadThumbnail && identity.route != 1 && identity.route != 2) {
+            if (treeItem) {
+                treeItem->setText(2, QString());
+                treeItem->setText(4, identity.label);
+            }
+            return;
+        }
         if (identity.route == 0) {
             const QPixmap badge = kindBadge(identity.label, compactSize(originalSize), 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             if (treeItem != nullptr) {
                 treeItem->setText(2, QString());
@@ -5876,10 +6024,12 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             }
             galleryCache_->pdfThumbs.insert(video_id);
             auto* thumbWatcher = new QFutureWatcher<QByteArray>(this);
+            ++galleryTasksInFlight_;
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
                 [this, video_id, thumbWatcher, applyThumb, generation] {
                     const QByteArray jpeg = thumbWatcher->result();
                     thumbWatcher->deleteLater();
+                    galleryTaskFinished();
                     if (generation != galleryGeneration_ || jpeg.isEmpty()) {
                         return;
                     }
@@ -5890,12 +6040,12 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
                         ? pixmap
                         : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    galleryCache_->thumbs[video_id] = tile;
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    rememberGalleryThumbnail(video_id, tile);
+                    auto* iconItem = galleryIconItem(video_id);
+                    auto* treeItem = galleryTreeItem(video_id);
                     applyThumb(iconItem, treeItem, tile);
                 });
-            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+            thumbWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
                 auto stored = vault->thumbnail(video_id);
                 if (stored && stored.value().mime == "image/jpeg"
                     && stored.value().width >= 16U && !stored.value().bytes.empty()) {
@@ -5947,7 +6097,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 treeItem->setText(4, identity.label);
             }
             const QPixmap badge = textDocumentPixmap(identity.label, 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             return;
         }
@@ -5964,25 +6114,34 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             }
             const QPixmap badge = recordBadge(
                 identity.label, name, compactSize(originalSize), 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             return;
         }
+        if (loadThumbnail) {
         const auto cachedThumb = galleryCache_->thumbs.find(video_id);
         if (cachedThumb != galleryCache_->thumbs.end()) {
             applyThumb(iconItem, treeItem, cachedThumb->second);
         } else if (vault) {
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
+            ++galleryTasksInFlight_;
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, thumbWatcher, applyThumb, generation] {
+                [this, video_id, name, originalSize, thumbWatcher, applyThumb, generation] {
                     const auto outcome = *thumbWatcher->result();
                     thumbWatcher->deleteLater();
-                    if (generation != galleryGeneration_ || !outcome || outcome.value().bytes.empty()) {
+                    galleryTaskFinished();
+                    if (generation != galleryGeneration_) {
                         return;
                     }
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    // Continue the same request chain, never fan one sniff
+                    // into concurrent thumbnail AND metadata jobs.
+                    decorateVideo(video_id, name, originalSize, false);
+                    if (!outcome || outcome.value().bytes.empty()) {
+                        return;
+                    }
+                    auto* iconItem = galleryIconItem(video_id);
+                    auto* treeItem = galleryTreeItem(video_id);
                     if (iconItem == nullptr && treeItem == nullptr) {
                         return;
                     }
@@ -5999,13 +6158,15 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
                         ? pixmap
                         : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    galleryCache_->thumbs[video_id] = tile;
+                    rememberGalleryThumbnail(video_id, tile);
                     applyThumb(iconItem, treeItem, tile);
                 });
-            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+            thumbWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
                 auto stored = vault->display_thumbnail(video_id, 320U);
                 return std::make_shared<core::Result<core::ThumbnailInfo>>(std::move(stored));
             }));
+            return;
+        }
         }
         if (!vault) {
             return;
@@ -6055,16 +6216,18 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             return;
         }
         auto* mediaWatcher = new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
+        ++galleryTasksInFlight_;
         connect(mediaWatcher, &QFutureWatcherBase::finished, this,
             [this, video_id, mediaWatcher, applyMedia, generation] {
                 const auto outcome = *mediaWatcher->result();
                 mediaWatcher->deleteLater();
+                galleryTaskFinished();
                 if (generation != galleryGeneration_ || !outcome) {
                     return;
                 }
                 galleryCache_->media[video_id] = outcome.value();
-                auto* iconItem = findListItemById(iconList_, video_id);
-                auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                auto* iconItem = galleryIconItem(video_id);
+                auto* treeItem = galleryTreeItem(video_id);
                 if (iconItem == nullptr && treeItem == nullptr) {
                     return;
                 }
@@ -6083,7 +6246,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     scheduleGallerySort();
                 }
             });
-        mediaWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+        mediaWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
             return std::make_shared<core::Result<core::MediaInfo>>(vault->media_info(video_id));
         }));
     };
@@ -6093,12 +6256,14 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
         return;
     }
     auto* sniffWatcher = new QFutureWatcher<FileIdentity>(this);
-    connect(sniffWatcher, &QFutureWatcherBase::finished, this, [sniffWatcher, presentIdentity] {
+    ++galleryTasksInFlight_;
+    connect(sniffWatcher, &QFutureWatcherBase::finished, this, [this, sniffWatcher, presentIdentity] {
         const FileIdentity identity = sniffWatcher->result();
         sniffWatcher->deleteLater();
+        galleryTaskFinished();
         presentIdentity(identity);
     });
-    sniffWatcher->setFuture(QtConcurrent::run([vault, video_id, name] {
+    sniffWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id, name] {
         return identityForVideo(vault, video_id, name);
     }));
 }
@@ -6110,7 +6275,8 @@ void MainWindow::paintGalleryBatch() {
     }
     iconList_->setUpdatesEnabled(false);
     detailsTree_->setUpdatesEnabled(false);
-    constexpr int kBatch = 48;
+    // Paint the first screen promptly, then avoid hundreds of full relayouts.
+    const int kBatch = galleryQueueIndex_ == 0 ? 48 : 512;
     int made = 0;
     while (made < kBatch && galleryQueueIndex_ < galleryQueue_.size()) {
         const PendingGalleryVideo& video = galleryQueue_[galleryQueueIndex_++];
@@ -6150,6 +6316,8 @@ void MainWindow::paintGalleryBatch() {
         treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video.id));
         treeItem->setData(0, Qt::UserRole + 12, 0);
         treeItem->setToolTip(0, tip);
+        galleryCache_->iconRows[video.id] = iconItem;
+        galleryCache_->treeRows[video.id] = treeItem;
         ++made;
     }
     const bool more = galleryQueueIndex_ < galleryQueue_.size();
@@ -6194,6 +6362,9 @@ void MainWindow::decorateVisible() {
     if (iconList_ == nullptr || detailsTree_ == nullptr || galleryStack_ == nullptr) {
         return;
     }
+    // Bound queued work too; completions pump the next visible rows.
+    if (galleryTasksInFlight_ >= 4 || !vault_ || !vault_->is_unlocked()) return;
+    if (contentStack_ && pages_ && contentStack_->currentWidget() != pages_) return;
     const bool details = galleryStack_->currentWidget() == detailsTree_;
     QAbstractItemView* view = details
         ? static_cast<QAbstractItemView*>(detailsTree_)
@@ -6237,16 +6408,22 @@ void MainWindow::decorateVisible() {
         last = std::min(count - 1, last + columns * 2);
     }
 
+    // Keep at least one viewport plus the prefetch rows on large/HiDPI
+    // monitors, otherwise visible rows continuously evict one another.
+    galleryResidentLimit_ = std::max<std::size_t>(128, static_cast<std::size_t>(last - first + 1));
     int started = 0;
     constexpr int kCap = 16;
-    auto consider = [&](const qlonglong id, const QString& name, const quint64 size, const int kind) {
-        if (started >= kCap || kind != 0 || id <= 0) {
+    auto consider = [&](const qlonglong id, const QString& name, const quint64 size, const int kind,
+        const bool thumbnail = true) {
+        if (started >= kCap || galleryTasksInFlight_ >= 4 || kind != 0 || id <= 0) {
             return;
         }
-        if (!decoratedIds_.insert(static_cast<std::int64_t>(id)).second) {
+        auto& requested = thumbnail ? decoratedIds_ : metadataRequested_;
+        if (!requested.insert(static_cast<std::int64_t>(id)).second) {
             return;
         }
-        decorateVideo(id, name, size);
+        metadataRequested_.insert(id);
+        decorateVideo(id, name, size, thumbnail);
         ++started;
     };
     for (int index = first; index <= last && started < kCap; ++index) {
@@ -6275,10 +6452,10 @@ void MainWindow::decorateVisible() {
     }
     const bool probeLibrary = sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4;
     const bool moreVisible = last > first && started >= kCap;
-    if (probeLibrary && started < kCap) {
+    if (probeLibrary && started < kCap && galleryTasksInFlight_ < 4) {
         const int libraryCount = iconList_->count();
         int scanned = 0;
-        while (started < kCap && libraryCount > 0 && scanned < libraryCount) {
+        while (started < kCap && galleryTasksInFlight_ < 4 && libraryCount > 0 && scanned < libraryCount) {
             const int index = sortProbeCursor_ % libraryCount;
             ++sortProbeCursor_;
             ++scanned;
@@ -6290,7 +6467,7 @@ void MainWindow::decorateVisible() {
                 item->data(Qt::UserRole).toLongLong(),
                 item->data(Qt::UserRole + 1).toString(),
                 static_cast<quint64>(item->data(Qt::UserRole + 6).toULongLong()),
-                item->data(Qt::UserRole + 12).toInt());
+                item->data(Qt::UserRole + 12).toInt(), false);
         }
     }
     if (moreVisible || (probeLibrary && started > 0)) {
@@ -6305,6 +6482,16 @@ void MainWindow::decorateVisible() {
 }
 
 void MainWindow::refreshGallery() {
+    // Invalidate callbacks before deleting any rows, including error paths.
+    const auto generation = ++galleryGeneration_;
+    galleryPaintGeneration_ = generation;
+    galleryCache_->iconRows.clear();
+    galleryCache_->treeRows.clear();
+    galleryCache_->thumbs.clear();
+    galleryCache_->thumbOrder.clear();
+    galleryCache_->pdfThumbs.clear();
+    decoratedIds_.clear();
+    metadataRequested_.clear();
     galleryListing_ = true;
     galleryQueue_.clear();
     galleryQueueIndex_ = 0;
@@ -6355,7 +6542,6 @@ void MainWindow::refreshGallery() {
         }
     }
     const auto openId = currentFolderId_;
-    const auto generation = ++galleryGeneration_;
     const auto vault = vault_;
     auto* watcher = new QFutureWatcher<std::vector<core::VideoInfo>>(this);
     connect(watcher, &QFutureWatcherBase::finished, this,
@@ -6425,10 +6611,10 @@ void MainWindow::refreshGallery() {
             if (video.folder_id != openId) {
                 continue;
             }
-            bool tag_matches = tagFilterName_.isEmpty();
+            bool tag_matches = tagFilterNames_.isEmpty();
             if (!tag_matches) {
                 for (const auto& tag : video.tags) {
-                    if (QString::fromStdString(tag).compare(tagFilterName_, Qt::CaseInsensitive) == 0) {
+                    if (tagFilterNames_.contains(QString::fromStdString(tag), Qt::CaseInsensitive)) {
                         tag_matches = true;
                         break;
                     }
@@ -6515,7 +6701,7 @@ void MainWindow::refreshGallery() {
         const bool libraryEmpty = visible.empty() && realFolders == 0;
         if (emptyState_ != nullptr) {
             if (libraryEmpty) {
-                if (!tagFilterName_.isEmpty() || !searchText_.isEmpty()) {
+                if (!tagFilterNames_.isEmpty() || !searchText_.isEmpty()) {
                     emptyState_->setText(QStringLiteral("Nothing matches this search."));
                 } else if (openId == 0) {
                     emptyState_->setText(QStringLiteral(
@@ -6731,7 +6917,7 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
             }
             return;
         }
-        auto* window = new PlayerWindow(vault_, video_id, title, contentStack_);
+        auto* window = new PlayerWindow(vault_, video_id, title, contentStack_, true);
         window->setAttribute(Qt::WA_DeleteOnClose);
         connect(window, &QDialog::destroyed, this,
             [this, window] {
@@ -6754,7 +6940,6 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         connect(window, &PlayerWindow::previousRequested, this, [this] { stepPlayback(-1); });
         connect(window, &PlayerWindow::nextRequested, this, [this] { stepPlayback(1); });
         playerWindow_ = window;
-        window->playStill(vault_, video_id);
         applyClip(window);
         embedPlayer();
         return;
@@ -7176,8 +7361,11 @@ void MainWindow::showUnlocked() {
     unlockedLocation_->setToolTip(rootText);
     fadeStack(pages_, unlockedPage_);
     resetAutoLock();
-    tagFilterId_ = -1;
-    tagFilterName_.clear();
+    tagFilterNames_.clear();
+    {
+        const QSignalBlocker blocker(tagFilterButton_);
+        tagFilterButton_->setTags({});
+    }
     searchText_.clear();
     searchEdit_->clear();
     refreshTagFilter();
@@ -7198,7 +7386,7 @@ void MainWindow::showUnlocked() {
         }
         update();
     });
-    beginUpdateCheck();
+    configureUpdateChecks();
 }
 
 void MainWindow::ensureShareServer() {
@@ -7773,6 +7961,10 @@ void MainWindow::saveOpenText(const bool closeAfter) {
             }
             if (galleryCache_ != nullptr) {
                 galleryCache_->thumbs.erase(previous);
+                galleryCache_->iconRows.erase(previous);
+                galleryCache_->treeRows.erase(previous);
+                auto& order = galleryCache_->thumbOrder;
+                order.erase(std::remove(order.begin(), order.end(), previous), order.end());
                 galleryCache_->media.erase(previous);
                 galleryCache_->kinds.erase(previous);
             }
@@ -7955,6 +8147,13 @@ void MainWindow::lockVault() {
         }
         return;
     }
+    if (settingsPage_) {
+        auto* page = settingsPage_;
+        settingsPage_ = nullptr;
+        contentStack_->setCurrentWidget(pages_);
+        contentStack_->removeWidget(page);
+        delete page;
+    }
     closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
     syncKeys_.wipe(); // The derived sync keys die with the unlock.
     // Sharing stays up until Stop sharing, including a swap. The lock screen
@@ -7986,6 +8185,9 @@ void MainWindow::lockVault() {
     // types kept from the one being locked would be drawn on the next one.
     if (galleryCache_ != nullptr) {
         galleryCache_->thumbs.clear();
+        galleryCache_->thumbOrder.clear();
+        galleryCache_->iconRows.clear();
+        galleryCache_->treeRows.clear();
         galleryCache_->media.clear();
         galleryCache_->kinds.clear();
         galleryCache_->pdfThumbs.clear();
@@ -7995,6 +8197,7 @@ void MainWindow::lockVault() {
     galleryQueueIndex_ = 0;
     decoratedIds_.clear();
     galleryListing_ = false;
+    metadataRequested_.clear();
     cutItems_.clear();
     dragPayload_.clear();
     dragPayloadValid_ = false;
@@ -8011,8 +8214,11 @@ void MainWindow::lockVault() {
             settingsButton_->setEnabled(true);
             detailsTree_->clear();
             iconList_->clear();
-            tagFilterId_ = -1;
-            tagFilterName_.clear();
+            tagFilterNames_.clear();
+            {
+                const QSignalBlocker blocker(tagFilterButton_);
+                tagFilterButton_->setTags({});
+            }
             searchText_.clear();
             currentFolderId_ = 0;
             folders_.clear();
@@ -8030,8 +8236,11 @@ void MainWindow::lockVault() {
     settingsButton_->setEnabled(true);
     detailsTree_->clear();
     iconList_->clear();
-    tagFilterId_ = -1;
-    tagFilterName_.clear();
+    tagFilterNames_.clear();
+    {
+        const QSignalBlocker blocker(tagFilterButton_);
+        tagFilterButton_->setTags({});
+    }
     searchText_.clear();
     currentFolderId_ = 0;
     folders_.clear();

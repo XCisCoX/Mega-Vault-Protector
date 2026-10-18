@@ -26,6 +26,9 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
+class QPixmap;
+class QThreadPool;
 class QProgressBar;
 class QPushButton;
 class QThread;
@@ -58,6 +61,8 @@ class PdfWindow;
 class RecordWindow;
 class SyncEngine;
 class SyncPage;
+class TagFilterButton;
+class SettingsDialog;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -90,6 +95,7 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
+    friend struct GalleryPerformanceTestAccess;
     void buildInterface();
     QWidget* buildSetupPage();
     QWidget* buildLoginPage();
@@ -141,7 +147,11 @@ private:
     void revealFolder(qlonglong id, qlonglong parentId, const QString& name);
     void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
     void placeFolderRow(qlonglong id, const QString& name);
-    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize, bool loadThumbnail = true);
+    void rememberGalleryThumbnail(qlonglong id, const QPixmap& pixmap);
+    QListWidgetItem* galleryIconItem(qlonglong id) const;
+    QTreeWidgetItem* galleryTreeItem(qlonglong id) const;
+    void galleryTaskFinished();
     void paintGalleryBatch();
     void decorateVisible();
     void recountLibrary();
@@ -165,8 +175,9 @@ private:
 
     // The running build against the newest GitHub release, the same check the
     // phone runs when its library opens. The whole flow is off the UI thread.
-    void beginUpdateCheck();
-    void beginUpdateInstall();
+    void configureUpdateChecks();
+    void beginUpdateCheck(bool manual = false);
+    void beginUpdateInstall(bool automatic = false);
     void setUpdateProgress(qint64 done, qint64 total);
     void offerUpdateRestart();
     void beginPlayback(std::int64_t video_id);
@@ -273,13 +284,17 @@ private:
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
+    SettingsDialog* settingsPage_{nullptr};
     QPushButton* shareButton_{nullptr};
     // Update offer: the release GitHub reported, shown as an icon in the library
     // bar only once a newer version exists. updatePayload_ holds the unpacked
     // folder while the user decides whether to restart into it.
     QPushButton* updateButton_{nullptr};
-    bool updateChecked_{false};
+    QTimer* updateCheckTimer_{nullptr};
+    bool updateChecking_{false};
     bool updateInstalling_{false};
+    bool updateChannelBeta_{false};
+    QString updateStatus_;
     QString updateVersion_;
     QString updateUrl_;
     qint64 updateSize_{0};
@@ -292,7 +307,7 @@ private:
     bool sortingGallery_{false};
     bool gallerySortAgain_{false};
     bool gallerySortQueued_{false};
-    QComboBox* tagFilterCombo_{nullptr};
+    TagFilterButton* tagFilterButton_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
@@ -338,8 +353,7 @@ private:
     QLabel* statusCountLabel_{nullptr};
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
-    std::int64_t tagFilterId_{-1};
-    QString tagFilterName_;
+    QStringList tagFilterNames_;
     QString searchText_;
     // Label for the in-progress batch status text ("Importing"/"Restoring").
     QString batchLabel_;
@@ -363,6 +377,10 @@ private:
     std::uint64_t galleryPaintGeneration_{0};
     std::unordered_set<std::int64_t> decoratedIds_;
     int sortProbeCursor_{0};
+    int galleryTasksInFlight_{0};
+    std::size_t galleryResidentLimit_{128};
+    QThreadPool* galleryPool_{nullptr};
+    std::unordered_set<std::int64_t> metadataRequested_;
     // True while refreshGallery is rebuilding the rows. Arrivals during that
     // window are kept and merged into the snapshot, so a late list cannot
     // wipe a file that landed after the list was read.
