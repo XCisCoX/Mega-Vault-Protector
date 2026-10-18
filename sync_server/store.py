@@ -507,3 +507,63 @@ class Store:
         for path in (self.blob_path(vault_id, name), self.blob_path(vault_id, name + '.part')):
             path.unlink(missing_ok=True)
         sync_directory(self.blobs / vault_id)
+
+    # -- garbage collection -----------------------------------------------
+
+    def collect_garbage(self, age_seconds, vault_id=None, dry_run=False):
+        """Remove packages no record references and abandoned partial uploads.
+
+        A record write and a purge both go through one writer transaction, so
+        this runs inside the same lock: it cannot delete a package while a
+        record that points at it is being committed.
+
+        ``age_seconds`` is the safety margin. A client uploads the blob before
+        it writes the record that references it, and a device may be holding an
+        older record that still points at a package a newer record replaced, so
+        anything younger than the margin is left alone -- it may be a transfer
+        that is still in flight on another device. The default is a day.
+
+        With ``dry_run`` the same rows are selected and counted, nothing is
+        deleted, so an operator can see what a sweep would free first.
+        """
+        margin = max(0, age_seconds)
+        cutoff = time.time() - margin
+        removed = {'packages': 0, 'partials': 0, 'dangling': 0, 'bytes': 0}
+        with self.session(write=True) as db:
+            query = 'SELECT vault,name,size,offset,complete FROM blobs'
+            values = ()
+            if vault_id is not None:
+                query += ' WHERE vault=?'
+                values = (vault_id,)
+            rows = db.execute(query, values).fetchall()
+            referenced = {(row['vault'], row['package']) for row in
+                          db.execute('SELECT vault,package FROM records WHERE package IS NOT NULL')}
+            for row in rows:
+                vault, name = row['vault'], row['name']
+                directory = self.blobs / vault
+                final, part = directory / name, directory / (name + '.part')
+                path = final if row['complete'] else part
+                if not path.is_file():
+                    # No bytes on disk: the row only inflates the quota.
+                    if not dry_run:
+                        db.execute('DELETE FROM blobs WHERE vault=? AND name=?', (vault, name))
+                    removed['dangling'] += 1
+                    continue
+                try:
+                    fresh = path.stat().st_mtime > cutoff
+                except OSError:
+                    fresh = False
+                if fresh:
+                    continue
+                # A record carries the bare 64-hex address; a blob row carries
+                # it with the .mvpk suffix.
+                if row['complete'] and (vault, name.removesuffix('.mvpk')) in referenced:
+                    continue
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                    db.execute('DELETE FROM blobs WHERE vault=? AND name=?', (vault, name))
+                removed['packages' if row['complete'] else 'partials'] += 1
+                removed['bytes'] += row['size']
+        if not dry_run and (removed['packages'] or removed['partials'] or removed['dangling']):
+            sync_directory(self.blobs)
+        return removed

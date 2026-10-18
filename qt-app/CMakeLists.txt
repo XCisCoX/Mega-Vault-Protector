@@ -281,8 +281,9 @@ if(MVP_BUILD_TESTS)
     mvp_copy_runtime_dlls(VideoVaultAppUpdateTests)
 
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
-        src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp
-        include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp)
+        src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/sync_state.cpp
+        include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
+        include/videovault/app/sync_state.hpp)
     target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core Qt5::Widgets Qt5::Concurrent)
     target_compile_features(VideoVaultSettingsTests PRIVATE cxx_std_20)

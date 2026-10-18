@@ -79,19 +79,21 @@ Copies wait in a queue and run one at a time, because the vault writes one packa
 
 ### Optional self-hosted sync
 
-The self-hosted sync design keeps a local vault on each device and transfers
-end-to-end encrypted vault packages through an optional relay. Pairing uses a
-separate device credential; the server must never receive your vault password
-or the shared package recovery secret. Selected files remain usable locally
-when the relay is offline. Interrupted transfers resume, and conflicting edits
-are preserved rather than silently overwritten.
+Sync keeps a local vault on each device and transfers end-to-end encrypted
+packages through your own relay. An account decides which vault you attach to;
+your vault password never leaves the device and is what decrypts the packages.
+The relay stores opaque bytes plus a small record per item — names, folders and
+tags live inside the encrypted records — so it can serve, list and delete
+without learning anything about your files. A conflict keeps both items, and a
+delete is a reversible tombstone until you purge it.
 
-See [setup, pairing, security and backups](docs/self-hosted-sync.md), the
-[architecture decision](docs/sync-architecture.md), and the
-[protocol contract](docs/sync-protocol.md). This replaces the old trusted-server
-`MegaVaultCloud` workflow, not PC/LAN sharing. Development-build verification
-and the documented MVP limits still matter; server tests alone do not prove
-native client UI behavior.
+See [the server and its wire contract](sync_server/README.md),
+[deployment with TLS](deployment/README.md) and the
+[protocol 4 design](docs/sync-mega-plan.md). The desktop app and the relay speak
+protocol 4; the phone client is still the older protocol 3 hash bucket and does
+not work against a protocol 4 relay yet. Documents describing protocol 3 are
+marked historical. This replaces the old trusted-server `MegaVaultCloud`
+workflow, not PC/LAN sharing.
 
 ## Screenshots
 

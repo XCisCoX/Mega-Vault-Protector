@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
         record.localId = 7;
         state.records.insert(record.id, record);
         state.pendingDownload.append(QStringLiteral("rec-2"));
+        state.packageKey = QString(64, 'e');
         saveState(path, first.state, state);
 
         const QByteArray sealed = readAll(path);
@@ -103,6 +104,50 @@ int main(int argc, char** argv) {
         check(back.version == 3 && back.name == "note.txt" && back.path == "Work", "record fields round trip");
         check(back.tags.size() == 2 && back.package == record.package && back.localId == 7, "tags, package and mapping round trip");
         check(loaded.pendingDownload == QStringList{QStringLiteral("rec-2")}, "the download queue round trips");
+        check(loaded.packageKey == state.packageKey, "the package password round trips inside the state");
+
+        // A state file written by a build from before the package key existed:
+        // sealed with the key derived from that package password, and with no
+        // package key inside. It must open through the legacy key and adopt the
+        // value the old scheme derived, or every package it shares is orphaned.
+        const QString legacyPath = directory + "/legacy.enc";
+        SyncState old = state;
+        old.packageKey.clear();
+        saveState(legacyPath, first.legacyState, old);
+        const SyncState opened = loadState(legacyPath, first);
+        check(opened.token == token, "an old state file opens through the legacy key");
+        check(opened.packageKey.isEmpty(), "an old state file carries no package key");
+        check(adoptedPackageKey(opened.packageKey, first) == first.package,
+              "an old state file adopts the package password it uploaded with");
+        bool legacySealRejected = false;
+        try {
+            loadState(legacyPath, first.state);
+        } catch (const std::exception&) {
+            legacySealRejected = true;
+        }
+
+        // The password changes: same salt, new state key, and the package key
+        // inside the file is what must survive the re-seal. Its own directory,
+        // so the tamper checks below still see the original file.
+        const QString resealDir = temp.path() + "/reseal";
+        check(QDir().mkpath(resealDir), "a directory for the re-seal check");
+        saveState(resealDir + "/state.enc", first.state, state);
+        const auto newer = deriveKeys(directory, QStringLiteral("a-new-vault-password"));
+        check(newer.state != first.state, "the new password derives a new state key");
+        check(newer.package != first.package, "and a new legacy package key");
+        resealState(resealDir, first, newer);
+        const SyncState resealed = loadState(resealDir + "/state.enc", newer.state);
+        check(resealed.token == token, "the re-sealed state opens with the new password");
+        check(resealed.packageKey == state.packageKey,
+              "the re-sealed state keeps the package password that was in use");
+        bool oldPasswordRejected = false;
+        try {
+            loadState(resealDir + "/state.enc", first.state);
+        } catch (const std::exception&) {
+            oldPasswordRejected = true;
+        }
+        check(oldPasswordRejected, "the old password no longer opens the re-sealed state");
+        check(legacySealRejected, "the legacy seal is not accepted under the current key");
 
         bool rejected = false;
         try { loadState(path, deviceB.state); } catch (const std::exception&) { rejected = true; }

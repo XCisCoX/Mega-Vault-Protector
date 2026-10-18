@@ -166,6 +166,15 @@ void Keys::wipe() {
         sodium_memzero(state.data(), size_t(state.size()));
         state.clear();
     }
+    if (!legacyState.isEmpty()) {
+        sodium_memzero(legacyState.data(), size_t(legacyState.size()));
+        legacyState.clear();
+    }
+}
+
+QString adoptedPackageKey(const QString& stored, const Keys& keys) {
+    if (!stored.isEmpty()) return stored;
+    return keys.package;
 }
 
 QString stateDirectoryFor(const QString& vaultRoot) {
@@ -213,7 +222,22 @@ Keys deriveKeys(const QString& stateDirectory, const QString& vaultPassword, boo
         sodium_memzero(package.data(), size_t(package.size()));
         fail(QStringLiteral("Cannot derive this device's sync key."));
     }
-    keys.state = state;
+    keys.legacyState = state;
+
+    // The state key is derived from the password and this device's salt, so
+    // rotating the password only re-seals state.enc. The package key inside it
+    // does not change, which is what keeps already shared packages readable.
+    QByteArray current(kKeyBytes, 0);
+    if (crypto_pwhash(reinterpret_cast<unsigned char*>(current.data()), size_t(current.size()),
+                      password.constData(), static_cast<unsigned long long>(password.size()),
+                      reinterpret_cast<const unsigned char*>(salt.constData()),
+                      crypto_pwhash_OPSLIMIT_INTERACTIVE, crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                      crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        sodium_memzero(package.data(), size_t(package.size()));
+        sodium_memzero(state.data(), size_t(state.size()));
+        fail(QStringLiteral("Cannot derive this device's sync key: not enough memory."));
+    }
+    keys.state = current;
     sodium_memzero(package.data(), size_t(package.size()));
     return keys;
 }
@@ -275,6 +299,7 @@ QJsonObject SyncState::toJson() const {
                        {QStringLiteral("email"), email},
                        {QStringLiteral("token"), token},
                        {QStringLiteral("tokenId"), tokenId},
+                       {QStringLiteral("packageKey"), packageKey},
                        {QStringLiteral("vault"), vaultId},
                        {QStringLiteral("vaultName"), vaultName},
                        {QStringLiteral("folder"), folder},
@@ -289,6 +314,8 @@ SyncState SyncState::fromJson(const QJsonObject& object) {
     state.email = object.value(QStringLiteral("email")).toString();
     state.token = object.value(QStringLiteral("token")).toString();
     state.tokenId = object.value(QStringLiteral("tokenId")).toString();
+    const QString packageKey = object.value(QStringLiteral("packageKey")).toString();
+    if (isHex(packageKey, 64)) state.packageKey = packageKey;
     state.vaultId = object.value(QStringLiteral("vault")).toString();
     state.vaultName = object.value(QStringLiteral("vaultName")).toString();
     state.folder = object.value(QStringLiteral("folder")).toString();
@@ -373,6 +400,42 @@ void saveState(const QString& path, const QByteArray& key, const SyncState& stat
     const QByteArray bytes = QByteArray(kMagic) + nonce + cipher;
     if (out.write(bytes) != bytes.size() || !out.commit()) {
         fail(QStringLiteral("Cannot save the local sync state durably; check free space."));
+    }
+}
+
+SyncState loadState(const QString& path, const Keys& keys) {
+    try {
+        return loadState(path, keys.state);
+    } catch (const std::runtime_error&) {
+        // A state file written before the package key was stored was sealed
+        // with the key derived from that package password; it opens once here
+        // and the caller saves it again under the current key.
+        if (keys.legacyState.size() != kKeyBytes) throw;
+        return loadState(path, keys.legacyState);
+    }
+}
+
+void resealState(const QString& directory, const Keys& from, const Keys& to) {
+    if (to.state.size() != kKeyBytes) fail(QStringLiteral("The new sync key is missing."));
+    const QString path = directory + QStringLiteral("/state.enc");
+    const SyncState state = loadState(path, from);
+    saveState(path, to.state, state);
+}
+
+bool resealForPasswordChange(const QString& stateDirectory, const QString& oldPassword,
+                             const QString& newPassword) {
+    try {
+        Keys from = deriveKeys(stateDirectory, oldPassword, false);
+        Keys to = deriveKeys(stateDirectory, newPassword, false);
+        const bool sealed = [&] {
+            resealState(stateDirectory, from, to);
+            return true;
+        }();
+        from.wipe();
+        to.wipe();
+        return sealed;
+    } catch (const std::exception&) {
+        return false;
     }
 }
 

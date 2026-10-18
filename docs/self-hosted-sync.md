@@ -1,5 +1,11 @@
 # Optional self-hosted encrypted sync
 
+> **Historical: protocol 3.** The shipped relay (`sync_server/`) and the desktop
+> client speak **protocol 4** (accounts, vaults, versioned records). This document
+> describes the earlier protocol 3 hash bucket, which the Android client still
+> implements. Authoritative v4 references: `sync_server/README.md`,
+> `deployment/README.md`, `docs/sync-mega-plan.md`.
+
 The relay moves end-to-end encrypted vault packages between devices that each
 keep their own local vault. It is optional: normal local use, export/import and
 PC/LAN sharing work without it. It replaces the old trusted-server

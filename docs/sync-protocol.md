@@ -1,5 +1,11 @@
 # Sync protocol 3 — wire contract
 
+> **Historical: protocol 3.** The shipped relay (`sync_server/`) and the desktop
+> client speak **protocol 4** (accounts, vaults, versioned records). This document
+> describes the earlier protocol 3 hash bucket, which the Android client still
+> implements. Authoritative v4 references: `sync_server/README.md`,
+> `deployment/README.md`, `docs/sync-mega-plan.md`.
+
 The relay is an encrypted hash bucket: a flat set of opaque `.mvpk` packages,
 each named by the SHA-256 of its own bytes, guarded by one library key. It
 parses nothing inside a package. File names, folder paths, tags and content

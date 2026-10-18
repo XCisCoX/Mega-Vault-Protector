@@ -1,5 +1,11 @@
 # Simple sync — rewrite plan
 
+> **Historical: protocol 3.** The shipped relay (`sync_server/`) and the desktop
+> client speak **protocol 4** (accounts, vaults, versioned records). This document
+> describes the earlier protocol 3 hash bucket, which the Android client still
+> implements. Authoritative v4 references: `sync_server/README.md`,
+> `deployment/README.md`, `docs/sync-mega-plan.md`.
+
 Goal: replace the v2 relay (pairing, device tokens, CAS revisions, history,
 tombstones, idempotency) with an encrypted hash-bucket. Same guarantee —
 the server never sees names or contents — with a fraction of the moving parts.
