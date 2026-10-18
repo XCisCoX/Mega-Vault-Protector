@@ -58,6 +58,10 @@ class Server(ThreadingHTTPServer):
         self.quota_bytes = args.quota_bytes
         self.max_file_bytes = args.max_file_bytes
         self.request_timeout = args.request_timeout
+        # Open registration is convenient on a laptop; on a public host anyone
+        # who finds the URL could fill the disk. Operators create accounts with
+        # the CLI, so a deployed relay can refuse self-service signup.
+        self.registration = getattr(args, 'registration', 'open')
         self.slots = threading.BoundedSemaphore(args.workers)
         super().__init__(address, Handler)
 
@@ -148,7 +152,18 @@ class Handler(BaseHTTPRequestHandler):
         if len(data) != length:
             self.close_connection = True
             raise Problem(400, {'error': 'incomplete body'})
+        self.body_consumed = True
         return data
+
+    def close_if_body_pending(self):
+        """Refuse to reuse a connection whose request body we never read.
+
+        A rejected POST that leaves its body in the buffer would otherwise be
+        parsed as the next request line on a keep-alive connection, and the
+        client sees a nonsensical 501 instead of our error.
+        """
+        if not getattr(self, 'body_consumed', True):
+            self.close_connection = True
 
     def json_body(self, limit=65536):
         kind = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
@@ -214,7 +229,8 @@ class Handler(BaseHTTPRequestHandler):
         path, query = url.path, parse_qs(url.query, keep_blank_values=True)
         if path == '/healthz':
             self.only('GET', 'HEAD')
-            return self.reply(200, {'ok': True, 'protocol': PROTOCOL})
+            return self.reply(200, {'ok': True, 'protocol': PROTOCOL,
+                                    'registration': self.server.registration})
         if path.startswith('/auth/'):
             return self.auth_route(path[len('/auth/'):])
         if path in STATIC:
@@ -248,6 +264,9 @@ class Handler(BaseHTTPRequestHandler):
     def auth_route(self, tail):
         if tail == 'register':
             self.only('POST')
+            if self.server.registration != 'open':
+                raise Problem(403, {'error': 'this server does not accept new accounts; '
+                                             'ask the operator to create one'})
             body = self.json_body()
             email, password = body.get('email'), body.get('password')
             if not isinstance(email, str) or len(email) > 190 or not EMAIL.fullmatch(email):
@@ -281,6 +300,50 @@ class Handler(BaseHTTPRequestHandler):
             self.only('GET', 'HEAD')
             return self.reply(200, {'account': self.store.account(self.authenticate())})
 
+        if tail == 'password':
+            # Re-authenticate with the current password: a session left open on
+            # a shared machine must not be enough to take the account over.
+            self.only('POST')
+            self.same_origin()
+            account = self.authenticate(bearer_only=False)
+            body = self.json_body()
+            current = body.get('current_password')
+            newest = body.get('new_password')
+            if not isinstance(current, str) or not isinstance(newest, str):
+                raise Problem(400, {'error': 'current and new password required'})
+            if not 10 <= len(newest) <= 200:
+                raise Problem(400, {'error': 'the new password must be 10 to 200 characters'})
+            if not self.store.verify_password(account, current[:200]):
+                raise Problem(403, {'error': 'the current password is wrong'})
+            if current == newest:
+                raise Problem(400, {'error': 'the new password must be different'})
+            self.store.change_password(account, newest)
+            # Every other browser is signed out; this one keeps its session.
+            ended = self.store.end_sessions(account, keep=self.cookies().get(COOKIE))
+            return self.reply(200, {'ok': True, 'sessions_ended': ended})
+
+        if tail == 'sessions':
+            self.only('DELETE')
+            self.same_origin()
+            account = self.authenticate()
+            ended = self.store.end_sessions(account)
+            return self.reply(200, {'ok': True, 'sessions_ended': ended},
+                              [('Set-Cookie', self.cookie_header('', 0))])
+
+        if tail == 'account':
+            # Deleting the account deletes its vaults, records and packages. It
+            # is the operator's own data, so it takes the password, not a click.
+            self.only('DELETE')
+            self.same_origin()
+            account = self.authenticate()
+            body = self.json_body()
+            password = body.get('password')
+            if not isinstance(password, str) or not self.store.verify_password(account, password[:200]):
+                raise Problem(403, {'error': 'the password is wrong'})
+            vaults = self.store.delete_account(account)
+            return self.reply(200, {'ok': True, 'vaults_removed': vaults},
+                              [('Set-Cookie', self.cookie_header('', 0))])
+
         if tail == 'token' or tail.startswith('token/'):
             return self.token_route(tail)
         raise Problem(404, {'error': 'not found'})
@@ -304,6 +367,13 @@ class Handler(BaseHTTPRequestHandler):
         identifier = tail[len('token/'):]
         if not HEX64.fullmatch(identifier):
             raise Problem(404, {'error': 'no such token'})
+        if self.command == 'PATCH':
+            self.same_origin()
+            label = self.json_body().get('label')
+            if not isinstance(label, str) or not 0 < len(label) <= 60 \
+                    or any(ord(c) < 32 for c in label):
+                raise Problem(400, {'error': 'invalid label'})
+            return self.reply(200, {'token': self.store.rename_token(account, identifier, label)})
         self.only('DELETE')
         self.same_origin()
         self.store.revoke_token(account, identifier)
@@ -488,13 +558,17 @@ class Handler(BaseHTTPRequestHandler):
     # -- entry point ------------------------------------------------------
 
     def run_request(self):
+        self.body_consumed = False
         try:
             self.dispatch()
         except Problem as e:
+            self.close_if_body_pending()
             self.reply(e.status, e.value)
         except (ValueError, TypeError, KeyError):
+            self.close_if_body_pending()
             self.reply(400, {'error': 'invalid request'})
         except sqlite3.Error:
+            self.close_if_body_pending()
             self.reply(503, {'error': 'storage unavailable'})
         except OSError:
             pass
@@ -530,10 +604,14 @@ def main():
     serve.add_argument('--max-file-bytes', type=int, default=1024**3)
     serve.add_argument('--workers', type=int, default=16)
     serve.add_argument('--request-timeout', type=float, default=30)
-    serve.add_argument('--web', metavar='DIR', help='static web UI directory (default: sync_web/)')
+    serve.add_argument('--web', metavar='DIR',
+                       help='static web UI directory (default: the web/ folder inside this package)')
     serve.add_argument('--gc-hours', type=float, default=24.0,
                        help='sweep unfetched packages and abandoned uploads older than this at '
                             'startup (0 disables the sweep)')
+    serve.add_argument('--registration', choices=('open', 'closed'), default='open',
+                       help='whether the console may create accounts (default: open; a public '
+                            'host usually wants closed, with accounts made by this CLI)')
 
     account = sub.add_parser('account', help='operator account commands')
     account.add_argument('action', choices=('create',))
@@ -577,7 +655,8 @@ def main():
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(args.cert, args.key)
-        static = Path(args.web) if args.web else Path(__file__).resolve().parent.parent / 'sync_web'
+        # The console ships inside the package, so a copied folder always has it.
+        static = Path(args.web) if args.web else Path(__file__).resolve().parent / 'web'
         try:
             store = Store(args.data)
         except (ValueError, OSError, sqlite3.Error) as e:

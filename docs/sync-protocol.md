@@ -4,7 +4,7 @@
 > client speak **protocol 4** (accounts, vaults, versioned records). This document
 > describes the earlier protocol 3 hash bucket, which the Android client still
 > implements. Authoritative v4 references: `sync_server/README.md`,
-> `deployment/README.md`, `docs/sync-mega-plan.md`.
+> `sync_server/deployment/README.md`, `docs/sync-mega-plan.md`.
 
 The relay is an encrypted hash bucket: a flat set of opaque `.mvpk` packages,
 each named by the SHA-256 of its own bytes, guarded by one library key. It
@@ -244,4 +244,4 @@ in the bucket can never be decrypted, and no server-side reset exists.
 
 Running a relay, backing it up, recovering and rotating the key:
 [self-hosted-sync.md](self-hosted-sync.md). The TLS container deployment:
-[../deployment/README.md](../deployment/README.md).
+[../sync_server/deployment/README.md](../sync_server/deployment/README.md).

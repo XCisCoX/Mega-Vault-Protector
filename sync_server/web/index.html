@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MegaVault console</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+
+<!-- ── signed out ─────────────────────────────────────────────────────── -->
+<div class="gate" id="auth">
+  <section class="gate-brand">
+    <span class="mark" aria-hidden="true">MV</span>
+    <h1>MegaVault console</h1>
+    <p class="lead">Your vaults, devices and storage. The console manages access
+      only: it holds no vault key, so it cannot read or decrypt a single file.</p>
+    <ul class="gate-points">
+      <li><strong>End-to-end</strong> — files are sealed on your devices; this
+        server stores opaque packages.</li>
+      <li><strong>One token per device</strong> — revoke a lost laptop without
+        touching the others.</li>
+      <li><strong>Your own host</strong> — the whole server is one folder.</li>
+    </ul>
+  </section>
+
+  <section class="gate-panel">
+    <div class="card auth-card">
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" id="tab-login" role="tab" type="button"
+                aria-selected="true" aria-controls="login-form">Sign in</button>
+        <button class="tab" id="tab-register" role="tab" type="button"
+                aria-selected="false" aria-controls="register-form">Create account</button>
+      </div>
+
+      <form id="login-form" class="stack" autocomplete="on">
+        <label class="field">
+          <span>Email</span>
+          <input name="email" type="email" autocomplete="username" required maxlength="190"
+                 placeholder="owner@example.com">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input name="password" type="password" autocomplete="current-password" required
+                 minlength="10" maxlength="200" placeholder="Account password">
+        </label>
+        <button class="button primary block" type="submit">Sign in</button>
+        <p class="hint">No account yet?
+          <button class="link" id="switch-button" type="button">Create one</button></p>
+      </form>
+
+      <form id="register-form" class="stack" hidden autocomplete="on">
+        <label class="field">
+          <span>Email</span>
+          <input name="email" type="email" autocomplete="username" required maxlength="190"
+                 placeholder="owner@example.com">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input name="password" type="password" autocomplete="new-password" required
+                 minlength="10" maxlength="200" placeholder="At least 10 characters">
+        </label>
+        <label class="field">
+          <span>Repeat password</span>
+          <input name="confirm" type="password" autocomplete="new-password" required
+                 minlength="10" maxlength="200" placeholder="Same password again">
+        </label>
+        <button class="button primary block" type="submit">Create account</button>
+        <p class="hint">This password protects the console. File decryption is
+          controlled by each vault's own password, which never leaves a device.</p>
+      </form>
+    </div>
+  </section>
+</div>
+
+<!-- ── signed in ──────────────────────────────────────────────────────── -->
+<div class="shell" id="app" hidden>
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="mark small" aria-hidden="true">MV</span>
+      <span>MegaVault</span>
+    </div>
+    <nav class="nav" aria-label="Console">
+      <button class="nav-item is-active" data-view="overview" type="button">Overview</button>
+      <button class="nav-item" data-view="vaults" type="button">Vaults</button>
+      <button class="nav-item" data-view="devices" type="button">Devices</button>
+      <button class="nav-item" data-view="account" type="button">Account</button>
+      <button class="nav-item" data-view="connect" type="button">Connect the app</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="who" id="who" title="Signed in"></div>
+      <button class="button ghost small block" id="signout" type="button">Sign out</button>
+      <p class="hint tiny" id="server-host"></p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="view-title">Overview</h1>
+        <p class="hint" id="view-subtitle">Account, storage and devices at a glance.</p>
+      </div>
+      <div class="topbar-actions" id="view-actions"></div>
+    </header>
+
+    <!-- overview -->
+    <section class="view" id="view-overview">
+      <div class="stats">
+        <article class="stat"><span class="stat-label">Vaults</span>
+          <strong class="stat-value" id="stat-vaults">—</strong>
+          <span class="stat-note" id="stat-vaults-note">0 items</span></article>
+        <article class="stat"><span class="stat-label">Storage used</span>
+          <strong class="stat-value" id="stat-storage">—</strong>
+          <span class="stat-note" id="stat-quota">of —</span></article>
+        <article class="stat"><span class="stat-label">Devices</span>
+          <strong class="stat-value" id="stat-devices">—</strong>
+          <span class="stat-note" id="stat-devices-note">none issued</span></article>
+        <article class="stat"><span class="stat-label">Server</span>
+          <strong class="stat-value" id="stat-protocol">—</strong>
+          <span class="stat-note" id="stat-endpoint">—</span></article>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Storage</h2>
+          <span class="badge" id="usage-label">—</span>
+        </div>
+        <div class="meter" role="progressbar" aria-label="Storage used"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="usage-meter">
+          <span id="usage-fill"></span>
+        </div>
+        <p class="hint" id="usage-hint">Encrypted packages only. Deleting a vault
+          reclaims its space immediately.</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Next steps</h2></div>
+        <ol class="checklist" id="checklist">
+          <li data-step="vault">Create your first vault</li>
+          <li data-step="device">Issue a device token</li>
+          <li data-step="connect">Connect the app to this server</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- vaults -->
+    <section class="view" id="view-vaults" hidden>
+      <form class="panel toolbar" id="vault-form">
+        <label class="field grow">
+          <span>New vault</span>
+          <input name="name" placeholder="Family" maxlength="120" required
+                 aria-label="New vault name">
+        </label>
+        <button class="button primary" type="submit">Create vault</button>
+      </form>
+      <div class="panel">
+        <div class="panel-head"><h2>Your vaults</h2>
+          <span class="hint" id="vaults-count"></span></div>
+        <div class="table-wrap">
+          <table class="table" id="vault-table">
+            <thead><tr>
+              <th scope="col">Name</th><th scope="col">Vault id</th>
+              <th scope="col" class="num">Items</th><th scope="col" class="num">Size</th>
+              <th scope="col">Created</th><th scope="col" class="actions-col">Actions</th>
+            </tr></thead>
+            <tbody id="vaults"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="vaults-empty" hidden>No vaults yet. Create one above — a
+          vault holds records and encrypted packages, and nothing else.</p>
+      </div>
+    </section>
+
+    <!-- devices -->
+    <section class="view" id="view-devices" hidden>
+      <form class="panel toolbar" id="token-form">
+        <label class="field grow">
+          <span>New device token</span>
+          <input name="label" placeholder="Laptop — kitchen" maxlength="60" required
+                 aria-label="Device name">
+        </label>
+        <button class="button primary" type="submit">Issue token</button>
+      </form>
+      <div class="panel notice" id="new-token" hidden>
+        <div class="panel-head"><h2>Copy it now</h2>
+          <span class="badge warn">shown once</span></div>
+        <p class="hint">The server keeps only a hash of this token. Paste it into the
+          app's sync settings; if it is lost, revoke it and issue another.</p>
+        <div class="copy-row">
+          <code class="token-value" id="token-value"></code>
+          <button class="button" id="copy-token" type="button">Copy</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Devices</h2>
+          <span class="hint" id="tokens-count"></span></div>
+        <div class="table-wrap">
+          <table class="table" id="token-table">
+            <thead><tr>
+              <th scope="col">Device</th><th scope="col">Token id</th>
+              <th scope="col">Issued</th><th scope="col">Status</th>
+              <th scope="col" class="actions-col">Actions</th>
+            </tr></thead>
+            <tbody id="tokens"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="tokens-empty" hidden>No devices yet. Each copy of the
+          app needs its own token so it can be revoked on its own.</p>
+      </div>
+    </section>
+
+    <!-- account -->
+    <section class="view" id="view-account" hidden>
+      <div class="panel">
+        <div class="panel-head"><h2>Account</h2></div>
+        <dl class="facts">
+          <dt>Email</dt><dd id="account-email">—</dd>
+          <dt>Account id</dt><dd class="mono" id="account-id">—</dd>
+          <dt>Member since</dt><dd id="account-created">—</dd>
+        </dl>
+      </div>
+
+      <form class="panel stack" id="password-form">
+        <div class="panel-head"><h2>Change password</h2>
+          <span class="hint">Signs out every other browser.</span></div>
+        <div class="field-row">
+          <label class="field grow"><span>Current password</span>
+            <input name="current" type="password" autocomplete="current-password" required
+                   maxlength="200"></label>
+          <label class="field grow"><span>New password</span>
+            <input name="next" type="password" autocomplete="new-password" required
+                   minlength="10" maxlength="200"></label>
+        </div>
+        <div class="form-foot">
+          <p class="hint">At least 10 characters. Vault packages are unaffected:
+            their key comes from each vault's own password.</p>
+          <button class="button primary" type="submit">Update password</button>
+        </div>
+      </form>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Sessions</h2></div>
+        <div class="row-between">
+          <p class="hint">Sign out of every browser signed in to this account,
+            including this one.</p>
+          <button class="button" id="signout-all" type="button">Sign out everywhere</button>
+        </div>
+      </div>
+
+      <div class="panel danger">
+        <div class="panel-head"><h2>Delete account</h2>
+          <span class="badge danger">permanent</span></div>
+        <p class="hint">Removes the account, its vaults, every record and every
+          encrypted package on this server. Your local libraries are untouched,
+          but nothing here can be recovered afterwards.</p>
+        <button class="button danger" id="delete-account" type="button">Delete this account…</button>
+      </div>
+    </section>
+
+    <!-- connect -->
+    <section class="view" id="view-connect" hidden>
+      <div class="panel">
+        <div class="panel-head"><h2>Server address</h2></div>
+        <div class="copy-row">
+          <code class="token-value" id="server-url"></code>
+          <button class="button" id="copy-url" type="button">Copy</button>
+        </div>
+        <p class="hint">Use the address you typed in the browser. It must be
+          reachable over HTTPS from every device — plain HTTP is accepted only on
+          this machine's loopback.</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Connect a device</h2></div>
+        <ol class="steps">
+          <li>Issue a token on <strong>Devices</strong> and copy it immediately.</li>
+          <li>Open MegaVault Protect, choose <strong>Sync</strong>, and sign in with
+            this account's email and password.</li>
+          <li>Pick the vault and the local folder that mirrors it, then press
+            <strong>Sync now</strong>.</li>
+        </ol>
+        <p class="hint">The vault password is asked for on the device and is never
+          sent here. Two devices read the same packages only when they share that
+          vault password.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title">Confirm</h2>
+    <p id="modal-text"></p>
+    <label class="field" id="modal-field" hidden><span id="modal-label">Password</span>
+      <input id="modal-input" type="password" autocomplete="current-password"></label>
+    <div class="modal-actions">
+      <button class="button ghost" id="modal-cancel" type="button">Cancel</button>
+      <button class="button danger" id="modal-ok" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

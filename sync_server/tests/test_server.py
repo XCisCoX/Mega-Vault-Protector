@@ -1,4 +1,6 @@
 """Transport: health, unknown routes, TLS, binding refusals, and silence in logs."""
+import http.client
+import json
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -12,7 +14,7 @@ from support import PASSWORD, ROOT, ServerCase, package
 class TransportTests(ServerCase):
     def test_health_is_open_and_versioned(self):
         status, _, value = self.request('GET', '/healthz')
-        self.assertEqual((status, value), (200, {'ok': True, 'protocol': 4}))
+        self.assertEqual((status, value), (200, {'ok': True, 'protocol': 4, 'registration': 'open'}))
         self.assertEqual(self.request('POST', '/healthz', {})[0], 405)
 
     def test_every_data_route_needs_authentication(self):
@@ -111,6 +113,30 @@ class TransportTests(ServerCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='files'").fetchone()[0], 1)
         finally:
             db.close()
+
+
+    def test_a_rejected_body_does_not_poison_the_connection(self):
+        """A 4xx that never reads the body must not corrupt the next request.
+
+        Without draining or closing, the leftover bytes are parsed as the next
+        request line and the client gets a 501 from the HTTP layer instead of
+        the error we sent.
+        """
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        try:
+            conn.request('PATCH', '/auth/login',
+                         body=b'{"email":"stranger@example.com"}',
+                         headers={'Content-Type': 'application/json'})
+            first = conn.getresponse()
+            first.read()
+            self.assertEqual(first.status, 405)
+            conn.request('GET', '/healthz')
+            second = conn.getresponse()
+            payload = json.loads(second.read())
+            self.assertEqual(second.status, 200, payload)
+            self.assertEqual(payload['protocol'], 4)
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':

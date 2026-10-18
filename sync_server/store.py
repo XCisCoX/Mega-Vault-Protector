@@ -247,6 +247,49 @@ class Store:
         with self.session(write=True) as db:
             db.execute('DELETE FROM sessions WHERE id=?', (digest(token),))
 
+    def end_sessions(self, account_id, keep=None):
+        """Sign out every browser session for one account.
+
+        ``keep`` is the session id to preserve (the browser making the request),
+        so "sign out everywhere else" does not also sign out the person asking.
+        """
+        with self.session(write=True) as db:
+            if keep is None:
+                return db.execute('DELETE FROM sessions WHERE account=?', (account_id,)).rowcount
+            return db.execute('DELETE FROM sessions WHERE account=? AND id<>?',
+                              (account_id, digest(keep))).rowcount
+
+    def change_password(self, account_id, new_password):
+        """Re-key the account. The old digest is replaced, never kept."""
+        salt = secrets.token_bytes(16)
+        with self.session(write=True) as db:
+            changed = db.execute('UPDATE accounts SET salt=?,digest=? WHERE id=?',
+                                 (salt, derive(new_password, salt), account_id)).rowcount
+        if not changed:
+            raise Problem(404, {'error': 'no such account'})
+
+    def verify_password(self, account_id, password):
+        with self.session() as db:
+            row = db.execute('SELECT salt,digest FROM accounts WHERE id=?', (account_id,)).fetchone()
+        if row is None:
+            return False
+        return hmac.compare_digest(derive(password, row['salt']), row['digest'])
+
+    def delete_account(self, account_id):
+        """Remove the account with its vaults, records, tokens and packages."""
+        with self.session() as db:
+            vaults = [row['id'] for row in
+                      db.execute('SELECT id FROM vaults WHERE account=?', (account_id,))]
+        for vault_id in vaults:
+            self.delete_vault(account_id, vault_id)
+        with self.session(write=True) as db:
+            for table in ('sessions', 'tokens', 'vaults'):
+                db.execute('DELETE FROM %s WHERE account=?' % table, (account_id,))
+            removed = db.execute('DELETE FROM accounts WHERE id=?', (account_id,)).rowcount
+        if not removed:
+            raise Problem(404, {'error': 'no such account'})
+        return len(vaults)
+
     # -- device tokens ----------------------------------------------------
 
     def issue_token(self, account_id, label):
@@ -278,6 +321,14 @@ class Store:
                                  (identifier, account_id)).rowcount
         if not changed:
             raise Problem(404, {'error': 'no such token'})
+
+    def rename_token(self, account_id, identifier, label):
+        with self.session(write=True) as db:
+            changed = db.execute('UPDATE tokens SET label=? WHERE id=? AND account=?',
+                                 (label, identifier, account_id)).rowcount
+        if not changed:
+            raise Problem(404, {'error': 'no such token'})
+        return next((dict(row) for row in self.tokens(account_id) if row['id'] == identifier), None)
 
     # -- vaults -----------------------------------------------------------
 

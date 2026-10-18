@@ -14,7 +14,7 @@ call:
 
 - **Public deployment.** Caddy obtains an ACME certificate for the public
   hostname and terminates TLS; the relay is never published and only Caddy
-  holds a host port. See [../deployment/README.md](../deployment/README.md).
+  holds a host port. See [../sync_server/deployment/README.md](../sync_server/deployment/README.md).
 - **The Caddy-to-relay hop.** The relay refuses a plaintext bind on a
   non-loopback address, so even that internal hop is TLS, using a self-signed
   pair that lives in `deployment/tls/` and that no client ever sees.

@@ -1,15 +1,34 @@
 # sync_server — protocol 4: accounts, vaults, versioned records, encrypted packages
 
 A single Python process that stores opaque, already-encrypted `.mvpk` packages
-plus the small metadata rows that describe them. It never holds a key, a file
-name, a tag, or a plaintext byte, so it cannot read a vault even if it wanted
-to: the client encrypts, the client names the package by the SHA-256 of its own
-ciphertext, and the vault password stays on the device.
+plus the small metadata rows that describe them. It never holds a key or a
+plaintext byte: the client encrypts, names each package by the SHA-256 of its
+own ciphertext, and the vault password stays on the device. The metadata is
+readable to the operator — names, folders, tags and sizes — so the server can
+list, sync and delete without decrypting anything; the file contents are not.
 
 Requirements: Python 3.12+ and the standard library only. No third-party
 packages, no crypto library, no ORM, no framework. Two modules, `store.py`
 (SQLite + `blobs/`) and `__main__.py` (HTTP + CLI), roughly 1,100 lines together
 on purpose.
+
+## One folder
+
+Everything the server needs is inside this directory, so a copy is an install:
+
+```
+sync_server/
+  __main__.py        HTTP, CLI (serve, account, vault, token, gc)
+  store.py           SQLite schema + blobs/
+  web/               the console: index.html, app.js, style.css, icon.svg
+  tests/             the whole suite: real server process, real sockets
+  deployment/        Caddy + compose + Dockerfile, TLS inside
+```
+
+`python scripts/package-server-release.py --output server.zip` packs exactly
+this folder (plus README and LICENSE) with a SHA-256 manifest, refusing
+`.env`, keys, databases and caches. `serve` resolves the console from
+`<package>/web`, so no `--web` flag and no sibling folder are needed.
 
 ## Run it locally
 
@@ -62,7 +81,11 @@ server stores only their SHA-256, and comparison of secret material goes through
 | POST | `/auth/login` | none | sets `mv_session` (HttpOnly, SameSite=Lax, 14 days) |
 | POST | `/auth/logout` | cookie | ends that session only |
 | GET | `/auth/session` | cookie/bearer | `{account}`; 401 when signed out |
+| POST | `/auth/password` | cookie | `{current_password, new_password}`; re-checks the current one, ends every other session |
+| DELETE | `/auth/sessions` | cookie | signs out every session for the account, this one included |
+| DELETE | `/auth/account` | cookie | `{password}`; removes the account, its vaults, records and packages |
 | GET/POST | `/auth/token` | cookie | list / issue a device token; the token is returned **once** |
+| PATCH | `/auth/token/<id>` | cookie | `{label}` rename a device |
 | DELETE | `/auth/token/<id>` | cookie | revoke; the device gets 401 from then on |
 | GET | `/v1/vaults` | cookie or bearer | `{vaults:[{id,name,created,bytes,records}], quota:{bytes,limit}}` |
 | POST | `/v1/vaults` | cookie or bearer | `{name}` → `201 {vault}` |
@@ -78,16 +101,18 @@ server stores only their SHA-256, and comparison of secret material goes through
 | HEAD | `/v1/vaults/<id>/blobs/<64hex>` | **bearer** | `Content-Length` = declared size, `X-Offset` = durable bytes |
 | GET | `/v1/vaults/<id>/blobs/<64hex>` | **bearer** | bytes; `Range` supported; `ETag` = the package name |
 | DELETE | `/v1/vaults/<id>/blobs/<64hex>` | **bearer** | `204`, immediate |
-| GET | `/`, `/app.js`, `/style.css`, `/icon.svg` | none | the static site |
+| GET | `/`, `/app.js`, `/style.css`, `/icon.svg` | none | the console (served from `web/`) |
 
 Every `/v1` route is scoped to the authenticated account. A token for account A
 asking for account B's vault gets `404` — the same answer as a vault that does
 not exist, so ids cannot be probed. Records and blobs require a bearer token and
 refuse the website cookie: the browser has no vault key, so it has no business
 on those routes, and refusing the cookie removes any cross-site request angle.
-Writes that do take the cookie (vault create/rename/delete, token issue/revoke,
-logout) require `Content-Type: application/json` and, when `Origin` is present,
-a matching `Host`.
+Writes that do take the cookie (vault create/rename/delete, token
+issue/rename/revoke, password change, session and account deletion, logout)
+require `Content-Type: application/json` and, when `Origin` is present, a
+matching `Host`. Password changes and account deletion additionally re-check the
+current password: an open browser session alone cannot take the account over.
 
 ## Records and versions
 
@@ -230,7 +255,7 @@ so a client that still has them pays only the bandwidth. The library-key flags
 ## Tests
 
 ```sh
-python -W error -m unittest discover -s tests/sync_server -v
+python -W error -m unittest discover -s sync_server/tests -v
 ```
 
 43 tests. They spawn the real server on a real socket against a throwaway data

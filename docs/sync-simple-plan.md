@@ -4,7 +4,7 @@
 > client speak **protocol 4** (accounts, vaults, versioned records). This document
 > describes the earlier protocol 3 hash bucket, which the Android client still
 > implements. Authoritative v4 references: `sync_server/README.md`,
-> `deployment/README.md`, `docs/sync-mega-plan.md`.
+> `sync_server/deployment/README.md`, `docs/sync-mega-plan.md`.
 
 Goal: replace the v2 relay (pairing, device tokens, CAS revisions, history,
 tombstones, idempotency) with an encrypted hash-bucket. Same guarantee —

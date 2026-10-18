@@ -1,8 +1,8 @@
 services:
   server:
     build:
-      context: ..
-      dockerfile: deployment/Dockerfile
+      context: ../..
+      dockerfile: sync_server/deployment/Dockerfile
     # Protocol 4 CLI: `serve` plus a TLS pair. There is no secret in this
     # argument list — accounts, vaults and device tokens live in the data
     # directory, so nothing has to be generated before the first start.
@@ -11,8 +11,8 @@ services:
     # deployment/tls protects the internal network only and no client ever sees
     # it (see README.md step 1 and Caddyfile).
     #
-    # The image ENTRYPOINT already supplies `--data /data`; --web names the
-    # static UI copied in by the Dockerfile.
+    # The image ENTRYPOINT already supplies `--data /data`; the console is
+    # resolved inside the package, so no --web is needed.
     command:
       - serve
       - --host
@@ -23,8 +23,6 @@ services:
       - /run/tls/relay-cert.pem
       - --key
       - /run/tls/relay-key.pem
-      - --web
-      - /app/sync_web
       - --quota-bytes
       - "${SYNC_QUOTA_BYTES:-10737418240}"
       - --max-file-bytes

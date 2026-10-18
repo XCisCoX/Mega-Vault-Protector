@@ -4,7 +4,7 @@
 > client speak **protocol 4** (accounts, vaults, versioned records). This document
 > describes the earlier protocol 3 hash bucket, which the Android client still
 > implements. Authoritative v4 references: `sync_server/README.md`,
-> `deployment/README.md`, `docs/sync-mega-plan.md`.
+> `sync_server/deployment/README.md`, `docs/sync-mega-plan.md`.
 
 The relay moves end-to-end encrypted vault packages between devices that each
 keep their own local vault. It is optional: normal local use, export/import and
@@ -13,7 +13,7 @@ PC/LAN sharing work without it. It replaces the old trusted-server
 
 The design is in [sync-architecture.md](sync-architecture.md), the wire
 contract and threat model in [sync-protocol.md](sync-protocol.md), and the
-container deployment in [../deployment/README.md](../deployment/README.md).
+container deployment in [../sync_server/deployment/README.md](../sync_server/deployment/README.md).
 
 ## Before you start
 
@@ -103,7 +103,7 @@ while the server is stopped, or a `sqlite3 sync.sqlite3 ".backup snapshot.sqlite
 plus a copy of `blobs/`. Do not copy `blobs/` without its database: finished
 packages would no longer be listed, and a database row whose file is missing
 stops the server at startup. The compose deployment has copy-paste commands in
-[../deployment/README.md](../deployment/README.md).
+[../sync_server/deployment/README.md](../sync_server/deployment/README.md).
 
 The backup does **not** contain the library key, and no backup can recover it.
 Store the key separately, and also keep normal backups of each local vault.

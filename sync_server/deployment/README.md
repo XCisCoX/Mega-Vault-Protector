@@ -42,16 +42,16 @@ So generate a throwaway self-signed pair. No client ever sees it; it only
 protects the internal container network:
 
 ```sh
-mkdir -p deployment/tls
+mkdir -p sync_server/deployment/tls
 openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
   -subj "/CN=server" -addext "subjectAltName=DNS:server" \
-  -keyout deployment/tls/relay-key.pem -out deployment/tls/relay-cert.pem
-chmod 600 deployment/tls/relay-key.pem
+  -keyout sync_server/deployment/tls/relay-key.pem -out sync_server/deployment/tls/relay-cert.pem
+chmod 600 sync_server/deployment/tls/relay-key.pem
 ```
 
-Keep both files out of version control (`deployment/tls/.gitignore` ignores
+Keep both files out of version control (`sync_server/deployment/tls/.gitignore` ignores
 `*.pem`). The relay runs as uid `10001`, so on a Linux host make the pair
-readable by that account — `sudo chown 10001:10001 deployment/tls/relay-*.pem` —
+readable by that account — `sudo chown 10001:10001 sync_server/deployment/tls/relay-*.pem` —
 while Docker Desktop handles ownership for you. Regenerate whenever you like and
 restart the relay to pick up a new pair; Caddy does not verify this certificate
 (see the note in `Caddyfile`), so nothing has to be distributed to clients. If
@@ -62,7 +62,7 @@ that.
 ## 2. Configure `.env`
 
 ```sh
-cp deployment/.env.example deployment/.env
+cp sync_server/deployment/.env.example sync_server/deployment/.env
 ```
 
 Fill in:
@@ -82,7 +82,7 @@ whoever can read it learns your hostname, and nothing else.
 ## 3. Start
 
 ```sh
-docker compose --env-file deployment/.env -f deployment/compose.yaml up --build -d
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml up --build -d
 ```
 
 Only Caddy publishes host ports. The relay publishes none, sits on an
@@ -108,14 +108,14 @@ curl -fsS https://sync.example.com/healthz
 answering; a different protocol number means an old deployment is still
 listening. Then load `https://sync.example.com/` — the sign-in page coming up is
 what proves the image carries the static UI. A 404 on `/` while `/healthz` works
-means `sync_web/` did not make it into the image.
+means `sync_server/web/` did not make it into the image.
 
 `/healthz` is the only unauthenticated route; everything under `/v1` answers
 `401` without a token.
 
 The relay writes nothing per request (no paths, no query strings, no headers, no
 bodies, no errors), so startup failures are the only thing in
-`docker compose --env-file deployment/.env -f deployment/compose.yaml logs server`.
+`docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml logs server`.
 
 ## 5. First run: one account, one vault, one token per device
 
@@ -126,7 +126,7 @@ Three equivalent ways. Pick one; the account is the same object in all of them.
 **The container CLI** (no Python on the host):
 
 ```sh
-docker compose --env-file deployment/.env -f deployment/compose.yaml \
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml \
   run --rm -it server account create owner@example.com
 # password:        <- typed twice, not echoed
 # account: 6f2c…   <- the account id
@@ -236,10 +236,10 @@ relay first so nothing is mid-write, then stream a tarball to the host (no bind
 mount, so it behaves the same on Windows, macOS and Linux):
 
 ```sh
-docker compose --env-file deployment/.env -f deployment/compose.yaml stop server
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml stop server
 docker run --rm -v megavault-sync-data:/data:ro alpine \
   tar czf - -C /data . > sync-data-2026-10-15.tar.gz
-docker compose --env-file deployment/.env -f deployment/compose.yaml start server
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml start server
 ```
 
 With SQLite tooling on the host, `sqlite3 sync.sqlite3 ".backup snapshot.sqlite3"`
@@ -251,11 +251,11 @@ complete row whose file is missing makes the server refuse to start.
 Restore into an emptied volume:
 
 ```sh
-docker compose --env-file deployment/.env -f deployment/compose.yaml stop server
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml stop server
 docker run --rm -i -v megavault-sync-data:/data alpine \
   sh -c 'rm -rf /data/* && tar xzf - -C /data && chown -R 10001:10001 /data' \
   < sync-data-2026-10-15.tar.gz
-docker compose --env-file deployment/.env -f deployment/compose.yaml start server
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml start server
 ```
 
 The backup keeps the service recoverable; it does not make a vault readable.
@@ -327,9 +327,9 @@ message rather than half-migrated, because packages from that era have no owner
 to attach them to an account. Start from an empty directory:
 
 ```sh
-docker compose --env-file deployment/.env -f deployment/compose.yaml down
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml down
 docker volume rm megavault-sync-data
-docker compose --env-file deployment/.env -f deployment/compose.yaml up --build -d
+docker compose --env-file sync_server/deployment/.env -f sync_server/deployment/compose.yaml up --build -d
 ```
 
 Then run step 5 again and let the devices upload. Packages are
@@ -351,7 +351,7 @@ python -m sync_server --data ./sync-data serve \
   --cert /path/relay-cert.pem --key /path/relay-key.pem
 ```
 
-The static UI is resolved as `sync_web/` next to the `sync_server/` package, or
+The console is resolved as `sync_server/web/` inside the package, or
 from `--web DIR`. Cookies are marked `Secure` when the request arrived over TLS
 or carries `X-Forwarded-Proto: https`, so a plaintext proxy on another host would
 hand out cookies over plain HTTP — keep that hop on loopback.
@@ -378,7 +378,7 @@ as uid `10001`.
 What *was* run against the real files:
 
 - Compose interpolation replayed with compose's own semantics (`${V:-default}`,
-  `${V:?message}`, `$$`), reading `deployment/.env.example` as the env file: every
+  `${V:?message}`, `$$`), reading `sync_server/deployment/.env.example` as the env file: every
   token resolves, the quota and max-file defaults land as `10737418240` and
   `1073741824`, an empty environment stops on `SYNC_DOMAIN`, and no flag or
   environment variable from the previous CLI appears anywhere in the resolved
@@ -394,7 +394,7 @@ What *was* run against the real files:
   `18766` because an unrelated protocol-2 server already held `8766` on this host.
 - Against that live TLS listener bound to `0.0.0.0`: `/healthz` returned
   `{"ok":true,"protocol":4}`; `/`, `/app.js`, `/style.css` and `/icon.svg`
-  returned `200` with the right content types (proving the `sync_web` copy
+  returned `200` with the right content types (proving the `sync_server/web` copy
   resolves at the path the image creates); `POST /auth/register` created an
   account, `POST /auth/login` set a session cookie, `POST /v1/vaults` created a
   vault, `POST /auth/token` issued a device token, the bearer token listed the

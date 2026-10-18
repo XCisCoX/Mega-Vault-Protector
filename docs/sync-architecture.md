@@ -4,7 +4,7 @@
 > client speak **protocol 4** (accounts, vaults, versioned records). This document
 > describes the earlier protocol 3 hash bucket, which the Android client still
 > implements. Authoritative v4 references: `sync_server/README.md`,
-> `deployment/README.md`, `docs/sync-mega-plan.md`.
+> `sync_server/deployment/README.md`, `docs/sync-mega-plan.md`.
 
 ## Two shapes that did not fit
 
@@ -106,5 +106,5 @@ decryption key.
   storage and durability, and the full threat model.
 - [self-hosted-sync.md](self-hosted-sync.md) — setup with a URL and a key,
   backup, recovery, rotation and the operational limits.
-- [../deployment/README.md](../deployment/README.md) — the container
+- [../sync_server/deployment/README.md](../sync_server/deployment/README.md) — the container
   deployment with TLS at Caddy.

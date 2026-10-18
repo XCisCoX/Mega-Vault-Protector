@@ -132,6 +132,6 @@ sync.sqlite3-shm
 # Deployment reads these from the environment or the machine, never from Git.
 # .env.example stays tracked: it is the documented shape, not a credential.
 .env
-deployment/.env
+sync_server/deployment/.env
 *.pem
 *.key

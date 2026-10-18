@@ -82,13 +82,18 @@ Copies wait in a queue and run one at a time, because the vault writes one packa
 Sync keeps a local vault on each device and transfers end-to-end encrypted
 packages through your own relay. An account decides which vault you attach to;
 your vault password never leaves the device and is what decrypts the packages.
-The relay stores opaque bytes plus a small record per item — names, folders and
-tags live inside the encrypted records — so it can serve, list and delete
-without learning anything about your files. A conflict keeps both items, and a
-delete is a reversible tombstone until you purge it.
+The relay stores each file as an opaque package and keeps one small record per
+item — name, folder, tags, version — so names and folders are visible to the
+operator while the bytes are not. A conflict keeps both items, and a delete is
+a reversible tombstone until you purge it.
+
+The server is a single folder: `sync_server/` holds the relay, its web console
+(`web/`), the tests and the TLS deployment (`deployment/`). Packing it is
+`python scripts/package-server-release.py --output server.zip`; installing it is
+copying that one folder to the host.
 
 See [the server and its wire contract](sync_server/README.md),
-[deployment with TLS](deployment/README.md) and the
+[deployment with TLS](sync_server/deployment/README.md) and the
 [protocol 4 design](docs/sync-mega-plan.md). The desktop app and the relay speak
 protocol 4; the phone client is still the older protocol 3 hash bucket and does
 not work against a protocol 4 relay yet. Documents describing protocol 3 are

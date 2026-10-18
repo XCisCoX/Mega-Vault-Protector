@@ -31,7 +31,7 @@ class WebTests(ServerCase):
         for path in ('/nope', '/../sync_server/__main__.py', '/index.html/../sync.sqlite3', '/v3/files'):
             self.assertEqual(self.request('GET', path)[0], 404, path)
         self.assertEqual(self.request('POST', '/')[0], 405)
-        self.assertEqual(self.request('GET', '/healthz')[2], {'ok': True, 'protocol': 4})
+        self.assertEqual(self.request('GET', '/healthz')[2], {'ok': True, 'protocol': 4, 'registration': 'open'})
 
     def test_the_ui_never_touches_records_or_blobs(self):
         script = self.request('GET', '/app.js')[2].decode()
