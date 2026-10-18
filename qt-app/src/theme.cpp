@@ -8,6 +8,7 @@
 #include <QScopedValueRollback>
 #include <QWidget>
 #include <QSettings>
+#include <QStyle>
 #include <QTimer>
 #include <utility>
 #include <vector>
@@ -30,18 +31,21 @@ public:
         connect(&app_, &QGuiApplication::paletteChanged, this, [this](const QPalette& palette) {
             if (applying_) return;
 #ifndef Q_OS_WIN
+            // On Windows the registry decides; elsewhere the platform palette is
+            // the only signal a System preference has changed.
             nativePalette_ = palette;
 #else
             Q_UNUSED(palette);
 #endif
-            // Qt can publish a native palette before updating all widgets.
-            // Reapply after that event, never recursively inside setPalette().
-            if (paletteRefreshPending_) return;
-            paletteRefreshPending_ = true;
-            QTimer::singleShot(0, this, [this] {
-                paletteRefreshPending_ = false;
-                apply(mode_);
-            });
+            // A palette published from outside this object -- the platform theme,
+            // a plugin, a test -- must never win. Re-apply here rather than in a
+            // queued call: Qt hands the incoming palette to the widgets that are
+            // already polished, so a deferred fix leaves the app visibly wrong
+            // for as long as the event loop takes to run it, and on some Qt 5.15
+            // builds a style-sheet colour is resolved once and never again.
+            // apply() sets applying_ for its whole body, so the nested
+            // paletteChanged it causes returns immediately.
+            apply(mode_);
         });
     }
     bool systemIsDark() const {
@@ -64,7 +68,22 @@ public:
         app_.setPalette(dark_ ? darkPalette() : lightPalette());
         app_.setStyleSheet(themedStyleSheet(appStyleSheet()));
         for (auto* widget : QApplication::allWidgets()) adapt(widget);
+        {
+            // Make every widget resolve its style-sheet colours again against the
+            // new palette. Newer Qt 5.15 does this when the application style
+            // sheet changes; 5.15.2 keeps the palette a polished widget cached,
+            // which left a live QLineEdit on the previous theme's colours.
+            const QScopedValueRollback<bool> guard(adapting_, true);
+            for (auto* widget : QApplication::allWidgets()) {
+                widget->style()->unpolish(widget);
+                widget->style()->polish(widget);
+                widget->update();
+            }
+        }
     }
+    // Re-apply the mode that is in force. Public callers use it after they have
+    // changed the application palette themselves.
+    void refresh() { apply(mode_); }
     bool dark() const { return dark_; }
 protected:
     bool eventFilter(QObject* object, QEvent* event) override {
@@ -117,7 +136,6 @@ private:
     QHash<QWidget*, LocalStyle> styles_;
     bool applying_{false};
     bool adapting_{false};
-    bool paletteRefreshPending_{false};
     QApplication& app_;
     QPalette nativePalette_;
     QTimer timer_;
@@ -144,6 +162,9 @@ void setThemeMode(ThemeMode mode) {
 void initializeTheme(QApplication& application) {
     if (!manager) manager = new ThemeManager(application);
     manager->apply(savedThemeMode());
+}
+void refreshTheme() {
+    if (manager) manager->refresh();
 }
 bool isDarkTheme() {
     return manager ? manager->dark() : savedThemeMode() != ThemeMode::Light;

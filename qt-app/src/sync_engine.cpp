@@ -324,6 +324,12 @@ public:
 private:
     // -- state helpers -----------------------------------------------------
 
+    // The .mvpk password this vault shares: stored in the state file so that
+    // changing the vault password never orphans packages already uploaded.
+    QString packageSecret() const {
+        return state.packageKey.isEmpty() ? keys_.package : state.packageKey;
+    }
+
     void bump(const char* counter) {
         const QString name = QString::fromLatin1(counter);
         stats.insert(name, stats.value(name).toInt() + 1);
@@ -438,7 +444,7 @@ private:
         if (!ensureDirectory(outgoing())) fail(QStringLiteral("Cannot create the sync directory."));
         const QString temporary =
             outgoing() + QStringLiteral("/export-") + sync::randomHex(8) + QStringLiteral(".mvpk");
-        auto exported = vault_->export_package(fsPath(temporary), keys_.package.toStdString(),
+        auto exported = vault_->export_package(fsPath(temporary), packageSecret().toStdString(),
                                                {{video.id, relative.toStdString()}}, {}, false);
         if (!exported) {
             QFile::remove(temporary);
@@ -841,7 +847,7 @@ private:
     void importPackage(const QString& packagePath, const RecordRef& record, qint64 previousLocal) {
         std::vector<std::int64_t> stored;
         auto imported = vault_->import_package(
-            fsPath(packagePath), keys_.package.toStdString(), 0, {},
+            fsPath(packagePath), packageSecret().toStdString(), 0, {},
             [&stored](std::int64_t id, const std::string&, std::uint64_t, std::int64_t) {
                 stored.push_back(id);
             });
@@ -996,7 +1002,24 @@ SyncEngine::~SyncEngine() {
 QString SyncEngine::stateDirectoryFor(const QString& vaultRoot) { return sync::stateDirectoryFor(vaultRoot); }
 
 void SyncEngine::load() {
-    state_ = sync::loadState(directory_ + QStringLiteral("/state.enc"), keys_.state);
+    const QString path = directory_ + QStringLiteral("/state.enc");
+    bool fromLegacySeal = false;
+    try {
+        state_ = sync::loadState(path, keys_.state);
+    } catch (const std::exception&) {
+        // Written before the package key was stored: its sealing key came from
+        // the package password. Open it once with that key and re-save.
+        state_ = sync::loadState(path, keys_.legacyState);
+        fromLegacySeal = true;
+    }
+    const QString adopted = sync::adoptedPackageKey(state_.packageKey, keys_);
+    const bool gainedPackageKey = adopted != state_.packageKey;
+    state_.packageKey = adopted;
+    if (fromLegacySeal || gainedPackageKey) {
+        // Persist the package key now: that is what lets a later password
+        // change keep every package this device already shares.
+        sync::saveState(path, keys_.state, state_);
+    }
 }
 
 void SyncEngine::save() {

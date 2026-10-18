@@ -16,6 +16,11 @@ enum class ThemeMode { System, Light, Dark };
 ThemeMode savedThemeMode();
 void setThemeMode(ThemeMode mode);
 void initializeTheme(QApplication& application);
+// Re-applies the mode in force: the palette, the application stylesheet and
+// every widget's themed inline styles. The manager already does this whenever
+// the application palette changes, so call it only after changing the palette
+// through a path that does not notify (a platform-theme override in a test).
+void refreshTheme();
 bool isDarkTheme();
 QPalette lightPalette();
 // Accepts a DARK source stylesheet; dark mode returns it byte-for-byte.

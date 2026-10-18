@@ -163,15 +163,17 @@ int main(int argc, char** argv) {
                 check(scroll && scroll->widget()->width() <= scroll->viewport()->width(), "no horizontally clipped content");
             }
         }
-        // Palette changes must reach live controls, not only newly constructed pages.
-        auto original = app.palette();
-        auto light = original;
-        light.setColor(QPalette::Window, QColor("#f2f3f5")); light.setColor(QPalette::WindowText, QColor("#111111"));
-        light.setColor(QPalette::Base, Qt::white); light.setColor(QPalette::Text, QColor("#111111"));
-        light.setColor(QPalette::PlaceholderText, QColor("#666666"));
-        light.setColor(QPalette::Highlight, QColor("#3390ec"));
-        app.setPalette(light); tabs->setCurrentIndex(0); app.processEvents();
+        // A theme switch must reach live controls, not only a newly built page.
+        // This goes through the real engine, which is what the app does: setting
+        // a palette directly and hoping Qt re-resolves style-sheet colours is
+        // exactly the path that differs between Qt 5.15 builds.
+        videovault::app::initializeTheme(app);
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
+        tabs->setCurrentIndex(0);
+        app.processEvents();
+        const QPalette light = videovault::app::lightPalette();
         check(current->palette().color(QPalette::Text) == light.color(QPalette::Text), "live field palette updates to light");
+        check(current->palette().color(QPalette::Base) == light.color(QPalette::Base), "live field background follows the light theme");
         auto* secondary = child.operator()<QLabel>("updateStatus");
         check(secondary->palette().color(secondary->foregroundRole()) == light.color(QPalette::PlaceholderText), "secondary copy remains readable after palette change");
         if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
@@ -179,8 +181,10 @@ int main(int argc, char** argv) {
             page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/settings-light-480.png");
             page.resize(1100, 760); app.processEvents(); page.grab().save(folder + "/settings-light-1100.png");
         }
-        app.setPalette(original);
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Dark);
         app.processEvents();
+        const QPalette dark = videovault::app::darkPalette();
+        check(current->palette().color(QPalette::Text) == dark.color(QPalette::Text), "live field palette returns to dark");
         if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
             const QString folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
             page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/settings-dark-480.png");

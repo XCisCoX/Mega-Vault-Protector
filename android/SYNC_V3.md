@@ -1,5 +1,11 @@
 # Android encrypted sync (protocol 3)
 
+> **Historical: protocol 3.** The shipped relay (`sync_server/`) and the desktop
+> client speak **protocol 4** (accounts, vaults, versioned records). This document
+> describes the earlier protocol 3 hash bucket, which the Android client still
+> implements. Authoritative v4 references: `sync_server/README.md`,
+> `deployment/README.md`, `docs/sync-mega-plan.md`.
+
 The Android client is a protocol 3 hash-bucket client, like the desktop app
 (`qt-app/src/sync_engine.cpp`) and the relay in `sync_server/`. One library key
 unlocks one bucket; the bucket is a flat set of opaque `.mvpk` packages, each

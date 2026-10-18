@@ -28,7 +28,7 @@ namespace videovault::app {
 namespace {
 
 // The app's secondary text tone: labels that explain, never compete.
-const char* const kSecondary = "#A8A8AE";
+const char* const kSecondary = "palette(placeholder-text)";
 
 QString countText(const int count, const QString& singular, const QString& plural) {
     return QStringLiteral("%1 %2").arg(QString::number(count), count == 1 ? singular : plural);
@@ -89,7 +89,7 @@ QWidget* hairline(QWidget* parent) {
     auto* line = new QWidget(parent);
     line->setFixedHeight(1);
     line->setAttribute(Qt::WA_StyledBackground, true);
-    line->setStyleSheet(QStringLiteral("background: rgba(255, 255, 255, 20);"));
+    line->setStyleSheet(QStringLiteral("background: palette(midlight);"));
     return line;
 }
 
@@ -134,10 +134,10 @@ RowParts makeRow(QWidget* parent, const int height, const QString& name = {}) {
 
 QString rowStyle(const char* name) {
     return QStringLiteral(
-               "QListWidget#%1 { background: #161618; border: 1px solid rgba(255, 255, 255, 18);"
+               "QListWidget#%1 { background: palette(base); border: 1px solid palette(midlight);"
                " border-radius: 14px; outline: none; }"
                "QListWidget#%1::item { border: none; background: transparent; }"
-               "QListWidget#%1::item:hover { background: rgba(255, 255, 255, 12); }"
+               "QListWidget#%1::item:hover { background: palette(midlight); }"
                "QListWidget#%1::item:selected { background: rgba(51, 144, 236, 70); }")
         .arg(QString::fromLatin1(name));
 }
@@ -148,7 +148,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     : QWidget(parent), engine_(engine), vault_(std::move(vault)) {
     setObjectName(QStringLiteral("syncPage"));
     setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet(QStringLiteral("QWidget#syncPage { background: #000000; }"));
+    setStyleSheet(QStringLiteral("QWidget#syncPage { background: palette(window); }"));
     setMinimumWidth(360);
 
     auto* root = new QVBoxLayout(this);
@@ -161,8 +161,8 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     bar->setAttribute(Qt::WA_StyledBackground, true);
     bar->setFixedHeight(52);
     bar->setStyleSheet(QStringLiteral(
-        "QWidget#syncBar { background: rgba(255, 255, 255, 6);"
-        " border-bottom: 1px solid rgba(255, 255, 255, 18); }"));
+        "QWidget#syncBar { background: palette(alternate-base);"
+        " border-bottom: 1px solid palette(midlight); }"));
     auto* barLayout = new QHBoxLayout(bar);
     barLayout->setContentsMargins(16, 0, 16, 0);
     barLayout->setSpacing(10);
@@ -189,7 +189,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
         "QPushButton { color: %1; background: transparent; border: none;"
         " padding: 2px 8px; min-height: 28px; font: 12px \"Segoe UI\"; }"
         "QPushButton:hover { color: white; }"
-        "QPushButton:disabled { color: #636366; }")
+        "QPushButton:disabled { color: palette(placeholder-text); }")
                                        .arg(QString::fromLatin1(kSecondary)));
     barLayout->addWidget(back_);
     barLayout->addSpacing(6);
@@ -208,7 +208,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     scroll->setStyleSheet(QStringLiteral(
         "QScrollArea#syncScroll { background: transparent; border: none; }"
         "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
-        "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 60);"
+        "QScrollBar::handle:vertical { background: palette(mid);"
         " border-radius: 4px; min-height: 28px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"));
@@ -237,10 +237,10 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     signInCard_->setObjectName(QStringLiteral("syncSignInCard"));
     signInCard_->setAttribute(Qt::WA_StyledBackground, true);
     signInCard_->setStyleSheet(QStringLiteral(
-        "QFrame#syncSignInCard { background: #161618;"
-        " border: 1px solid rgba(255, 255, 255, 22); border-radius: 22px; }"
+        "QFrame#syncSignInCard { background: palette(base);"
+        " border: 1px solid palette(midlight); border-radius: 22px; }"
         "QFrame#syncSignInCard QLineEdit { min-height: 38px; color: white;"
-        " background: #1c1c1e; border: 1px solid rgba(255, 255, 255, 28);"
+        " background: palette(alternate-base); border: 1px solid palette(midlight);"
         " border-radius: 14px; padding: 0 12px; font-size: 13px; }"
         "QFrame#syncSignInCard QLineEdit:focus { border: 1px solid #3390ec; }"
         "QFrame#syncSignInCard QPushButton#syncSignIn { min-height: 40px; color: white;"
@@ -248,7 +248,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
         " font: 600 13px \"Segoe UI\"; }"
         "QFrame#syncSignInCard QPushButton#syncSignIn:hover { background: #4ba0f5; }"
         "QFrame#syncSignInCard QPushButton#syncSignIn:disabled {"
-        " color: #9a9aa0; background: #1d5b96; border-color: #1d5b96; }"));
+        " color: palette(placeholder-text); background: palette(midlight); border-color: palette(midlight); }"));
     auto* cardLayout = new QVBoxLayout(signInCard_);
     cardLayout->setContentsMargins(28, 26, 28, 26);
     cardLayout->setSpacing(10);
@@ -334,11 +334,11 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     chooseFolder_->setMinimumHeight(44);
     chooseFolder_->setStyleSheet(QStringLiteral(
         "QPushButton#syncChooseFolder { text-align: left; padding: 0 14px;"
-        " min-height: 44px; color: #f2f2f7; background: #1c1c1e;"
-        " border: 1px solid rgba(255, 255, 255, 28); border-radius: 14px;"
+        " min-height: 44px; color: palette(text); background: palette(alternate-base);"
+        " border: 1px solid palette(midlight); border-radius: 14px;"
         " font-size: 13px; }"
-        "QPushButton#syncChooseFolder:hover { background: #242426; }"
-        "QPushButton#syncChooseFolder:disabled { color: #636366; }"));
+        "QPushButton#syncChooseFolder:hover { background: palette(midlight); }"
+        "QPushButton#syncChooseFolder:disabled { color: palette(placeholder-text); }"));
     workLayout->addWidget(chooseFolder_);
 
     run_ = new QPushButton(QStringLiteral("Sync now"), work_);
@@ -350,8 +350,8 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
         " border: 1px solid #3390ec; border-radius: 16px;"
         " font: 600 13px \"Segoe UI\"; }"
         "QPushButton#syncRun:hover { background: #4ba0f5; }"
-        "QPushButton#syncRun:disabled { color: #9a9aa0; background: #1d5b96;"
-        " border-color: #1d5b96; }"));
+        "QPushButton#syncRun:disabled { color: palette(placeholder-text); background: palette(midlight);"
+        " border-color: palette(midlight); }"));
     workLayout->addWidget(run_);
 
     lastRun_ = quietLabel(work_);
@@ -370,7 +370,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     progress_->setRange(0, 1000);
     progress_->setValue(0);
     progress_->setStyleSheet(QStringLiteral(
-        "QProgressBar { background: #1c1c1e; border: none; border-radius: 3px;"
+        "QProgressBar { background: palette(alternate-base); border: none; border-radius: 3px;"
         " min-height: 6px; max-height: 6px; }"
         "QProgressBar::chunk { background: #3390ec; border-radius: 3px; }"));
     auto* progressLine = new QHBoxLayout();
@@ -822,7 +822,7 @@ void SyncPage::rebuildConflicts() {
         auto* nameLabel = new QLabel(elided(name, rowFont(), 320), parts.row);
         nameLabel->setFont(rowFont());
         nameLabel->setStyleSheet(QStringLiteral(
-            "color: #f2f2f7; background: transparent;"));
+            "color: palette(text); background: transparent;"));
         nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         auto* meta = quietLabel(parts.row);
@@ -851,7 +851,7 @@ QWidget* SyncPage::debrisRow(const QJsonObject& item) {
     auto* nameLabel = new QLabel(elided(name, rowFont(), 220), parts.row);
     nameLabel->setFont(rowFont());
     nameLabel->setStyleSheet(QStringLiteral(
-        "color: #f2f2f7; background: transparent;"));
+        "color: palette(text); background: transparent;"));
     nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto* meta = quietLabel(parts.row);
@@ -868,7 +868,7 @@ QWidget* SyncPage::debrisRow(const QJsonObject& item) {
     parts.body->addWidget(meta);
 
     const QString actionStyle = QStringLiteral(
-        "QPushButton { background: transparent; border: none; color: #8ec8ff;"
+        "QPushButton { background: transparent; border: none; color: palette(link);"
         " padding: 0 8px; min-height: 28px; font: 600 12px \"Segoe UI\"; }"
         "QPushButton:hover { color: white; }");
     const QString dangerStyle = QStringLiteral(

@@ -471,7 +471,47 @@ int main(int argc, char** argv) {
             check(contentOf(*vaultLocalA, "note-a.txt") == QByteArray("hello"), "and still readable");
         }
 
-        section("12. nothing is left behind");
+        section("12. a vault password change keeps shared packages readable");
+        {
+            const QString newPassword = QStringLiteral("a-different-vault-password");
+            const QString stateA = temp.path() + "/state-a";
+            const std::vector<unsigned char> after{'a', 'f', 't', 'e', 'r'};
+            check(vaultLocalA->import_bytes(after, "after-change.txt").has_value(),
+                  "A imports one more item");
+            engineA.syncNow();
+            settle(engineA, "sync (A, before the password change)");
+
+            check(vaultLocalA->change_password(password.toStdString(), newPassword.toStdString(),
+                                               {8192, 1, 1}).has_value(),
+                  "the vault password is changed on A");
+            const auto keysANew = videovault::app::sync::deriveKeys(stateA, newPassword);
+            check(keysANew.state != keysA.state, "the new password derives a new state key");
+            videovault::app::sync::resealState(stateA, keysA, keysANew);
+
+            const auto resealed =
+                videovault::app::sync::loadState(stateA + "/state.enc", keysANew.state);
+            check(resealed.packageKey == keysA.package,
+                  "the package password survived the change instead of being re-derived");
+            check(resealed.signedIn() && resealed.vaultId == vaultA,
+                  "the token and the vault choice survived the re-seal");
+
+            // Exactly what the app builds at the next unlock.
+            SyncEngine engineANew(vaultLocalA, keysANew, stateA);
+            check(engineANew.signedIn(), "the re-sealed state opens with the new password");
+            engineANew.syncNow();
+            settle(engineANew, "sync (A, after the password change)");
+
+            // B never learns the new vault password: it must still import what A
+            // published after the change, because the package key did not move.
+            engineB.syncNow();
+            settle(engineB, "sync (B, still on the old vault password)");
+            check(hasLocal(*vaultLocalB, "after-change.txt"),
+                  "device B received the item published after the change");
+            check(contentOf(*vaultLocalB, "after-change.txt") == QByteArray("after"),
+                  "and decrypted it with the package key both devices share");
+        }
+
+        section("13. nothing is left behind");
         {
             Client client(url, harnessToken);
             const auto records = allRecords(client, vaultA);

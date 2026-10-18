@@ -1,5 +1,11 @@
 # Sync architecture: an encrypted hash bucket
 
+> **Historical: protocol 3.** The shipped relay (`sync_server/`) and the desktop
+> client speak **protocol 4** (accounts, vaults, versioned records). This document
+> describes the earlier protocol 3 hash bucket, which the Android client still
+> implements. Authoritative v4 references: `sync_server/README.md`,
+> `deployment/README.md`, `docs/sync-mega-plan.md`.
+
 ## Two shapes that did not fit
 
 The app already had a trusted-server remote-access mode

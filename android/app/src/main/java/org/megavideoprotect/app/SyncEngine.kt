@@ -167,7 +167,11 @@ class SyncEngine(private val store: SyncStateStore, private val vault: SyncVault
             JSONObject(String(health.bytes, Charsets.UTF_8)).optInt("protocol", 0)
         }.getOrDefault(0)
         if (protocol != 3) {
-            error("This server speaks an older sync protocol; start a protocol 3 sync_server.")
+            error(
+                "This build's phone sync speaks protocol 3, and the server answered protocol " +
+                    "$protocol. The desktop app and the relay use protocol 4; that phone client " +
+                    "is not written yet, so use the desktop app for now.",
+            )
         }
 
         catalog = listPackages(client) // authenticated: a wrong key fails here, once

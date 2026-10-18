@@ -40,6 +40,9 @@ signals:
     void updateCheckRequested();
     void updatePreferencesChanged();
     void appearanceChanged();
+    // The vault password changed, so sync state was re-sealed and the open
+    // engine holds stale keys: the host must lock sync until the next unlock.
+    void passwordChanged();
 
 private:
     void reloadTags();

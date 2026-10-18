@@ -1,4 +1,5 @@
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
 #include <QtConcurrent/QtConcurrentRun>
 #include <QApplication>
@@ -399,6 +400,21 @@ void SettingsDialog::beginPasswordChange() {
     passwordWatcher_->setFuture(QtConcurrent::run([vault, current, next, parameters] {
         auto outcome = std::make_shared<core::Result<bool>>(
             vault->change_password(*current, *next, parameters));
+        if (outcome->has_value()) {
+            // The vault database is re-keyed; the package password this vault
+            // shares must not be, or every package already uploaded would
+            // become unreadable. Re-seal the sync state under the new password
+            // while both passwords are still at hand.
+            const auto root = vault->root_path();
+#ifdef Q_OS_WIN
+            const QString folder = QString::fromStdWString(root.wstring());
+#else
+            const QString folder = QString::fromUtf8(root.u8string().c_str());
+#endif
+            videovault::app::sync::resealForPasswordChange(
+                videovault::app::sync::stateDirectoryFor(folder),
+                QString::fromStdString(*current), QString::fromStdString(*next));
+        }
         current->assign(current->size(), '\0');
         next->assign(next->size(), '\0');
         return outcome;
@@ -421,6 +437,9 @@ void SettingsDialog::finishPasswordChange() {
     confirmPassword_->clear();
     setStatus(QStringLiteral("Password changed."), false);
     emit settingsChanged();
+    // Sync keys came from the old password: the host locks sync until the vault
+    // is unlocked again, so a stale engine can never re-seal the state wrongly.
+    emit passwordChanged();
 }
 
 void SettingsDialog::addTag() {

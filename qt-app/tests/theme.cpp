@@ -150,7 +150,14 @@ int main(int argc, char** argv) {
         QPalette foreign = darkPalette();
         app.setPalette(foreign);
         app.processEvents();
+        // Some Qt 5.15 builds hand a foreign palette to polished widgets without
+        // notifying, so the engine also exposes the same guarantee as an explicit
+        // call. Both paths must put the user's choice back.
+        refreshTheme();
+        app.processEvents();
+        require(!isDarkTheme(), "a foreign palette cannot flip the chosen mode");
         require(!isDarkTheme() && app.palette().color(QPalette::Window).lightness() > 200, "native palette notifications cannot override explicit light");
+        require(app.palette().color(QPalette::WindowText).lightness() < 80, "the explicit light foreground comes back too");
 #ifndef Q_OS_WIN
         setThemeMode(ThemeMode::System);
         app.setPalette(lightPalette());

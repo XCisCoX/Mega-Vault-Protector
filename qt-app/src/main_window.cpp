@@ -3834,6 +3834,25 @@ void MainWindow::openSettings() {
         });
         connect(page, &SettingsDialog::updateCheckRequested, this, [this] { beginUpdateCheck(true); });
         connect(page, &SettingsDialog::updatePreferencesChanged, this, [this] { configureUpdateChecks(); });
+        connect(page, &SettingsDialog::passwordChanged, this, [this] {
+            // The sync key comes from the vault password, so every engine and
+            // key derived from the old one is now stale. Drop them; the next
+            // unlock derives from the new password and the re-sealed state.
+            if (syncPage_ != nullptr) {
+                contentStack_->removeWidget(syncPage_);
+                syncPage_->deleteLater();
+                syncPage_ = nullptr;
+            }
+            if (syncEngine_ != nullptr) {
+                syncEngine_->stop();
+                syncEngine_->deleteLater();
+                syncEngine_ = nullptr;
+            }
+            syncKeys_.wipe();
+            setError(galleryStatus_, QStringLiteral(
+                "Password changed. Sync is locked until you unlock the vault again; "
+                "items already shared stay readable to your other devices."));
+        });
         connect(page, &SettingsDialog::closed, this, [this, page] {
             if (settingsPage_ != page) return;
             settingsPage_ = nullptr;
@@ -7294,6 +7313,20 @@ void MainWindow::beginChangePassword() {
     connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishChangePassword(); });
     adminWatcher_->setFuture(QtConcurrent::run([vault, current_text, next_text, parameters] {
         auto result = vault->change_password(*current_text, *next_text, parameters);
+        if (result.has_value()) {
+            // Re-seal the sync state under the new password but keep the package
+            // key, so packages already on the server stay readable.
+            const auto root = vault->root_path();
+            const QString folder =
+#ifdef Q_OS_WIN
+                QString::fromStdWString(root.wstring());
+#else
+                QString::fromUtf8(root.u8string().c_str());
+#endif
+            sync::resealForPasswordChange(sync::stateDirectoryFor(folder),
+                                          QString::fromStdString(*current_text),
+                                          QString::fromStdString(*next_text));
+        }
         clearSecret(*current_text);
         clearSecret(*next_text);
         return std::make_shared<core::Result<bool>>(std::move(result));

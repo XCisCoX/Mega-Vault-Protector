@@ -54,12 +54,33 @@ QString operationId(const QString& recordId, int baseVersion, const QString& pac
 // device uploads (every device of the same vault derives the same value) and
 // `state` seals this device's own state file.
 struct Keys {
-    QString package;   // 64 lowercase hex: the .mvpk password
+    QString package;   // 64 lowercase hex: the .mvpk password, as the old scheme derived it
     QByteArray state;  // 32 bytes: the XChaCha20-Poly1305 key for state.enc
+    // The state key the pre-packageKey scheme used, kept only to open a state
+    // file written by an older build once (it is migrated on load).
+    QByteArray legacyState;
 
     bool isEmpty() const { return package.isEmpty() || state.size() != 32; }
     void wipe();
 };
+
+// The package password is *not* re-derived from the vault password on every
+// unlock: it is stored inside state.enc, so changing the vault password keeps
+// every package this vault already shares readable. A vault whose state is
+// older than that split adopts the value the old scheme derived, so its
+// existing packages stay readable too.
+QString adoptedPackageKey(const QString& stored, const Keys& keys);
+
+// Re-seals state.enc under `to`'s state key, keeping everything else (token,
+// lease, records, package key). Used when the vault password changes: the
+// package key must survive, and the state file must open with the new password.
+void resealState(const QString& directory, const Keys& from, const Keys& to);
+
+// The same, from the two passwords, for the code path that changes the vault
+// password. Returns false when this vault never synced (no salt, no state), in
+// which case there is nothing to re-seal and nothing to warn about.
+bool resealForPasswordChange(const QString& stateDirectory, const QString& oldPassword,
+                             const QString& newPassword);
 
 // <AppLocalData>/sync-v4/<sha256 of the canonical vault folder>. One device may
 // hold several vaults; each keeps its own state.
@@ -99,6 +120,10 @@ struct SyncState {
     QString email;     // the account this device signed in with
     QString token;     // device bearer token, returned by the server exactly once
     QString tokenId;   // its server-side id, for "this device" display
+    // 64 lowercase hex: the .mvpk password. Sealed with the token, because it
+    // must outlive changes to the vault password that would otherwise orphan
+    // every package already uploaded.
+    QString packageKey;
     QString vaultId;
     QString vaultName;
     QString folder;    // the local vault folder this remote vault mirrors
@@ -123,6 +148,10 @@ struct SyncState {
 // unknown version throw instead of silently starting over, which would forget
 // the token and re-upload everything.
 SyncState loadState(const QString& path, const QByteArray& key);
+
+// Tries the current state key, then the pre-split one, so a device that synced
+// before the package key was stored still opens and is migrated on save.
+SyncState loadState(const QString& path, const Keys& keys);
 void saveState(const QString& path, const QByteArray& key, const SyncState& state);
 
 }

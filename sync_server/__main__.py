@@ -531,6 +531,9 @@ def main():
     serve.add_argument('--workers', type=int, default=16)
     serve.add_argument('--request-timeout', type=float, default=30)
     serve.add_argument('--web', metavar='DIR', help='static web UI directory (default: sync_web/)')
+    serve.add_argument('--gc-hours', type=float, default=24.0,
+                       help='sweep unfetched packages and abandoned uploads older than this at '
+                            'startup (0 disables the sweep)')
 
     account = sub.add_parser('account', help='operator account commands')
     account.add_argument('action', choices=('create',))
@@ -545,6 +548,12 @@ def main():
     token.add_argument('action', choices=('issue',))
     token.add_argument('email')
     token.add_argument('--label', default='cli')
+
+    gc = sub.add_parser('gc', help='remove unreferenced packages and abandoned uploads')
+    gc.add_argument('--older-than-hours', type=float, default=24.0,
+                    help='only touch rows older than this (default: 24)')
+    gc.add_argument('--vault', help='limit the sweep to one vault id')
+    gc.add_argument('--dry-run', action='store_true', help='report what would be freed')
     args = parser.parse_args()
 
     if args.command == 'serve':
@@ -573,6 +582,14 @@ def main():
             store = Store(args.data)
         except (ValueError, OSError, sqlite3.Error) as e:
             parser.error(str(e))
+        if args.gc_hours > 0:
+            try:
+                swept = store.collect_garbage(args.gc_hours * 3600)
+                if swept['packages'] or swept['partials'] or swept['dangling']:
+                    print('startup sweep: %(packages)d package(s), %(partials)d abandoned upload(s), '
+                          '%(dangling)d dangling row(s), %(bytes)d byte(s) freed' % swept)
+            except (OSError, sqlite3.Error) as e:
+                print('startup sweep failed: %s' % e, file=sys.stderr)
         with Server((args.host, args.port), store, args, context, static) as server:
             try:
                 server.serve_forever()
@@ -585,6 +602,14 @@ def main():
         store = Store(args.data, recover=False)
     except (ValueError, OSError, sqlite3.Error) as e:
         parser.error(str(e))
+    if args.command == 'gc':
+        if args.older_than_hours < 0:
+            parser.error('--older-than-hours cannot be negative')
+        swept = store.collect_garbage(args.older_than_hours * 3600, args.vault, args.dry_run)
+        print(f"{'dry run' if args.dry_run else 'swept'}: {swept['packages']} package(s), "
+              f"{swept['partials']} abandoned upload(s), {swept['dangling']} dangling row(s), "
+              f"{swept['bytes']} byte(s) {'would be freed' if args.dry_run else 'freed'}")
+        return
     if not args.email:
         parser.error('an email address is required')
     found = store.account_by_email(args.email)

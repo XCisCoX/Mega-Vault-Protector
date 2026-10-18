@@ -155,6 +155,26 @@ These commands are the break-glass path: they run against the same data
 directory the server uses, so anyone who can run them can already read the
 database. They therefore do not ask for the account password.
 
+### Reclaiming space
+
+Nothing is deleted implicitly: a record edit uploads a new package and a purge
+removes the row, so packages no record points at — and uploads a dead client
+started but never finished — stay on disk and keep counting against the quota.
+One sweep clears both:
+
+```sh
+# what a sweep would take, without touching anything
+python -m sync_server --data DIR gc --dry-run
+# take it (default: only rows older than 24 hours)
+python -m sync_server --data DIR gc --older-than-hours 24
+```
+
+The age margin is the safety rule, not a preference: a client uploads the blob
+before it writes the record that points at it, and another device may still be
+holding an older record for a package a newer edit replaced. `serve` runs the
+same sweep at startup (`--gc-hours`, default 24, `0` disables it), so a relay
+that is restarted periodically never accumulates garbage.
+
 ## Schema (what to back up)
 
 `sync.sqlite3` plus `blobs/`. The tables:
