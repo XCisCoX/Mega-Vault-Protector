@@ -3,6 +3,7 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFutureWatcher>
+#include <QThreadPool>
 
 extern "C" {
 #include <libavutil/error.h>
@@ -51,6 +52,13 @@ extern "C" {
 namespace videovault::app {
 
 namespace {
+
+QThreadPool* stillImagePool() {
+    static QThreadPool pool;
+    static const bool configured = [] { pool.setMaxThreadCount(2); return true; }();
+    Q_UNUSED(configured)
+    return &pool;
+}
 
 enum class PlayerIcon {
     Play, Pause, Volume, Muted, Fullscreen, Previous, Next, Back, Forward,
@@ -382,7 +390,8 @@ PlayerWindow::PlayerWindow(
     const std::shared_ptr<videovault::core::Vault>& vault,
     const std::int64_t video_id,
     const QString& title,
-    QWidget* parent)
+    QWidget* parent,
+    const bool stillImage)
     : QDialog(parent), vault_(vault), video_id_(video_id), title_(title) {
     setWindowTitle(title);
     resize(960, 620);
@@ -744,9 +753,13 @@ PlayerWindow::PlayerWindow(
 
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] { tick(); });
-    timer_.start();
-    playing_.store(true);
-    worker_ = std::thread(&PlayerWindow::workerLoop, this);
+    if (stillImage) {
+        playStill(vault, video_id);
+    } else {
+        timer_.start();
+        playing_.store(true);
+        worker_ = std::thread(&PlayerWindow::workerLoop, this);
+    }
 }
 
 PlayerWindow::~PlayerWindow() {
@@ -763,6 +776,12 @@ PlayerWindow::~PlayerWindow() {
 }
 
 void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id)
+{
+    resetPlayback(std::move(vault), video_id, true);
+}
+
+void PlayerWindow::resetPlayback(std::shared_ptr<videovault::core::Vault> vault,
+    const std::int64_t video_id, const bool startVideo)
 {
     // Tear down the current playback exactly like the destructor: the worker
     // loop only exits when quit_ is set, so joining without it blocks the UI
@@ -849,22 +868,18 @@ void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std
     vault_ = std::move(vault);
     video_id_ = video_id;
     ++stillEpoch_;
-    timer_.setInterval(16);
-    timer_.start();
-    playing_.store(true);
-    worker_ = std::thread(&PlayerWindow::workerLoop, this);
+    if (startVideo) {
+        timer_.setInterval(16);
+        timer_.start();
+        playing_.store(true);
+        worker_ = std::thread(&PlayerWindow::workerLoop, this);
+    }
 }
 
 void PlayerWindow::playStill(
     std::shared_ptr<videovault::core::Vault> vault, const std::int64_t video_id) {
-    playVideo(std::move(vault), video_id);
-    // playVideo starts the video clock. A picture has no timeline, so stop
-    // that worker and decrypt the file through the same chunked reader.
-    quit_.store(true);
-    if (worker_.joinable()) {
-        worker_.join();
-    }
-    quit_.store(false);
+    // Reset the old playback without launching a decoder just to join it.
+    resetPlayback(std::move(vault), video_id, false);
     playing_.store(false);
     ended_.store(false);
     imageModeFlag_.store(true);
@@ -893,7 +908,7 @@ void PlayerWindow::playStill(
         surface_->setFrame(image);
         resetImageFit();
     });
-    watcher->setFuture(QtConcurrent::run([source, video_id] {
+    watcher->setFuture(QtConcurrent::run(stillImagePool(), [source, video_id] {
         std::vector<unsigned char> plain;
         std::uint64_t offset = 0;
         constexpr std::size_t kChunk = 1024U * 1024U;

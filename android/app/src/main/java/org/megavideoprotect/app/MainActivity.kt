@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -102,6 +101,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // The saved appearance is read once, before the first frame.
+        MvpThemeState.loadOnce(this)
 
         val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
         val locationOptions = runCatching { VaultLocation.options(this) }
@@ -121,13 +122,13 @@ class MainActivity : ComponentActivity() {
         openMusicFromNotification(intent)
 
         setContent {
-            MaterialTheme(colorScheme = MvpColorScheme) {
+            MvpTheme {
                 // A player, picture, PDF, or song returns to the library. The library
                 // walks up one folder, then leaves only after a second press.
                 // Login leaves on one press. Setup has nowhere to go back to.
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -194,6 +195,7 @@ class MainActivity : ComponentActivity() {
                             vaultLocation = RemoteVault.label() ?: vaultRoot,
                             onLock = { lockNow() },
                             onOpenPeer = { show(Screen.Peer) },
+                            onOpenSync = { show(Screen.Sync) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
                             onOpenMusic = {
@@ -236,6 +238,10 @@ class MainActivity : ComponentActivity() {
                                     show(next)
                                 }
                             },
+                        )
+                        is Screen.Sync -> SyncScreen(
+                            vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
+                            onClose = { show(Screen.Vault) },
                         )
                         is Screen.Peer -> PeerScreen(onClose = { show(Screen.Vault) })
                         is Screen.Player -> PlayerScreen(
@@ -303,7 +309,7 @@ class MainActivity : ComponentActivity() {
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync
         if (inside && unlocked()) show(Screen.Vault)
     }
 
@@ -311,7 +317,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }
@@ -326,7 +332,7 @@ class MainActivity : ComponentActivity() {
 private fun Screen.depth(): Int = when (this) {
     Screen.Setup, Screen.Login -> 0
     Screen.Vault -> 1
-    Screen.Peer -> 2
+    Screen.Peer, Screen.Sync -> 2
     else -> 3
 }
 

@@ -153,16 +153,29 @@ protected:
         QWidget::hideEvent(event);
     }
 
+    void changeEvent(QEvent* event) override {
+        QWidget::changeEvent(event);
+        if (event->type() == QEvent::PaletteChange) {
+            blurred_ = {}; // Do not retain a sample from the previous theme.
+            update();
+        }
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        const bool dark = palette().color(QPalette::Window).lightness() < 128;
         if (!blurred_.isNull()) {
             painter.drawImage(rect(), blurred_);
         } else {
-            painter.fillRect(rect(), QColor(12, 12, 16));
+            painter.fillRect(rect(), dark ? QColor(12, 12, 16) : palette().color(QPalette::Window));
         }
-        painter.fillRect(rect(), QColor(8, 8, 12, 140));
-        painter.setPen(QColor(255, 255, 255, 32));
+        QColor veil = dark ? QColor(8, 8, 12) : palette().color(QPalette::Base);
+        veil.setAlpha(dark ? 140 : 195);
+        painter.fillRect(rect(), veil);
+        QColor line = dark ? QColor(Qt::white) : palette().color(QPalette::WindowText);
+        line.setAlpha(32);
+        painter.setPen(line);
         if (band_ == Band::Top) {
             painter.drawLine(0, height() - 1, width(), height() - 1);
         } else {
@@ -191,7 +204,7 @@ private:
                 : QRect(0, std::max(0, source->height() - strip), source->width(), strip);
         }
         QImage image(grab.size(), QImage::Format_ARGB32_Premultiplied);
-        image.fill(QColor(0, 0, 0));
+        image.fill(palette().color(QPalette::Window));
         {
             QPainter target(&image);
             source->render(&target, QPoint(0, 0), QRegion(grab));

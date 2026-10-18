@@ -38,6 +38,18 @@ int fail(const char* message) {
     return EXIT_FAILURE;
 }
 
+template <typename V>
+bool checkSingleItemSize(V& vault, const std::int64_t id, const std::uint64_t expected) {
+    if constexpr (requires { vault.video_size(id); }) {
+        const auto size = vault.video_size(id);
+        const auto missing = vault.video_size(-123);
+        return size && size.value() == expected && !missing;
+    } else {
+        std::cerr << "Missing ID-based plaintext-size lookup; playback must not list the library.\n";
+        return false;
+    }
+}
+
 videovault::core::Argon2Parameters testParameters() {
     videovault::core::Argon2Parameters parameters;
     parameters.memory_kib = 8U * 1024U;
@@ -97,6 +109,9 @@ int main() {
         return fail("Importing the reader test source must succeed.");
     }
     const int64_t video_id = imported.value();
+    if (!checkSingleItemSize(created.value(), video_id, kSourceSize)) {
+        return fail("A single-item size lookup must return plaintext size and reject unknown ids.");
+    }
 
     // Whole-file read still reproduces the source exactly.
     {

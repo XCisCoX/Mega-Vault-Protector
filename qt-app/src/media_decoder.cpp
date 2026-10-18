@@ -363,25 +363,14 @@ public:
             }
             return false;
         }
-        std::error_code size_error;
-        const auto package_size =
-            std::filesystem::file_size(package.value(), size_error);
-        if (size_error) {
+        const auto size = vault->video_size(video_id);
+        if (!size) {
             if (error != nullptr) {
-                *error = QStringLiteral("The video package is missing.");
+                *error = QStringLiteral("Unable to read the video size.");
             }
             return false;
         }
-        std::uint64_t plaintext_size = package_size;
-        auto videos = vault->list_videos();
-        if (videos) {
-            for (const auto& video : videos.value()) {
-                if (video.id == video_id) {
-                    plaintext_size = video.original_size;
-                    break;
-                }
-            }
-        }
+        const auto plaintext_size = size.value();
 
         handle_ = std::make_unique<FormatHandle>(
             FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});

@@ -5,7 +5,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -14,6 +16,8 @@ import java.net.URL
 data class AppRelease(val version: String, val apkUrl: String, val size: Long)
 
 private const val RELEASES = "https://api.github.com/repos/XCisCoX/Mega-Video-Protector/releases/latest"
+private const val RELEASES_ALL = "https://api.github.com/repos/XCisCoX/Mega-Video-Protector/releases?per_page=30"
+private const val CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L
 
 fun installedVersion(context: Context): String {
     return runCatching {
@@ -21,19 +25,27 @@ fun installedVersion(context: Context): String {
     }.getOrNull().orEmpty().ifBlank { "0.0.0" }
 }
 
-/** Null when this install is already the latest release, or GitHub cannot be reached. */
-fun newerRelease(current: String): AppRelease? {
-    val connection = (URL(RELEASES).openConnection() as HttpURLConnection).apply {
+private fun fetchText(target: String): Pair<String, Int>? {
+    val connection = (URL(target).openConnection() as HttpURLConnection).apply {
         connectTimeout = 8000
         readTimeout = 8000
         setRequestProperty("Accept", "application/vnd.github+json")
         setRequestProperty("User-Agent", "MegaVaultProtect")
     }
-    val body = connection.inputStream.bufferedReader().use { it.readText() }
-    if (connection.responseCode != 200) return null
-    val json = JSONObject(body)
+    return runCatching {
+        val status = connection.responseCode
+        val body = if (status in 200..299) {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        }
+        body to status
+    }.getOrNull()
+}
+
+/** The installable APK inside one release, or null when it carries none. */
+private fun apkAsset(json: JSONObject): AppRelease? {
     val tag = json.optString("tag_name").removePrefix("v")
-    if (!isNewerVersion(tag, current)) return null
     val assets = json.optJSONArray("assets") ?: return null
     var url = ""
     var size = 0L
@@ -48,6 +60,70 @@ fun newerRelease(current: String): AppRelease? {
     }
     if (url.isEmpty()) return null
     return AppRelease(tag, url, size)
+}
+
+/**
+ * Picks the newest usable release out of either a single release object or a
+ * list. Drafts never count; a beta needs `includeBeta`, and a stable release
+ * always outranks a beta of the same numbers.
+ */
+fun selectRelease(body: String, current: String, includeBeta: Boolean): AppRelease? {
+    val trimmed = body.trimStart()
+    val releases = runCatching {
+        if (trimmed.startsWith("[")) {
+            val array = JSONArray(body)
+            (0 until array.length()).mapNotNull { array.optJSONObject(it) }
+        } else {
+            listOf(JSONObject(body))
+        }
+    }.getOrNull() ?: return null
+    var best: AppRelease? = null
+    for (json in releases) {
+        if (json.optBoolean("draft")) continue
+        val tag = json.optString("tag_name").removePrefix("v")
+        if (tag.isBlank()) continue
+        val beta = json.optBoolean("prerelease") || tag.contains("-beta.", ignoreCase = true)
+        if (beta && !includeBeta) continue
+        if (!isNewerVersion(tag, current)) continue
+        val candidate = apkAsset(json) ?: continue
+        // A package from anywhere but GitHub must never be offered.
+        val safe = runCatching {
+            val uri = URI(candidate.apkUrl)
+            uri.scheme == "https" &&
+                (uri.host == "github.com" || uri.host == "objects.githubusercontent.com")
+        }.getOrDefault(false)
+        if (!safe) continue
+        if (best == null || isNewerVersion(candidate.version, best.version)) best = candidate
+    }
+    return best
+}
+
+/** Null when this install is already the latest release, or GitHub cannot be reached. */
+fun newerRelease(current: String, includeBeta: Boolean = false): AppRelease? {
+    val (body, status) = fetchText(if (includeBeta) RELEASES_ALL else RELEASES) ?: return null
+    if (status !in 200..299) return null
+    return selectRelease(body, current, includeBeta)
+}
+
+/**
+ * The library's background check. Honours "check automatically" and only asks
+ * GitHub again after six hours on the same channel, unless [force] is set by
+ * the Settings screen's Check now.
+ */
+fun checkForUpdate(context: Context, force: Boolean = false): AppRelease? {
+    val beta = ThemePrefs.includeBeta(context)
+    if (!force) {
+        if (!ThemePrefs.checkAutomatically(context)) return null
+        val last = ThemePrefs.lastCheckMs(context)
+        val elapsed = System.currentTimeMillis() - last
+        if (last > 0L && elapsed in 0 until CHECK_INTERVAL_MS &&
+            ThemePrefs.lastCheckBeta(context) == beta
+        ) {
+            return null
+        }
+    }
+    ThemePrefs.recordCheck(context, beta, System.currentTimeMillis())
+    return newerRelease(installedVersion(context), beta)
 }
 
 fun isNewerVersion(latest: String, current: String): Boolean {

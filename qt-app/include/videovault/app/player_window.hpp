@@ -261,7 +261,8 @@ public:
         const std::shared_ptr<videovault::core::Vault>& vault,
         std::int64_t video_id,
         const QString& title,
-        QWidget* parent = nullptr);
+        QWidget* parent = nullptr,
+        bool stillImage = false);
     ~PlayerWindow() override;
     void playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
     // Same file, from the start, without opening it again.
@@ -297,6 +298,8 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    friend struct PlayerWindowTestAccess;
+    void resetPlayback(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id, bool startVideo);
     void workerLoop();
     void publishFrame(const QImage& image, std::int64_t pts_ms);
     void feedAudio();

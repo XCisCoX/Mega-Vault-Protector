@@ -1,0 +1,213 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --panel: #161b23;
+  --line: #252c37;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #5ac8a8;
+  --danger: #e1767f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { font-weight: 650; letter-spacing: .01em; }
+
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+}
+
+h1 { font-size: 22px; margin: 0 0 16px; }
+h2 { font-size: 16px; margin: 0 0 8px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.narrow { max-width: 420px; margin: 24px auto; }
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-top: 24px;
+}
+
+.headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 11px;
+  background: #0f141b;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+}
+
+input:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  padding: 9px 14px;
+  background: var(--accent);
+  color: #08211a;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.08); }
+
+button.link {
+  background: none;
+  color: var(--accent);
+  font-weight: 500;
+  padding: 4px 6px;
+}
+
+button.link.danger { color: var(--danger); }
+
+.inline {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.inline input { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+.inline button { flex: 0 0 auto; white-space: nowrap; }
+
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.grow { flex: 1; min-width: 0; }
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.list li:last-child { border-bottom: 0; }
+
+.list strong { display: block; font-weight: 600; }
+.list .small { display: block; }
+
+.meter {
+  height: 6px;
+  margin: 10px 0 18px;
+  background: #0f141b;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.meter span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width .3s ease;
+}
+
+.meter span.full { background: var(--danger); }
+
+.secret {
+  margin: 12px 0 0;
+  padding: 10px;
+  background: #0f141b;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+dl { margin: 12px 0; }
+dt { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+dd { margin: 4px 0 0; }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  background: #0f141b;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+  word-break: break-all;
+}
+
+.steps { margin: 8px 0 0; padding-left: 20px; color: var(--text); }
+.steps li { margin-bottom: 8px; }
+
+.tag {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: 90vw;
+  padding: 11px 16px;
+  background: #241a1c;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  color: var(--text);
+}
+
+[hidden] { display: none !important; }

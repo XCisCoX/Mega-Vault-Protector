@@ -30,6 +30,7 @@
         android:icon="@mipmap/icon"
         android:theme="@style/AppTheme"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/sync_data_extraction_rules"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="false">
 

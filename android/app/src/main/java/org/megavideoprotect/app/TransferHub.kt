@@ -233,7 +233,7 @@ fun TransferPage(onClose: () -> Unit) {
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black)
+                .background(Mvp.window)
                 .statusBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {

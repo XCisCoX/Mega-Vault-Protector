@@ -83,6 +83,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -147,7 +148,7 @@ object GalleryCache {
     // Toolbar state — deliberately *not* reset by clear(): which view you were
     // using is a preference, not vault data.
     var viewMode = 0
-    var filterTagId = 0L
+    var filterTagIds: Set<Long> = emptySet()
     var search = ""
     var sortKey by mutableStateOf(SortKey.Name)
     var sortAscending by mutableStateOf(true)
@@ -157,13 +158,19 @@ object GalleryCache {
     // Ids whose container probe failed. Without this, a duration sort scrolls
     // the row away, the lazy list recreates it, and the probe starts again.
     val probeMiss = HashSet<Long>()
-    // Scroll position per view mode. The gallery screen is torn down while the
-    // player is open, so a scroll state remembered inside it reset to the top:
-    // playing something from the middle of the list dropped you back to item 1.
-    val detailsScroll = androidx.compose.foundation.lazy.LazyListState()
-    val listScroll = androidx.compose.foundation.lazy.LazyListState()
-    val gridScroll = androidx.compose.foundation.lazy.grid.LazyGridState()
+    // Scroll position per folder *and* view mode. One state shared by every
+    // folder left the parent list wherever the child had been scrolled to, so
+    // going up never came back to the rows you left from.
+    private val listScrolls = HashMap<String, androidx.compose.foundation.lazy.LazyListState>()
+    private val gridScrolls = HashMap<String, androidx.compose.foundation.lazy.grid.LazyGridState>()
     private val thumbs = HashMap<String, android.graphics.Bitmap>()
+
+    /** The scroll state of one folder in one view; created on first use. */
+    fun listScroll(scope: String): androidx.compose.foundation.lazy.LazyListState =
+        listScrolls.getOrPut(scope) { androidx.compose.foundation.lazy.LazyListState() }
+
+    fun gridScroll(scope: String): androidx.compose.foundation.lazy.grid.LazyGridState =
+        gridScrolls.getOrPut(scope) { androidx.compose.foundation.lazy.grid.LazyGridState() }
 
     fun thumb(id: Long, size: Int): android.graphics.Bitmap? = thumbs["$id:$size"]
 
@@ -188,20 +195,27 @@ object GalleryCache {
         currentFolderId = 0L
         loaded = false
         thumbs.clear()
+        listScrolls.clear()
+        gridScrolls.clear()
         media.clear()
         probeMiss.clear()
         mediaVersion++
     }
 }
 
-enum class SortKey(val label: String) {
+/**
+ * Sort choices for the folder on screen. [firstAscending] is the direction the
+ * first tap means: "Newest" has to start at the newest file, not the oldest.
+ * [Newest] uses the import time — the vault keeps no modification time.
+ */
+enum class SortKey(val label: String, val firstAscending: Boolean = true) {
     Name("Name"),
+    Newest("Newest", firstAscending = false),
     Size("Size"),
     Duration("Duration"),
     Resolution("Resolution"),
     Codec("Codec"),
     Tags("Tags"),
-    Imported("Imported"),
 }
 
 private fun applySort(key: SortKey) {
@@ -209,7 +223,7 @@ private fun applySort(key: SortKey) {
         GalleryCache.sortAscending = !GalleryCache.sortAscending
     } else {
         GalleryCache.sortKey = key
-        GalleryCache.sortAscending = true
+        GalleryCache.sortAscending = key.firstAscending
     }
 }
 
@@ -315,6 +329,7 @@ fun VaultScreen(
     onPlay: (Long, String, List<VideoEntry>) -> Unit,
     onOpenMusic: () -> Unit = {},
     onOpenPeer: () -> Unit = {},
+    onOpenSync: () -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
@@ -336,7 +351,7 @@ fun VaultScreen(
     // Initialised from the cache so the chosen view / filter / query come back
     // exactly as they were when the player is dismissed.
     var viewMode by remember { mutableStateOf(GalleryCache.viewMode) }
-    var filterTagId by remember { mutableStateOf(GalleryCache.filterTagId) }
+    var filterTagIds by remember { mutableStateOf(GalleryCache.filterTagIds) }
     var search by remember { mutableStateOf(GalleryCache.search) }
     var error by remember { mutableStateOf<String?>(null) }
     // Long-press starts a selection; further taps add or remove items. Empty
@@ -712,14 +727,30 @@ fun VaultScreen(
 
     var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
     var updateProgress by remember { mutableStateOf<Float?>(null) }
+    var stagedUpdateApk by remember { mutableStateOf<File?>(null) }
     var packagePlan by remember { mutableStateOf<PackagePlan?>(null) }
     var armedPackage by remember { mutableStateOf<PackagePlan?>(null) }
     var packagePassword by remember { mutableStateOf("") }
     var packageCompress by remember { mutableStateOf(true) }
     var packageImportUri by remember { mutableStateOf<Uri?>(null) }
     LaunchedEffect(Unit) {
-        pendingRelease = withContext(Dispatchers.IO) {
-            runCatching { newerRelease(installedVersion(context)) }.getOrNull()
+        val release = withContext(Dispatchers.IO) {
+            runCatching { checkForUpdate(context) }.getOrNull()
+        }
+        pendingRelease = release
+        // "Download automatically" prepares the package quietly; installing
+        // still needs the phone's own installer confirmation, exactly like a
+        // manual update tap.
+        if (release != null && ThemePrefs.downloadAutomatically(context)) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val apk = File(context.cacheDir, "update-${release.version}.apk")
+                    if (!apk.isFile || apk.length() <= 0L) {
+                        downloadRelease(release, apk) { }
+                    }
+                    stagedUpdateApk = apk
+                }
+            }
         }
     }
     fun guardedPackage(): Boolean {
@@ -825,8 +856,15 @@ fun VaultScreen(
         scope.launch {
             val failure = withContext(Dispatchers.IO) {
                 try {
-                    val apk = File(context.cacheDir, "update.apk")
-                    downloadRelease(release, apk) { updateProgress = it }
+                    val staged = stagedUpdateApk
+                    val apk = if (staged != null && staged.isFile && staged.length() > 0L) {
+                        updateProgress = 0.99f
+                        staged
+                    } else {
+                        File(context.cacheDir, "update.apk").also {
+                            downloadRelease(release, it) { progress -> updateProgress = progress }
+                        }
+                    }
                     updateProgress = 1f
                     installRelease(context, apk)
                     null
@@ -906,12 +944,16 @@ fun VaultScreen(
     )
 
     var folderForward by remember { mutableStateOf(true) }
+    // Selection per folder, so stepping into a subfolder and pressing Back puts
+    // you back in front of the rows you had picked, not a blank toolbar.
+    val selectionByFolder = remember { mutableStateMapOf<Long, Set<Long>>() }
     fun openFolder(id: Long) {
         if (id == PEER_FOLDER_ID) {
             selectedIds = emptySet()
             if (PeerLink.linked()) onOpenPeer() else error = "The PC is no longer connected."
             return
         }
+        selectionByFolder[currentFolderId] = selectedIds
         val leaving = folders.firstOrNull { it.id == currentFolderId }
         folderForward = when {
             leaving?.parentId == id -> false
@@ -920,7 +962,24 @@ fun VaultScreen(
         }
         currentFolderId = id
         GalleryCache.currentFolderId = id
-        selectedIds = emptySet()
+        // Only rows that still live in the folder being opened can come back
+        // selected; anything moved or removed in the meantime drops out.
+        selectedIds = selectionByFolder[id].orEmpty()
+            .filterTo(HashSet()) { videoId -> videos.any { it.id == videoId && it.folderId == id } }
+    }
+
+    // Every change of the selection is remembered for the folder it was made
+    // in, so the map never holds a stale set for the folder on screen.
+    LaunchedEffect(selectedIds, currentFolderId) {
+        selectionByFolder[currentFolderId] = selectedIds
+    }
+
+    // Sorting reshuffles the rows under the tap targets. If a selection is
+    // live, it is dropped first — the list never reorders silently around a
+    // selection the user cannot see move.
+    fun chooseSort(key: SortKey) {
+        if (selectedIds.isNotEmpty()) selectedIds = emptySet()
+        applySort(key)
     }
 
     var showMusic by remember { mutableStateOf(false) }
@@ -954,7 +1013,13 @@ fun VaultScreen(
         }
     }
 
-    fun moveDragged(drag: VaultDrag, destination: Long) {
+    /**
+     * The one move path, used by the picker and by drag-and-drop. Files are
+     * content-addressed and stored once, so this is a database move — it never
+     * copies and can never duplicate bytes. Nothing is deleted: an item the core
+     * refuses stays where it was, stays selected, and is named in the message.
+     */
+    fun moveItems(videoIds: List<Long>, folderIds: List<Long>, destination: Long) {
         if (RemoteVault.connected()) {
             error = "This vault is open on your PC. Move it on the PC."
             return
@@ -963,34 +1028,68 @@ fun VaultScreen(
             error = "The PC's library is read-only. Open it to copy from it."
             return
         }
+        val drag = VaultDrag(videoIds.distinct(), folderIds.distinct())
+        // A folder can never be moved into itself or into one of its own
+        // subfolders. The picker greys those out; a drag is refused here.
+        val blocked = drag.folders.filter { id ->
+            id > 0L && (id == destination || folderContains(folders, id, destination))
+        }.toSet()
         val movingFolders = drag.folders.filter { id ->
-            id > 0L && (folders.firstOrNull { it.id == id }?.parentId ?: 0L) != destination
+            id > 0L && id !in blocked &&
+                (folders.firstOrNull { it.id == id }?.parentId ?: 0L) != destination
         }
         val movingVideos = drag.videos.filter { id ->
             videos.firstOrNull { it.id == id }?.folderId != destination
         }
-        if (movingFolders.isEmpty() && movingVideos.isEmpty()) return
+        if (movingFolders.isEmpty() && movingVideos.isEmpty()) {
+            // Nothing was written, so nothing is lost: explain the refusal and
+            // leave the selection exactly as it was.
+            error = dropRefusal(drag, destination) ?: "Nothing to move."
+            return
+        }
         scope.launch {
-            val problem = withContext(Dispatchers.Default) {
-                var message = ""
+            val failedVideos = ArrayList<Long>()
+            val failedFolders = ArrayList<Long>()
+            var failure = ""
+            withContext(Dispatchers.Default) {
                 for (folderId in movingFolders) {
-                    if (folderContains(folders, folderId, destination)) {
-                        message = "A folder can't be moved into itself."
-                        continue
+                    val result = runCatching {
+                        CoreBridge.Result.parse(CoreBridge.nativeMoveFolder(folderId, destination))
+                    }.getOrElse { CoreBridge.Result(false, "Move failed", it.message ?: "") }
+                    if (!result.ok) {
+                        failedFolders.add(folderId)
+                        if (failure.isEmpty()) failure = result.detail.ifBlank { result.error }
                     }
-                    val result = CoreBridge.Result.parse(CoreBridge.nativeMoveFolder(folderId, destination))
-                    if (!result.ok) message = result.detail.ifBlank { result.error }
                 }
                 for (videoId in movingVideos) {
-                    val result = CoreBridge.Result.parse(CoreBridge.nativeMoveVideo(videoId, destination))
-                    if (!result.ok) message = result.detail.ifBlank { result.error }
+                    val result = runCatching {
+                        CoreBridge.Result.parse(CoreBridge.nativeMoveVideo(videoId, destination))
+                    }.getOrElse { CoreBridge.Result(false, "Move failed", it.message ?: "") }
+                    if (!result.ok) {
+                        failedVideos.add(videoId)
+                        if (failure.isEmpty()) failure = result.detail.ifBlank { result.error }
+                    }
                 }
-                message
             }
-            if (problem.isNotEmpty()) error = problem
-            selectedIds = emptySet()
+            // Everything that moved leaves the selection; whatever the core
+            // refused stays selected so the next action still points at it.
+            selectedIds = failedVideos.toSet()
+            if (failedVideos.isNotEmpty() || failedFolders.isNotEmpty()) {
+                val names = failedVideos.map { id -> videos.firstOrNull { it.id == id }?.name ?: "#$id" } +
+                    failedFolders.map { id -> folders.firstOrNull { it.id == id }?.name ?: "#$id" }
+                val listed = if (names.size <= 3) {
+                    names.joinToString(", ")
+                } else {
+                    names.take(3).joinToString(", ") + " and ${names.size - 3} more"
+                }
+                error = "Could not move $listed" + if (failure.isNotBlank()) ": $failure" else ""
+            }
             refresh()
         }
+    }
+
+    fun moveDragged(drag: VaultDrag, destination: Long) {
+        moveItems(drag.videos, drag.folders, destination)
     }
 
     fun handleDrop(event: DragAndDropEvent, destination: Long): Boolean {
@@ -1029,6 +1128,11 @@ fun VaultScreen(
         vaultDragData(VaultDrag(ids, emptyList()))
     }
     val dropHere: (DragAndDropEvent) -> Boolean = { handleDrop(it, currentFolderId) }
+    // The reason a row under the drag cannot take it, so the row can paint the
+    // refusal while the finger is still down.
+    val refusalOn: (DragAndDropEvent, Long) -> String? = { event, destination ->
+        dragPayload(event)?.let { dropRefusal(it, destination) }
+    }
 
     if (scanningPc) {
         QrScanScreen(
@@ -1044,7 +1148,7 @@ fun VaultScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Mvp.window),
     ) {
         if (showTransfers) {
             TransferPage(onClose = { showTransfers = false })
@@ -1064,10 +1168,13 @@ fun VaultScreen(
 
         val searching = search.isNotBlank()
         val scope = if (searching) folderSubtree(folders, currentFolderId) else emptySet()
+        // Any selected tag is enough: the filter narrows, it never demands all.
+        val filterNames = tags.filter { it.id in filterTagIds }
+            .map { it.name.lowercase() }
         val filtered = videos.filter { v ->
             val here = if (searching) v.folderId in scope else v.folderId == currentFolderId
             here &&
-                (filterTagId == 0L || v.tags.any { t -> tags.firstOrNull { it.id == filterTagId }?.name?.equals(t, true) == true }) &&
+                (filterNames.isEmpty() || v.tags.any { it.lowercase() in filterNames }) &&
                 (!searching || v.name.contains(search, ignoreCase = true))
         }
         val childFolders = folders.filter { folder ->
@@ -1127,6 +1234,9 @@ fun VaultScreen(
                 return@LaunchedEffect
             }
             if (sortEpoch == mediaVersion) return@LaunchedEffect
+            // A probe landing must not reshuffle rows under a live selection:
+            // the tick and the tap target have to stay on the same row.
+            if (selectedIds.isNotEmpty()) return@LaunchedEffect
             delay(450)
             sortEpoch = GalleryCache.mediaVersion
         }
@@ -1172,7 +1282,7 @@ fun VaultScreen(
                     }
                     SortKey.Tags ->
                         directed(a.tags.joinToString(",").compareTo(b.tags.joinToString(","), ignoreCase = true))
-                    SortKey.Imported -> directed(a.importedAt.compareTo(b.importedAt))
+                    SortKey.Newest -> directed(a.importedAt.compareTo(b.importedAt))
                 }
                 if (primary != 0) primary else a.name.compareTo(b.name, ignoreCase = true)
             }
@@ -1274,18 +1384,21 @@ fun VaultScreen(
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
+                    currentFolderId.toString(), { chooseSort(it) }, refusalOn,
                 )
                 1 -> IconGridView(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
+                    currentFolderId.toString(), { chooseSort(it) }, refusalOn,
                 )
                 else -> ListView(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
+                    currentFolderId.toString(), { chooseSort(it) }, refusalOn,
                 )
             }
         }
@@ -1301,7 +1414,7 @@ fun VaultScreen(
             GalleryHeader(
                 viewMode = viewMode,
                 tags = tags,
-                filterTagId = filterTagId,
+                filterTagIds = filterTagIds,
                 search = search,
                 selectionTitle = when (selectedIds.size) {
                     0 -> null
@@ -1313,9 +1426,13 @@ fun VaultScreen(
                     viewMode = mode
                     GalleryCache.viewMode = mode
                 },
-                onFilterTag = { id ->
-                    filterTagId = id
-                    GalleryCache.filterTagId = id
+                onToggleTag = { id ->
+                    filterTagIds = if (id in filterTagIds) filterTagIds - id else filterTagIds + id
+                    GalleryCache.filterTagIds = filterTagIds
+                },
+                onClearTags = {
+                    filterTagIds = emptySet()
+                    GalleryCache.filterTagIds = emptySet()
                 },
                 onSearch = { text ->
                     search = text
@@ -1344,7 +1461,7 @@ fun VaultScreen(
                     if (RemoteVault.connected()) {
                         error = "This vault is open on your PC. Move it on the PC."
                     } else {
-                        moveTarget = MoveRequest.Videos(selectedIds.toList())
+                        moveTarget = MoveRequest(videos = selectedIds.toList())
                     }
                 },
                 onRemove = { confirmRemove = true },
@@ -1566,7 +1683,7 @@ fun VaultScreen(
                         if (RemoteVault.connected()) {
                             actionMessage = "This vault is open on your PC. Move it on the PC."
                         } else {
-                            moveTarget = MoveRequest.Videos(listOf(target.id))
+                            moveTarget = MoveRequest(videos = listOf(target.id))
                             actionTarget = null
                         }
                     },
@@ -1636,7 +1753,7 @@ fun VaultScreen(
                 MvpButton("Move to…", onClick = {
                     folderMenu = null
                     if (RemoteVault.connected()) error = "This vault is open on your PC. Move the folder on the PC."
-                    else moveTarget = MoveRequest.Folder(folder.id)
+                    else moveTarget = MoveRequest(folders = listOf(folder.id))
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton("Remove folder", onClick = {
                     folderMenu = null
@@ -1732,6 +1849,10 @@ fun VaultScreen(
                 MvpButton("New folder", onClick = {
                     showAdd = false
                     namePrompt = NamePrompt.NewFolder(currentFolderId)
+                }, modifier = Modifier.fillMaxWidth())
+                if (!RemoteVault.connected()) MvpButton("Encrypted sync…", onClick = {
+                    showAdd = false
+                    onOpenSync()
                 }, modifier = Modifier.fillMaxWidth())
                 MvpButton(if (pcName == null) "Swap with PC" else "Open PC · $pcName", onClick = {
                     showAdd = false
@@ -1880,56 +2001,65 @@ fun VaultScreen(
     }
 
     moveTarget?.let { request ->
-        val blocked = when (request) {
-            is MoveRequest.Folder -> folderSubtree(folders, request.id)
-            is MoveRequest.Videos -> emptySet()
-        }
-        val choices = ArrayList<Pair<Long, String>>()
-        if (0L !in blocked) choices.add(0L to "Library")
-        folders.filter { it.id !in blocked }.sortedBy { it.name.lowercase() }.forEach { folder ->
-            choices.add(folder.id to folderPath(folders, folder.id))
+        val choices = remember(request, folders, currentFolderId) {
+            moveChoices(folders, currentFolderId, request.folders)
         }
         Dialog(onDismissRequest = { moveTarget = null }) {
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Move to")
+                MvpDescription(
+                    when {
+                        request.count == 1 && request.folders.isNotEmpty() -> "Pick where this folder should live. Library is the vault root."
+                        request.count == 1 -> "Pick a folder for this item. Library is the vault root."
+                        else -> "Pick a folder for these ${request.count} items. Library is the vault root."
+                    },
+                )
                 Column(
-                    Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 340.dp)
+                        .verticalScroll(rememberScrollState()),
                 ) {
-                    choices.forEach { (id, label) ->
-                        Text(
-                            label,
-                            color = Mvp.text,
-                            fontSize = 15.sp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    val chosen = id
-                                    val moving = request
-                                    moveTarget = null
-                                    scope.launch {
-                                        val result = withContext(Dispatchers.Default) {
-                                            when (moving) {
-                                                is MoveRequest.Folder ->
-                                                    CoreBridge.Result.parse(CoreBridge.nativeMoveFolder(moving.id, chosen))
-                                                is MoveRequest.Videos -> {
-                                                    var last = CoreBridge.Result(true, "", "")
-                                                    for (videoId in moving.ids) {
-                                                        last = CoreBridge.Result.parse(CoreBridge.nativeMoveVideo(videoId, chosen))
-                                                        if (!last.ok) break
-                                                    }
-                                                    last
-                                                }
-                                            }
-                                        }
-                                        if (!result.ok) error = result.detail.ifBlank { result.error }
-                                        else refresh()
-                                    }
-                                }
-                                .padding(vertical = 10.dp),
-                        )
+                    choices.forEach { choice ->
+                        MoveChoiceRow(choice) {
+                            val chosen = choice.id
+                            val moving = request
+                            moveTarget = null
+                            moveItems(moving.videos, moving.folders, chosen)
+                        }
                     }
                 }
+                MvpDescription("Greyed rows can't take them — the reason is under the name.")
                 MvpButton("Cancel", onClick = { moveTarget = null }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+/** One folder in the "Move to" picker: indented by its depth in the tree. */
+@Composable
+private fun MoveChoiceRow(choice: MoveChoice, onPick: () -> Unit) {
+    val enabled = !choice.refused
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled, onClick = onPick)
+            .padding(start = (6 + choice.depth * 16).dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FolderGlyph(Modifier.size(if (choice.depth == 0) 22.dp else 18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                choice.label,
+                color = if (enabled) Mvp.text else Mvp.placeholder,
+                fontSize = 15.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            choice.reason?.let { reason ->
+                Text(reason, color = Mvp.errorText, fontSize = 11.sp)
             }
         }
     }
@@ -1969,7 +2099,7 @@ private fun MusicLibrary(
     Column(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Mvp.window)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
@@ -2086,12 +2216,13 @@ private fun MusicLibrary(
 private fun GalleryHeader(
     viewMode: Int,
     tags: List<TagEntry>,
-    filterTagId: Long,
+    filterTagIds: Set<Long>,
     search: String,
     selectionTitle: String?,
     actionsEnabled: Boolean,
     onViewMode: (Int) -> Unit,
-    onFilterTag: (Long) -> Unit,
+    onToggleTag: (Long) -> Unit,
+    onClearTags: () -> Unit,
     onSearch: (String) -> Unit,
     onMusic: () -> Unit,
     onUpdate: () -> Unit,
@@ -2232,7 +2363,7 @@ private fun GalleryHeader(
                 ViewModeButton(R.drawable.msg_list, "List", viewMode == 2) { onViewMode(2) }
             }
             if (tags.isNotEmpty()) {
-                TagFilterButton(tags, filterTagId, onFilterTag)
+                TagFilterButton(tags, filterTagIds, onToggleTag, onClearTags)
             }
         }
         }
@@ -2276,34 +2407,121 @@ private fun ViewModeButton(
 @Composable
 private fun TagFilterButton(
     tags: List<TagEntry>,
-    filterTagId: Long,
-    onFilterTag: (Long) -> Unit,
+    selected: Set<Long>,
+    onToggle: (Long) -> Unit,
+    onClear: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
     Box {
-        ViewModeButton(R.drawable.menu_tag_filter, "Tags", filterTagId != 0L) { open = true }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        "All",
-                        color = if (filterTagId == 0L) Mvp.accent else Mvp.text,
-                        fontSize = 14.sp,
-                    )
-                },
-                onClick = { open = false; onFilterTag(0L) },
-            )
-            tags.forEach { tag ->
-                DropdownMenuItem(
-                    text = {
+        ViewModeButton(R.drawable.menu_tag_filter, "Filter by tags", selected.isNotEmpty()) { open = true }
+        if (open) {
+            Dialog(onDismissRequest = { open = false }) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Mvp.card)
+                        .border(1.dp, Mvp.cardBorder, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tags", color = Mvp.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
                         Text(
-                            tag.name,
-                            color = if (filterTagId == tag.id) Mvp.accent else Mvp.text,
-                            fontSize = 14.sp,
+                            "Clear",
+                            color = if (selected.isEmpty()) Mvp.placeholder else Mvp.accent,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = selected.isNotEmpty()) { onClear() }
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
                         )
-                    },
-                    onClick = { open = false; onFilterTag(tag.id) },
-                )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Mvp.text, fontSize = 15.sp),
+                        cursorBrush = SolidColor(Mvp.accent),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Mvp.inputBg)
+                            .border(1.dp, Mvp.inputBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (query.isEmpty()) {
+                                    Text("Search tags…", color = Mvp.placeholder, fontSize = 15.sp)
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    val shown = tags.filter {
+                        query.isBlank() || it.name.contains(query.trim(), ignoreCase = true)
+                    }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        if (shown.isEmpty()) {
+                            Text(
+                                if (tags.isEmpty()) "No tags yet" else "No matching tags",
+                                color = Mvp.description,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
+                            )
+                        }
+                        shown.forEach { tag ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onToggle(tag.id) }
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    tag.name,
+                                    color = Mvp.text,
+                                    fontSize = 15.sp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text("${tag.videoCount}", color = Mvp.description, fontSize = 13.sp)
+                                Spacer(Modifier.width(10.dp))
+                                if (tag.id in selected) {
+                                    Icon(
+                                        painterResource(R.drawable.msg_check_s),
+                                        contentDescription = "Selected",
+                                        tint = Mvp.accent,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                } else {
+                                    Box(
+                                        Modifier
+                                            .size(18.dp)
+                                            .clip(CircleShape)
+                                            .border(1.dp, Mvp.placeholder, CircleShape),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        if (selected.isEmpty()) "No selection shows everything."
+                        else "${selected.size} tag${if (selected.size == 1) "" else "s"} selected — items with any of them are shown.",
+                        color = Mvp.description,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+                    )
+                }
             }
         }
     }
@@ -2358,9 +2576,86 @@ private sealed class NamePrompt(val title: String, val initial: String) {
     class RenameVideo(val id: Long, name: String) : NamePrompt("Rename", name)
 }
 
-private sealed class MoveRequest {
-    class Videos(val ids: List<Long>) : MoveRequest()
-    class Folder(val id: Long) : MoveRequest()
+/**
+ * What the "Move to…" picker is about to place in a folder. Both kinds are
+ * carried because a folder row and a file selection use the same picker.
+ */
+private data class MoveRequest(val videos: List<Long> = emptyList(), val folders: List<Long> = emptyList()) {
+    val count: Int get() = videos.size + folders.size
+}
+
+/** One row of the picker: a folder in the tree, indented by [depth]. */
+private data class MoveChoice(val id: Long, val label: String, val depth: Int, val reason: String?) {
+    val refused: Boolean get() = reason != null
+}
+
+/**
+ * The whole vault tree, depth first from the library root, with the reason each
+ * row cannot take the items. Refused rows stay in the list on purpose: a folder
+ * that simply vanished from the picker explains nothing, a row that says "this
+ * is the current folder" does.
+ */
+private fun moveChoices(
+    folders: List<FolderEntry>,
+    currentFolderId: Long,
+    moving: List<Long>,
+): List<MoveChoice> {
+    val blocked = HashSet<Long>()
+    for (id in moving) if (id > 0L) blocked.addAll(folderSubtree(folders, id))
+    val children = folders.groupBy { it.parentId }
+    fun reasonFor(id: Long): String? = when {
+        id in blocked && id in moving -> "This is the folder being moved."
+        id in blocked -> "Inside a folder being moved."
+        id == currentFolderId -> "This is the current folder."
+        else -> null
+    }
+    val out = ArrayList<MoveChoice>()
+    out.add(MoveChoice(0L, "Library", 0, reasonFor(0L)))
+    val seen = HashSet<Long>()
+    fun walk(parent: Long, depth: Int) {
+        if (depth > 32) return
+        children[parent].orEmpty().sortedBy { it.name.lowercase() }.forEach { folder ->
+            if (!seen.add(folder.id)) return@forEach
+            out.add(MoveChoice(folder.id, folder.name, depth, reasonFor(folder.id)))
+            walk(folder.id, depth + 1)
+        }
+    }
+    walk(0L, 1)
+    return out
+}
+
+/** The payload of an in-flight drag, from this app or from another one. */
+private fun dragPayload(event: DragAndDropEvent): VaultDrag? {
+    val drag = event.toAndroidDragEvent()
+    (drag.localState as? VaultDrag)?.let { return it }
+    val clip = drag.clipData ?: return null
+    for (index in 0 until clip.itemCount) {
+        val text = clip.getItemAt(index).text?.toString() ?: continue
+        parseVaultDrag(text)?.let { return it }
+    }
+    return null
+}
+
+/**
+ * Why a drop on [destination] cannot happen, or null when it can. The folder
+ * row highlight and the message after the drop both come from here, so what the
+ * row promises and what the drop does cannot disagree.
+ */
+private fun dropRefusal(drag: VaultDrag, destination: Long): String? {
+    if (destination == PEER_FOLDER_ID) return "The PC's library is read-only."
+    val allFolders = GalleryCache.folders
+    for (id in drag.folders) {
+        if (id <= 0L) continue
+        if (id == destination) return "A folder can't be moved into itself."
+        if (folderContains(allFolders, id, destination)) return "A folder can't be moved into its own subfolder."
+    }
+    val total = drag.videos.size + drag.folders.size
+    if (total == 0) return null
+    val allVideos = GalleryCache.videos
+    val here = drag.videos.count { id -> allVideos.firstOrNull { it.id == id }?.folderId == destination } +
+        drag.folders.count { id -> allFolders.firstOrNull { it.id == id }?.parentId == destination }
+    if (here == total) return "Already in this folder."
+    return null
 }
 
 private fun folderContains(folders: List<FolderEntry>, ancestor: Long, node: Long): Boolean {
@@ -2470,6 +2765,44 @@ private fun Modifier.vaultDropTarget(
 )
 
 /**
+ * A folder row's own drop target. The hint belongs to the row so it can paint
+ * the drag that is over it: blue when the drop will land, red with the reason
+ * when it is refused — the same reason the message gives after the drop.
+ */
+private class DropHint {
+    var hot by mutableStateOf(false)
+    var reason by mutableStateOf<String?>(null)
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.folderDropTarget(
+    hint: DropHint,
+    refusal: (DragAndDropEvent) -> String?,
+    onDrop: (DragAndDropEvent) -> Boolean,
+): Modifier = this.dragAndDropTarget(
+    shouldStartDragAndDrop = ::acceptsVaultDrop,
+    target = object : DragAndDropTarget {
+        private fun clear() {
+            hint.hot = false
+            hint.reason = null
+        }
+
+        override fun onEntered(event: DragAndDropEvent) {
+            hint.hot = true
+            hint.reason = refusal(event)
+        }
+
+        override fun onExited(event: DragAndDropEvent) { clear() }
+        override fun onEnded(event: DragAndDropEvent) { clear() }
+
+        override fun onDrop(event: DragAndDropEvent): Boolean {
+            clear()
+            return onDrop(event)
+        }
+    },
+)
+
+/**
  * Tap opens. A long press that lifts without moving is the item menu or
  * selection. A long press that then moves starts a drag, the same split a
  * file manager uses so the list can still scroll before the long press.
@@ -2538,11 +2871,41 @@ private fun FolderBar(
         crumb.add(0, folder)
         cursor = folder.parentId
     }
+    val upId = if (currentFolderId == 0L) {
+        null
+    } else {
+        crumb.lastOrNull()?.parentId ?: 0L
+    }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Back goes up a folder, but a phone has no address bar: keep an
+        // explicit target on screen for the level above.
+        if (upId != null) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Mvp.glass)
+                    .clickable { onOpen(upId) }
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_ab_back),
+                    contentDescription = "Up",
+                    tint = Mvp.accent,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text("Up", color = Mvp.accent, fontSize = 13.sp)
+            }
+            Text("/", color = Mvp.description, fontSize = 13.sp)
+        }
         Crumb("Library", current = currentFolderId == 0L, onClick = { onOpen(0L) }, onDrop = { onDrop(it, 0L) })
         crumb.forEach { folder ->
             Text("/", color = Mvp.description, fontSize = 13.sp)
@@ -2593,10 +2956,11 @@ private fun folderModifier(
     onClick: () -> Unit,
     onLongPress: (() -> Unit)?,
     transfer: (() -> DragAndDropTransferData)?,
+    hint: DropHint,
+    refusal: (DragAndDropEvent) -> String?,
     onDrop: (DragAndDropEvent) -> Boolean,
-    onHot: (Boolean) -> Unit,
 ): Modifier {
-    val base = Modifier.vaultDropTarget(onActive = onHot, onDrop = onDrop)
+    val base = Modifier.folderDropTarget(hint, refusal, onDrop)
     return if (transfer != null && onLongPress != null) {
         base.explorerItem(onClick = onClick, onLongPress = onLongPress, transfer = transfer)
     } else {
@@ -2613,10 +2977,16 @@ private fun FolderDetailRow(
     onDrop: (DragAndDropEvent) -> Boolean,
     onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    refusal: (DragAndDropEvent) -> String? = { null },
 ) {
-    var hot by remember { mutableStateOf(false) }
+    val hint = remember { DropHint() }
+    val refused = hint.reason
     val rowColor by animateColorAsState(
-        if (hot) Mvp.accent.copy(alpha = 0.35f) else Mvp.inputBg,
+        when {
+            refused != null -> Mvp.errorBg
+            hint.hot -> Mvp.accent.copy(alpha = 0.35f)
+            else -> Mvp.inputBg
+        },
         tween(160),
         label = "folderRow",
     )
@@ -2624,7 +2994,7 @@ private fun FolderDetailRow(
         modifier
             .fillMaxWidth()
             .background(rowColor)
-            .then(folderModifier(onClick, onLongPress, transfer, onDrop) { hot = it })
+            .then(folderModifier(onClick, onLongPress, transfer, hint, refusal, onDrop))
             .padding(horizontal = 10.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2632,7 +3002,13 @@ private fun FolderDetailRow(
         FolderGlyph(Modifier.size(44.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(name, color = Mvp.text, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(meta, color = Mvp.description, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                refused ?: meta,
+                color = if (refused != null) Mvp.errorText else Mvp.description,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         if (onLongPress != null) {
             RowActions(onLongPress)
@@ -2649,20 +3025,37 @@ private fun FolderListRow(
     onDrop: (DragAndDropEvent) -> Boolean,
     onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    refusal: (DragAndDropEvent) -> String? = { null },
 ) {
-    var hot by remember { mutableStateOf(false) }
+    val hint = remember { DropHint() }
+    val refused = hint.reason
+    val rowColor by animateColorAsState(
+        when {
+            refused != null -> Mvp.errorBg
+            hint.hot -> Mvp.accent.copy(alpha = 0.35f)
+            else -> Mvp.inputBg
+        },
+        tween(160),
+        label = "folderListRow",
+    )
     Row(
         modifier
             .fillMaxWidth()
-            .background(if (hot) Mvp.accent.copy(alpha = 0.35f) else Mvp.inputBg)
-            .then(folderModifier(onClick, onLongPress, transfer, onDrop) { hot = it })
+            .background(rowColor)
+            .then(folderModifier(onClick, onLongPress, transfer, hint, refusal, onDrop))
             .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FolderGlyph(Modifier.size(36.dp))
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(meta, color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                refused ?: meta,
+                color = if (refused != null) Mvp.errorText else Mvp.description,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         if (onLongPress != null) {
             RowActions(onLongPress)
@@ -2679,14 +3072,29 @@ private fun FolderTile(
     onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     place: String = "",
+    refusal: (DragAndDropEvent) -> String? = { null },
 ) {
-    var hot by remember { mutableStateOf(false) }
+    val hint = remember { DropHint() }
+    val refused = hint.reason
     Box(
         modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .background(if (hot) Mvp.accent.copy(alpha = 0.35f) else Color(0xFF161618))
-            .then(folderModifier(onClick, onLongPress, transfer, onDrop) { hot = it }),
+            .background(
+                when {
+                    refused != null -> Mvp.errorBg
+                    hint.hot -> Mvp.accent.copy(alpha = 0.35f)
+                    else -> Color(0xFF161618)
+                },
+            )
+            .then(
+                if (refused != null) {
+                    Modifier.border(2.dp, Mvp.errorText, RoundedCornerShape(2.dp))
+                } else {
+                    Modifier
+                },
+            )
+            .then(folderModifier(onClick, onLongPress, transfer, hint, refusal, onDrop)),
     ) {
         FolderGlyph(Modifier.align(Alignment.Center).fillMaxSize().padding(18.dp))
         Column(
@@ -2732,8 +3140,28 @@ private fun FolderTile(
                 )
             }
         }
-        if (hot) {
-            Box(Modifier.fillMaxSize().background(Mvp.accent.copy(alpha = 0.35f)))
+        if (hint.hot) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        if (refused != null) Color.Transparent else Mvp.accent.copy(alpha = 0.35f),
+                    ),
+            )
+        }
+        refused?.let { reason ->
+            Text(
+                reason,
+                color = Mvp.errorText,
+                fontSize = 10.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .background(Mvp.errorBg.copy(alpha = 0.94f))
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+            )
         }
     }
 }
@@ -3059,7 +3487,7 @@ private fun detailLine(vararg parts: String?): String =
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DetailSortBar() {
+private fun DetailSortBar(onSort: (SortKey) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -3069,6 +3497,8 @@ private fun DetailSortBar() {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // The tap target is the chip; the label says what the row of chips is.
+        Text("Sort", color = Mvp.description, fontSize = 12.sp, modifier = Modifier.padding(start = 2.dp))
         SortKey.entries.forEach { key ->
             val active = GalleryCache.sortKey == key
             val mark = if (!active) "" else if (GalleryCache.sortAscending) " ↑" else " ↓"
@@ -3086,7 +3516,7 @@ private fun DetailSortBar() {
                 modifier = Modifier
                     .clip(RoundedCornerShape(14.dp))
                     .background(fill)
-                    .clickable { applySort(key) }
+                    .clickable { onSort(key) }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
@@ -3111,16 +3541,22 @@ private fun DetailsView(
     dragOf: (VideoEntry) -> DragAndDropTransferData,
     videoPlace: Map<Long, String> = emptyMap(),
     folderPlace: Map<Long, String> = emptyMap(),
+    scrollKey: String = "0",
+    onSort: (SortKey) -> Unit = {},
+    dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
 ) {
     LazyColumn(
-        state = GalleryCache.detailsScroll,
+        state = GalleryCache.listScroll("details:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
-        stickyHeader { DetailSortBar() }
+        stickyHeader { DetailSortBar(onSort) }
         if (upParentId != null) {
             item(key = "up") {
-                FolderDetailRow("..", "Up", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) })
+                FolderDetailRow(
+                    "..", "Up", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) },
+                    refusal = { event -> dropRefusalOn(event, upParentId) },
+                )
             }
         }
         items(folders, key = { "f${it.id}" }) { folder ->
@@ -3133,6 +3569,7 @@ private fun DetailsView(
                 { onDropOn(it, folder.id) },
                 { onFolderMenu(folder) },
                 Modifier.animateItem(),
+                refusal = { event -> dropRefusalOn(event, folder.id) },
             )
         }
         itemsIndexed(videos, key = { _, v -> "${GalleryCache.generation}:${v.id}" }) { index, v ->
@@ -3226,19 +3663,25 @@ private fun IconGridView(
     dragOf: (VideoEntry) -> DragAndDropTransferData,
     videoPlace: Map<Long, String> = emptyMap(),
     folderPlace: Map<Long, String> = emptyMap(),
+    scrollKey: String = "0",
+    onSort: (SortKey) -> Unit = {},
+    dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
-        state = GalleryCache.gridScroll,
+        state = GalleryCache.gridScroll("icons:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
         horizontalArrangement = Arrangement.spacedBy(1.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        item(span = { GridItemSpan(3) }) { ListSortBar() }
+        item(span = { GridItemSpan(3) }) { ListSortBar(onSort) }
         if (upParentId != null) {
             item(key = "up") {
-                FolderTile("..", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) })
+                FolderTile(
+                    "..", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) },
+                    refusal = { event -> dropRefusalOn(event, upParentId) },
+                )
             }
         }
         items(folders, key = { "f${it.id}" }) { folder ->
@@ -3250,6 +3693,7 @@ private fun IconGridView(
                 { onFolderMenu(folder) },
                 Modifier.animateItem(),
                 folderPlace[folder.id].orEmpty(),
+                refusal = { event -> dropRefusalOn(event, folder.id) },
             )
         }
         items(videos, key = { "${GalleryCache.generation}:${it.id}" }) { v ->
@@ -3438,16 +3882,22 @@ private fun ListView(
     dragOf: (VideoEntry) -> DragAndDropTransferData,
     videoPlace: Map<Long, String> = emptyMap(),
     folderPlace: Map<Long, String> = emptyMap(),
+    scrollKey: String = "0",
+    onSort: (SortKey) -> Unit = {},
+    dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
 ) {
     LazyColumn(
-        state = GalleryCache.listScroll,
+        state = GalleryCache.listScroll("list:$scrollKey"),
         contentPadding = padding,
-        modifier = Modifier.fillMaxSize().background(Color.Black).vaultDropTarget(onActive = {}, onDrop = onDrop),
+        modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
-        item { ListSortBar() }
+        item { ListSortBar(onSort) }
         if (upParentId != null) {
             item(key = "up") {
-                FolderListRow("..", "Up", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) })
+                FolderListRow(
+                    "..", "Up", { onOpenFolder(upParentId) }, null, { onDropOn(it, upParentId) },
+                    refusal = { event -> dropRefusalOn(event, upParentId) },
+                )
             }
         }
         items(folders, key = { "f${it.id}" }) { folder ->
@@ -3460,6 +3910,7 @@ private fun ListView(
                 { onDropOn(it, folder.id) },
                 { onFolderMenu(folder) },
                 Modifier.animateItem(),
+                refusal = { event -> dropRefusalOn(event, folder.id) },
             )
         }
         items(videos, key = { "${GalleryCache.generation}:${it.id}" }) { v ->
@@ -3503,7 +3954,7 @@ private fun ListView(
 }
 
 @Composable
-private fun ListSortBar() {
+private fun ListSortBar(onSort: (SortKey) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val key = GalleryCache.sortKey
     val arrow = if (GalleryCache.sortAscending) "↑" else "↓"
@@ -3538,7 +3989,7 @@ private fun ListSortBar() {
                     },
                     onClick = {
                         open = false
-                        applySort(item)
+                        onSort(item)
                     },
                 )
             }

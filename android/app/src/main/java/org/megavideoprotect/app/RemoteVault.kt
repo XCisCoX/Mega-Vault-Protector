@@ -43,8 +43,7 @@ object RemoteVault {
 
     @Volatile private var sslFactory: SSLSocketFactory? = null
     @Volatile private var hostVerifier: HostnameVerifier? = null
-    private var savedFactory: SSLSocketFactory? = null
-    private var savedVerifier: HostnameVerifier? = null
+
 
     fun connected(): Boolean = !baseUrl.isNullOrBlank() && !token.isNullOrBlank()
 
@@ -74,10 +73,7 @@ object RemoteVault {
         cloudKind = ""
         sslFactory = null
         hostVerifier = null
-        savedFactory?.let { HttpsURLConnection.setDefaultSSLSocketFactory(it) }
-        savedVerifier?.let { HttpsURLConnection.setDefaultHostnameVerifier(it) }
-        savedFactory = null
-        savedVerifier = null
+
     }
 
     /**
@@ -130,12 +126,8 @@ object RemoteVault {
                     } else {
                         sslFactory = factory
                         hostVerifier = verifier
-                        if (savedFactory == null) {
-                            savedFactory = HttpsURLConnection.getDefaultSSLSocketFactory()
-                            savedVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
-                        }
-                        HttpsURLConnection.setDefaultSSLSocketFactory(factory)
-                        HttpsURLConnection.setDefaultHostnameVerifier(verifier)
+                        // PC trust is scoped to PC connections (applySecurity/get/login).
+                        // Never change process defaults: sync v2 and updates require normal CA/hostname checks.
                         baseUrl = base
                         token = session
                         cloud = cloudKind == "phone" || cloudKind == "pc"

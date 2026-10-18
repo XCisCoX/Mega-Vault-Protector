@@ -182,7 +182,7 @@ fun PeerScreen(onClose: () -> Unit) {
     val childFiles = files.filter { it.folderId == current }.sortedBy { it.name.lowercase() }
     val upParent = if (current == 0L) null else folders.firstOrNull { it.id == current }?.parentId ?: 0L
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Mvp.window)) {
         Column(Modifier.fillMaxSize()) {
             Column(
                 Modifier
@@ -355,7 +355,7 @@ private fun PeerCrumbs(pc: String, folders: List<FolderEntry>, current: Long, en
 private fun PeerCrumb(text: String, current: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Text(
         text,
-        color = if (current) Color.White else Mvp.accent,
+        color = if (current) Mvp.title else Mvp.accent,
         fontSize = 13.sp,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
