@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the MegaVault sync server on a fresh Debian/Ubuntu or RHEL-family host.
 #
-#   ./install.sh --domain sync.example.com [--email you@example.com]
+#   ./install.sh --domain sync.example.com [--alias old.example.com] [--email you@example.com]
 #
 # What it does, in order: checks the Python version, creates a `megavault`
 # system user, copies this folder to /opt/megavault-sync, keeps its data in
@@ -14,6 +14,7 @@
 set -eu
 
 DOMAIN=""
+ALIASES=""   # extra names served by the same certificate and site block
 EMAIL=""
 SOURCE="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SERVICE_USER=megavault
@@ -29,6 +30,7 @@ usage() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --domain) DOMAIN=${2:?--domain needs a value}; shift 2 ;;
+        --alias)  ALIASES="$ALIASES ${2:?--alias needs a value}"; shift 2 ;;
         --email)  EMAIL=${2:?--email needs a value}; shift 2 ;;
         --source) SOURCE=${2:?--source needs a value}; shift 2 ;;
         --port)   PORT=${2:?--port needs a value}; shift 2 ;;
@@ -113,6 +115,14 @@ SystemCallErrorNumber=EPERM
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
+# One word for the CLI. `python -m sync_server` needs the package's parent on
+# the import path, which the shell's working directory does not provide, so an
+# operator typing the raw command from /root gets "No module named sync_server".
+cat > /usr/local/bin/megavault-sync <<WRAPPER
+#!/bin/sh
+exec sudo -u $SERVICE_USER env PYTHONPATH=$PREFIX $PYTHON -m sync_server --data $STATE/data "\$@"
+WRAPPER
+chmod 0755 /usr/local/bin/megavault-sync
 systemctl enable megavault-sync.service
 # restart, not enable --now: re-running the installer must pick up new code.
 systemctl restart megavault-sync.service
@@ -141,15 +151,24 @@ if ! command -v caddy >/dev/null 2>&1; then
     fi
 fi
 
+GLOBAL_OPTIONS=""
 if [ -n "$DOMAIN" ]; then
     SITE="$DOMAIN"
-    GLOBAL=""
+    # Caddy takes a comma-separated address list per site block, so an old name
+    # keeps working after the real domain is in place.
+    for extra in $ALIASES; do SITE="$SITE, $extra"; done
 else
     SITE=":443"
+    # No domain given: Caddy signs with its own CA, which no device trusts.
+    GLOBAL_OPTIONS="	local_certs"
+fi
+# Caddy allows exactly one global options block, so both lines share it.
+[ -n "$EMAIL" ] && GLOBAL_OPTIONS="$GLOBAL_OPTIONS
+	email $EMAIL"
+GLOBAL=""
+if [ -n "$GLOBAL_OPTIONS" ]; then
     GLOBAL="{
-	# No domain was given: Caddy signs with its own CA, which no device
-	# trusts. Replace this with a real domain for anything that matters.
-	local_certs
+$GLOBAL_OPTIONS
 }"
 fi
 
@@ -159,9 +178,6 @@ if [ -f /etc/caddy/Caddyfile ] && ! grep -q "$SITE" /etc/caddy/Caddyfile; then
 fi
 {
     [ -n "$GLOBAL" ] && printf '%s\n\n' "$GLOBAL"
-    if [ -n "$EMAIL" ]; then
-        printf '{\n\temail %s\n}\n\n' "$EMAIL"
-    fi
     cat <<EOF
 $SITE {
 	encode zstd gzip
@@ -201,7 +217,7 @@ Installed.
 
 This host does not accept self-service signup; accounts are created here.
 Create the owner account (it prompts for the password twice):
-  sudo -u $SERVICE_USER $PYTHON -m sync_server --data $STATE/data account create you@example.com
+  megavault-sync account create you@example.com
 
 Then open the console, create a vault, and issue one device token per device.
 The relay port $PORT stays bound to 127.0.0.1; only Caddy answers on 443.

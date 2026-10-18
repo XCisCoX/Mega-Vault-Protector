@@ -553,6 +553,8 @@ async function start() {
     state.registration = health.registration || 'open';
     if (state.registration !== 'open') {
       $('tab-register').hidden = true;
+      const tabs = $('tab-register').closest('.tabs');
+      if (tabs) tabs.classList.add('is-single');
       const hint = $('switch-button').closest('p');
       if (hint) hint.hidden = true;
     }
