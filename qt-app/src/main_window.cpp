@@ -4,6 +4,8 @@
 #include "videovault/app/sync_page.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
+
+#include "videovault/app/icons.hpp"
 #include "videovault/app/music_window.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
@@ -189,23 +191,6 @@ QPixmap scaledIcon(const char* resource, const int side) {
 
 // The update glyph: the download arrow the phone shows in its library header.
 // Drawn here (like the cloud browser's green tick) so the button needs no asset.
-QIcon updateGlyph() {
-    QPixmap plate(22, 22);
-    plate.fill(Qt::transparent);
-    QPainter painter(&plate);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    QPen pen(Qt::white);
-    pen.setWidthF(1.9);
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(pen);
-    painter.drawLine(QPointF(11.0, 3.5), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(6.5, 9.0), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(15.5, 9.0), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(4.5, 18.5), QPointF(17.5, 18.5));
-    return QIcon(plate);
-}
-
 // What the background update check found, handed back through a QFutureWatcher.
 struct UpdateCheckOutcome {
     QString version;
@@ -234,13 +219,6 @@ QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
     return plate;
 }
 
-void setChromeIcon(QAbstractButton* button, const QIcon& source) {
-    const auto apply = [button, source](const QPalette& palette) {
-        button->setIcon(QIcon(tintedIcon(source.pixmap(32, 32), palette.color(QPalette::ButtonText))));
-    };
-    apply(qApp->palette());
-    QObject::connect(qApp, &QApplication::paletteChanged, button, apply);
-}
 
 QPixmap musicPlaceholder(const int side) {
     const QPixmap cover = scaledIcon(":/icons/nocover.png", std::max(1, side));
@@ -1733,8 +1711,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
                     ? QStringLiteral("Delete %1 folder(s) and everything inside them? This cannot be undone.")
                         .arg(folder_ids.size())
                     : QStringLiteral("Delete the selected folders, the files inside them, and the selected items? This cannot be undone."));
-                confirm.addButton(QStringLiteral("Cancel"), 0, false);
-                confirm.addButton(QStringLiteral("Delete"), 1, true);
+                confirm.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+                confirm.addButton(QStringLiteral("Delete"), 1, true, QStringLiteral("trash"));
                 if (confirm.run() != 1) {
                     return true;
                 }
@@ -2209,10 +2187,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
-    const auto makeIconButton = [](QWidget* parent, const QIcon& icon, const QString& tip, const bool filled) {
+    const auto makeIconButton = [](QWidget* parent, const QString& icon, const QString& tip,
+                                   const bool filled) {
         auto* button = new QPushButton(parent);
-        if (filled) button->setIcon(icon);
-        else setChromeIcon(button, icon);
+        if (filled) {
+            button->setIcon(icons::lucideSolid(icon, QColor(0xff, 0xff, 0xff)));
+        } else {
+            icons::apply(button, icon, icons::Tone::Normal);
+        }
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(36, 36);
         button->setCursor(Qt::PointingHandCursor);
@@ -2232,20 +2214,20 @@ QWidget* MainWindow::buildUnlockedPage() {
     };
     // Offered only once GitHub has a newer release, the way the phone puts a
     // download icon in its library header.
-    updateButton_ = makeIconButton(toolbar, updateGlyph(),
+    updateButton_ = makeIconButton(toolbar, QStringLiteral("download"),
         QStringLiteral("Check for a newer version"), false);
     updateButton_->hide();
-    importButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_add.png")),
-        QStringLiteral("Add"), true);
+    importButton_ = makeIconButton(toolbar, QStringLiteral("plus"),
+        QStringLiteral("Add files to this vault"), true);
     // Folder import uses the same button. Both stay in step while a batch runs.
     importFolderButton_ = importButton_;
-    shareButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_share.png")),
+    shareButton_ = makeIconButton(toolbar, QStringLiteral("wifi"),
         QStringLiteral("Share this vault on Wi-Fi over an encrypted connection. "
                        "The phone must enter the vault password. Locking this PC does not stop sharing."),
         false);
-    settingsButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_settings.png")),
+    settingsButton_ = makeIconButton(toolbar, QStringLiteral("settings"),
         QStringLiteral("Change the password, manage tags, and adjust player settings"), false);
-    auto* lockButton = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_lock.png")),
+    auto* lockButton = makeIconButton(toolbar, QStringLiteral("lock"),
         QStringLiteral("Lock this PC. A phone that already entered the password keeps access until you stop sharing."),
         false);
 
@@ -2295,11 +2277,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* detailsMode = new QPushButton(modeHost);
     auto* iconsMode = new QPushButton(modeHost);
     auto* listMode = new QPushButton(modeHost);
-    setChromeIcon(detailsMode, QIcon(QStringLiteral(":/icons/bar_details.png")));
+    icons::apply(detailsMode, QStringLiteral("rows-3"));
     detailsMode->setToolTip(QStringLiteral("Details"));
-    setChromeIcon(iconsMode, QIcon(QStringLiteral(":/icons/bar_icons.png")));
+    icons::apply(iconsMode, QStringLiteral("layout-grid"));
     iconsMode->setToolTip(QStringLiteral("Icons"));
-    setChromeIcon(listMode, QIcon(QStringLiteral(":/icons/bar_list.png")));
+    icons::apply(listMode, QStringLiteral("list"));
     listMode->setToolTip(QStringLiteral("List"));
     viewModeGroup_ = new QButtonGroup(toolbar);
     viewModeGroup_->setExclusive(true);
@@ -3177,8 +3159,8 @@ void MainWindow::finishEditTags() {
     list->setMinimumHeight(220);
     layout->addWidget(list, 1);
     layout->addLayout(inputRow);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
-    dialog.addButton(QStringLiteral("Save"), 1, true);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    dialog.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
 
     connect(addButton, &QPushButton::clicked, &dialog, [list, input] {
         const QString name = input->text().trimmed();
@@ -4210,7 +4192,7 @@ PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
         compress->setChecked(true);
         dialog.body()->addWidget(compress);
     }
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     auto* ok = new QPushButton(exporting
         ? QStringLiteral("Export")
         : QStringLiteral("Import"));
@@ -5053,7 +5035,9 @@ void MainWindow::setFolderPaneCollapsed(const bool collapsed) {
         folderPaneLabel_->setVisible(!collapsed);
     }
     if (folderPaneToggle_ != nullptr) {
-        folderPaneToggle_->setText(collapsed ? QStringLiteral("›") : QStringLiteral("‹"));
+        folderPaneToggle_->setIcon(icons::lucideSolid(
+            collapsed ? QStringLiteral("chevron-right") : QStringLiteral("chevron-left"),
+            qApp->palette().color(QPalette::ButtonText)));
         folderPaneToggle_->setToolTip(collapsed
             ? QStringLiteral("Show the folder pane")
             : QStringLiteral("Collapse the folder pane"));
@@ -5300,8 +5284,8 @@ void MainWindow::beginNewFolder() {
     prompt.setTitle(QStringLiteral("New folder"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, QString(), QStringLiteral("Folder name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Create"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
     if (prompt.run() != 1) {
         return;
     }
@@ -5331,8 +5315,8 @@ void MainWindow::beginRenameFolder(const std::int64_t folder_id) {
     prompt.setTitle(QStringLiteral("Rename folder"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Folder name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Rename"), 1, true, QStringLiteral("pencil"));
     if (prompt.run() != 1) {
         return;
     }
@@ -5383,7 +5367,7 @@ void MainWindow::beginRemoveFolder(const std::int64_t folder_id) {
     box.setMessage(QStringLiteral("Remove \"%1\"?\n\n%2").arg(name, inside > 0
         ? QStringLiteral("Delete %1 file(s) inside this folder? This cannot be undone.").arg(inside)
         : QStringLiteral("This folder is empty.")));
-    box.addButton(QStringLiteral("Cancel"), 0, false);
+    box.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     box.addButton(inside > 0 ? QStringLiteral("Delete") : QStringLiteral("Remove folder"), 1, true);
     if (box.run() != 1) {
         return;
@@ -5438,8 +5422,8 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
     prompt.setTitle(QStringLiteral("Rename"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Rename"), 1, true, QStringLiteral("pencil"));
     if (prompt.run() != 1) {
         return;
     }
@@ -5661,8 +5645,8 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
     }
     list->setMinimumHeight(240);
     layout->addWidget(list);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
-    dialog.addButton(QStringLiteral("Move"), 1, true);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    dialog.addButton(QStringLiteral("Move"), 1, true, QStringLiteral("arrow-right"));
     connect(list, &QListWidget::itemDoubleClicked, &dialog, [&dialog] { dialog.finish(1); });
     if (dialog.run() != 1 || list->currentItem() == nullptr) {
         return false;
@@ -7234,8 +7218,8 @@ void MainWindow::beginRemoveSelected(const bool ask) {
         confirm.setTitle(QStringLiteral("Remove items"));
         confirm.setMessage(QStringLiteral("Remove %1 item(s) from the vault? This cannot be undone.")
             .arg(ids.size()));
-        confirm.addButton(QStringLiteral("Cancel"), 0, false);
-        confirm.addButton(QStringLiteral("Remove"), 1, true);
+        confirm.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        confirm.addButton(QStringLiteral("Remove"), 1, true, QStringLiteral("trash"));
         if (confirm.run() != 1) {
             return;
         }
@@ -7284,7 +7268,7 @@ void MainWindow::beginChangePassword() {
     dialog.body()->addWidget(next);
     dialog.body()->addWidget(confirmation);
     dialog.body()->addWidget(profile);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     dialog.addButton(QStringLiteral("Change"), 1, true);
     if (dialog.run() != 1) {
         return;
@@ -7781,8 +7765,8 @@ void MainWindow::beginNewNote() {
     prompt.setTitle(QStringLiteral("New note"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, QStringLiteral("Note.txt"), QStringLiteral("Name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Create"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
     if (prompt.run() != 1) {
         return;
     }
@@ -7936,9 +7920,9 @@ bool MainWindow::closeText(const bool force) {
         InWindowSheet prompt(this);
         prompt.setTitle(QStringLiteral("Save note"));
         prompt.setMessage(QStringLiteral("Save changes to %1?").arg(openTextTitle_));
-        prompt.addButton(QStringLiteral("Cancel"), 0, false);
-        prompt.addButton(QStringLiteral("Discard"), 2, false);
-        prompt.addButton(QStringLiteral("Save"), 1, true);
+        prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        prompt.addButton(QStringLiteral("Discard"), 2, false, QStringLiteral("undo-2"));
+        prompt.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
         const int answer = prompt.run();
         if (answer == 0) {
             return false;
@@ -8162,7 +8146,7 @@ void MainWindow::openShare() {
             InWindowSheet notice(this);
             notice.setTitle(QStringLiteral("Share with phone"));
             notice.setMessage(error, true);
-            notice.addButton(QStringLiteral("OK"), 1, true);
+            notice.addButton(QStringLiteral("OK"), 1, true, QStringLiteral("check"));
             notice.run();
             return;
         }

@@ -24,7 +24,10 @@ public:
     [[nodiscard]] QVBoxLayout* body() const noexcept { return body_; }
     [[nodiscard]] QHBoxLayout* buttons() const noexcept { return buttons_; }
     QLineEdit* addTextEntry(int echoMode, const QString& initial, const QString& placeholder);
-    QPushButton* addButton(const QString& label, int result, bool primary);
+    // `icon` is a Lucide name (see docs/icon-strategy.md); empty keeps the button
+    // text-only, which is the right default for anything without an obvious glyph.
+    QPushButton* addButton(const QString& label, const int result, const bool primary,
+        const QString& icon = QString());
     // Blocks until a button, Escape, or a click outside the card finishes it.
     int run();
     void finish(int result);
