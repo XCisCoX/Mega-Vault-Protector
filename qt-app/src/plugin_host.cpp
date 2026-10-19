@@ -998,6 +998,15 @@ void MusicPluginPage::completeRequest(const QUrl &url, QByteArray bytes, const i
     }
     done(std::move(bytes));
 }
+void MusicPluginPage::searchFor(const QString &term) {
+    if (query_ == nullptr) {
+        return;
+    }
+    query_->setText(term);
+    refreshProviders();
+    search();
+}
+
 void MusicPluginPage::search() {
     const auto q = query_->text().trimmed();
     if (q.isEmpty() || manifest().id.isEmpty())

@@ -71,6 +71,9 @@ class MusicPluginPage final : public QWidget {
     // Embedded mode drops the page header (back button and title) so the
     // surface can live inside the library page, above the folder's own items.
     void setEmbedded(bool embedded);
+    // The library's search offers "Search <provider> for ..." and hands the
+    // term here, so the provider opens already showing those results.
+    void searchFor(const QString &term);
     void stopAndClear();
   signals:
     void closed();

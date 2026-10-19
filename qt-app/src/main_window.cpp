@@ -148,6 +148,9 @@ constexpr int kLoginPage = 1;
 constexpr int kUnlockedPage = 2;
 // Gallery item kinds (Qt::UserRole + 12).
 constexpr int kKindPhone = 3;
+// The library's search offers "Search <provider> for ..." as an entry that
+// opens the music provider with those results.
+constexpr int kKindPluginSearch = 4;
 // Set on a gallery row while it is cut (Ctrl+X). The delegate fades the row.
 constexpr int kCutDimRole = Qt::UserRole + 17;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
@@ -2192,12 +2195,8 @@ QWidget* MainWindow::buildLoginPage() {
 
     unlockButton_ = new QPushButton(QStringLiteral("Unlock vault"), card);
     unlockButton_->setProperty("primary", true);
-    auto* cloudButton = new QPushButton(QStringLiteral("Sync setup is available after unlocking a local vault"), card);
-    cloudButton->setEnabled(false);
-    cloudButton->setToolTip(QStringLiteral("Legacy remote vault-password login is disabled. Sync never sends your vault password."));
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
     layout->addWidget(unlockButton_);
-    layout->addWidget(cloudButton);
     layout->addWidget(newVaultButton);
 
     connect(browse, &QPushButton::clicked, this, [this] { selectLoginLocation(); });
@@ -2308,7 +2307,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     bool musicEnabled = false;
     for (const auto& manifest : pluginHost_->manifests()) musicEnabled |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
     pluginMusicButton_->setVisible(musicEnabled);
-    connect(pluginMusicButton_, &QPushButton::clicked, this, &MainWindow::openPluginMusic);
+    connect(pluginMusicButton_, &QPushButton::clicked, this, [this] { openPluginMusic(); });
     titleRow->addWidget(pluginMusicButton_);
     extensionToolsButton_ = new QPushButton(QStringLiteral("Tools"), toolbar);
     extensionToolsButton_->setObjectName(QStringLiteral("toolsSection"));
@@ -2674,6 +2673,8 @@ QWidget* MainWindow::buildUnlockedPage() {
                 openFolder(id);
             } else if (kind == kKindPhone) {
                 openPeerBrowser();
+            } else if (kind == kKindPluginSearch) {
+                openPluginMusic(searchText_);
             } else {
                 beginPlayback(id);
             }
@@ -2688,6 +2689,8 @@ QWidget* MainWindow::buildUnlockedPage() {
                 openFolder(id);
             } else if (kind == kKindPhone) {
                 openPeerBrowser();
+            } else if (kind == kKindPluginSearch) {
+                openPluginMusic(searchText_);
             } else {
                 beginPlayback(id);
             }
@@ -3855,7 +3858,7 @@ void MainWindow::closeSync() {
     if (syncEngine_) { syncEngine_->stop(); delete syncEngine_; syncEngine_ = nullptr; }
 }
 
-void MainWindow::openPluginMusic() {
+void MainWindow::openPluginMusic(const QString& query) {
     if (!vault_ || !vault_->is_unlocked()) return;
     bool enabled = false;
     for (const auto& manifest : pluginHost_->manifests()) enabled |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
@@ -3868,6 +3871,41 @@ void MainWindow::openPluginMusic() {
     }
     pluginMusic_->setVault(vault_);
     contentStack_->setCurrentWidget(pluginMusic_);
+    if (!query.isEmpty()) {
+        pluginMusic_->searchFor(query);
+    }
+}
+
+// Searching the library also asks the enabled provider whether it has
+// anything under that name, as one extra entry above the results.
+void MainWindow::offerPluginSearchRow() {
+    if (searchText_.isEmpty() || iconList_ == nullptr || detailsTree_ == nullptr
+        || pluginHost_ == nullptr || !vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    QString name;
+    for (const auto& manifest : pluginHost_->manifests()) {
+        if (manifest.protocol == "monochrome-tracks-v1" && pluginHost_->enabled(manifest.id)) {
+            name = manifest.name;
+            break;
+        }
+    }
+    if (name.isEmpty()) {
+        return;
+    }
+    const QString label = QStringLiteral("Search %1 for “%2”").arg(name, searchText_);
+    constexpr qlonglong kPluginSearchId = -900001;
+    addLibraryEntry(iconList_, detailsTree_, kPluginSearchId, kKindPluginSearch, label,
+                    QStringLiteral("Plugin"));
+    if (iconList_->count() > 0) {
+        iconList_->insertItem(0, iconList_->takeItem(iconList_->count() - 1));
+        iconList_->item(0)->setData(Qt::UserRole + 12, kKindPluginSearch);
+    }
+    if (detailsTree_->topLevelItemCount() > 0) {
+        detailsTree_->insertTopLevelItem(
+            0, detailsTree_->takeTopLevelItem(detailsTree_->topLevelItemCount() - 1));
+        detailsTree_->topLevelItem(0)->setData(0, Qt::UserRole + 12, kKindPluginSearch);
+    }
 }
 
 void MainWindow::openExtensionTools(const QString& id) {
@@ -6808,6 +6846,7 @@ void MainWindow::refreshGallery() {
             .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, total_bytes)))));
         watcher->deleteLater();
         paintGalleryBatch();
+        offerPluginSearchRow();
         // The first layout after unlock could paint rows before their final
         // geometry was known, so the opening screen stayed wrong until the first
         // selection forced a repaint. Lay out and repaint once the batch lands.

@@ -100,27 +100,45 @@ public:
         update();
     }
 
+    // A quiet chip in the corner of a still: "1920 × 1080 · Fit 41%". Empty
+    // hides it, and video playback never sets it.
+    void setInfo(const QString& text) {
+        if (info_ == text) {
+            return;
+        }
+        info_ = text;
+        update();
+    }
+
     const QImage& frame() const { return frame_; }
     const QString& statusText() const { return text_; }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        painter.fillRect(rect(), Qt::black);
+        paintBackdrop(painter);
         if (!frame_.isNull()) {
             if (zoom_ > 0.0) {
-                // Image-viewer mode: draw at the zoom scale with the pan offset.
                 painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-                painter.drawImage(QRectF(offset_, QSizeF(frame_.size()) * zoom_), frame_);
-            } else {
-                // Grow and shrink with the window. Width and height stay in proportion.
-                const QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
-                const QRect target(
-                    QPoint((width() - fitted.width()) / 2, (height() - fitted.height()) / 2),
-                    fitted);
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                const QRectF target(offset_, QSizeF(frame_.size()) * zoom_);
+                paintPlate(painter, target);
                 painter.drawImage(target, frame_);
+            } else {
+                // Grow and shrink with the window, but never past one image
+                // pixel per screen pixel: a 300px still should look like a
+                // 300px still, not a blurred wall.
+                QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
+                if (fitted.width() > frame_.width() || fitted.height() > frame_.height()) {
+                    fitted = frame_.size();
+                }
+                const QRectF target(
+                    QPointF((width() - fitted.width()) / 2.0, (height() - fitted.height()) / 2.0),
+                    QSizeF(fitted));
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                paintPlate(painter, target);
+                painter.drawImage(target, fitCache(fitted));
             }
+            paintInfo(painter);
             if (!overlayText_.isEmpty()) {
                 // Transient message band at the bottom of the picture.
                 const QRect band(0, height() - 34, width(), 34);
@@ -135,9 +153,75 @@ protected:
     }
 
 private:
+    // A neutral studio backdrop rather than pure black, with a soft lift behind
+    // the picture so it reads as an object on a surface.
+    void paintBackdrop(QPainter& painter) const {
+        QLinearGradient base(0, 0, 0, height());
+        base.setColorAt(0.0, QColor(17, 17, 20));
+        base.setColorAt(1.0, QColor(9, 9, 11));
+        painter.fillRect(rect(), base);
+        if (frame_.isNull()) {
+            return;
+        }
+        QRadialGradient glow(QPointF(width() / 2.0, height() / 2.0),
+                             std::max(width(), height()) * 0.62);
+        glow.setColorAt(0.0, QColor(255, 255, 255, 12));
+        glow.setColorAt(1.0, QColor(255, 255, 255, 0));
+        painter.fillRect(rect(), glow);
+    }
+
+    // Shadow + hairline so the picture has an edge instead of bleeding away.
+    void paintPlate(QPainter& painter, const QRectF& target) const {
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        for (int step = 3; step >= 1; --step) {
+            const qreal spread = step * 6.0;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0, 0, 0, static_cast<int>(26 / step)));
+            painter.drawRoundedRect(target.adjusted(-spread, -spread * 0.6, spread, spread),
+                                    4.0 + spread * 0.5, 4.0 + spread * 0.5);
+        }
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0));
+        painter.drawRect(target.adjusted(-0.5, -0.5, 0.5, 0.5));
+    }
+
+    // One high-quality downscale per size: drawing a 6000px photo straight into
+    // a 900px rect on every repaint shimmers while panning.
+    const QImage& fitCache(const QSize& target) {
+        if (cacheKey_ != target || cachedSource_ != frame_.cacheKey()) {
+            cacheKey_ = target;
+            cachedSource_ = frame_.cacheKey();
+            cached_ = frame_.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        return cached_.isNull() ? frame_ : cached_;
+    }
+
+    void paintInfo(QPainter& painter) const {
+        if (info_.isEmpty() || zoom_ > 0.0) {
+            return;
+        }
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QFont font = painter.font();
+        font.setPointSizeF(9.0);
+        painter.setFont(font);
+        const QFontMetrics metrics(font);
+        const int padding = 10;
+        const int textWidth = metrics.horizontalAdvance(info_);
+        const QRectF chip(width() - textWidth - padding * 2 - 14, 14, textWidth + padding * 2, 26);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(10, 10, 12, 190));
+        painter.drawRoundedRect(chip, 13, 13);
+        painter.setPen(QColor(235, 235, 240, 210));
+        painter.drawText(chip, Qt::AlignCenter, info_);
+    }
+
     QImage frame_;
     QString text_;
     QString overlayText_;
+    QString info_;
+    QImage cached_;
+    QSize cacheKey_;
+    qint64 cachedSource_{0};
     double zoom_{0.0};
     QPointF offset_;
 };
@@ -325,6 +409,7 @@ private:
     void clampImageOffset();
     void setImageZoom100();
     void updateZoomLabel();
+    void updateImageInfo();
     void tick();
     void fitToVideoSize();
     void updatePositionLabel();

@@ -173,7 +173,8 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
-    void openPluginMusic();
+    void openPluginMusic(const QString& query = QString());
+    void offerPluginSearchRow();
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};
