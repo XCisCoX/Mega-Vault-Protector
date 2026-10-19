@@ -90,37 +90,6 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
     var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
     var askingPurge by remember { mutableStateOf(false) }
 
-    suspend fun reloadItems(current: SyncV4Link) {
-        items = runCatching {
-            withContext(Dispatchers.IO) { SyncV4Engine(context, store, current).items() }
-        }.getOrDefault(emptyList())
-    }
-
-    // Everything in the list acts on the ticked rows in one pass, like the
-    // desktop page: one engine, one save, then the list is rebuilt.
-    fun act(block: (SyncV4Engine) -> Unit) {
-        val current = link ?: return
-        if (busy || SyncV4Run.running) return
-        busy = true
-        error = null
-        scope.launch {
-            try {
-                val updated = withContext(Dispatchers.IO) {
-                    val engine = SyncV4Engine(context, store, current)
-                    block(engine)
-                    engine.link
-                }
-                link = updated
-                reloadItems(updated)
-                picked = picked.filter { id -> items.any { it.recordId == id } }.toSet()
-                GalleryCache.clear()
-            } catch (failure: Throwable) {
-                fail(failure)
-            } finally {
-                busy = false
-            }
-        }
-    }
 
     // Only ask the relay whether it takes signups once the URL is well formed.
     LaunchedEffect(server) {
@@ -154,6 +123,38 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
     fun fail(failure: Throwable) {
         error = failure.message ?: "Sync failed"
         status = ""
+    }
+
+    suspend fun reloadItems(current: SyncV4Link) {
+        items = runCatching {
+            withContext(Dispatchers.IO) { SyncV4Engine(context, store, current).items() }
+        }.getOrDefault(emptyList())
+    }
+
+    // Everything in the list acts on the ticked rows in one pass, like the
+    // desktop page: one engine, one save, then the list is rebuilt.
+    fun act(block: (SyncV4Engine) -> Unit) {
+        val current = link ?: return
+        if (busy || SyncV4Run.running) return
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    val engine = SyncV4Engine(context, store, current)
+                    block(engine)
+                    engine.link
+                }
+                link = updated
+                reloadItems(updated)
+                picked = picked.filter { id -> items.any { it.recordId == id } }.toSet()
+                GalleryCache.clear()
+            } catch (failure: Throwable) {
+                fail(failure)
+            } finally {
+                busy = false
+            }
+        }
     }
 
     fun signIn() {
