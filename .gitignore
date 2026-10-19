@@ -135,3 +135,8 @@ sync.sqlite3-shm
 sync_server/deployment/.env
 *.pem
 *.key
+
+# ── Custom ───────────────────────────────────────────────────────────────
+# Added manually
+.continue/*
+.clangd

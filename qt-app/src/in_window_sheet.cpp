@@ -1,5 +1,7 @@
 #include "videovault/app/in_window_sheet.hpp"
 
+#include "videovault/app/icons.hpp"
+
 #include <QEventLoop>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -7,6 +9,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QShortcut>
 #include <QVBoxLayout>
@@ -70,6 +74,12 @@ InWindowSheet::InWindowSheet(QWidget* host)
     connect(escape, &QShortcut::activated, this, [this] { finish(0); });
 }
 
+void InWindowSheet::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event);
+    QPainter painter(this);
+    painter.fillRect(rect(), QColor(0, 0, 0, 160));
+}
+
 void InWindowSheet::setTitle(const QString& title) {
     title_->setText(title);
 }
@@ -93,13 +103,24 @@ QLineEdit* InWindowSheet::addTextEntry(
     return entry_;
 }
 
-QPushButton* InWindowSheet::addButton(const QString& label, const int result, const bool primary) {
+QPushButton* InWindowSheet::addButton(const QString& label, const int result, const bool primary,
+    const QString& icon) {
     auto* button = new QPushButton(label, card_);
     button->setObjectName(primary
         ? QStringLiteral("inWindowPrimary")
         : QStringLiteral("inWindowSecondary"));
     button->setCursor(Qt::PointingHandCursor);
     button->setFocusPolicy(Qt::NoFocus);
+    if (!icon.isEmpty()) {
+        button->setIconSize(QSize(15, 15));
+        if (primary) {
+            // The primary sheet button sits on the accent fill, so the glyph is white
+            // in both themes rather than following ButtonText.
+            button->setIcon(icons::lucideSolid(icon, QColor(0xff, 0xff, 0xff)));
+        } else {
+            icons::apply(button, icon, icons::Tone::Quiet);
+        }
+    }
     buttons_->addWidget(button);
     connect(button, &QPushButton::clicked, this, [this, result] { finish(result); });
     return button;

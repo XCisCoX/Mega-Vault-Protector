@@ -635,8 +635,8 @@ void PdfWindow::askPassword(const bool rejected) {
         ? QStringLiteral("That password did not open this PDF. Try again.")
         : QStringLiteral("This PDF is password protected."));
     dialog.addTextEntry(QLineEdit::Password, QString(), QStringLiteral("Password"));
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
-    dialog.addButton(QStringLiteral("Open"), 1, true);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    dialog.addButton(QStringLiteral("Open"), 1, true, QStringLiteral("folder-open"));
     if (dialog.run() != 1) {
         impl_->pending.reset();
         impl_->message->setText(QStringLiteral("This PDF is password protected."));
