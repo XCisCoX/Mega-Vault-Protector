@@ -29,6 +29,7 @@ extern "C" {
 }
 
 #include "videovault/core/vault.hpp"
+#include "videovault/extensions/runtime.hpp"
 
 using namespace videovault::core;
 
@@ -36,6 +37,7 @@ namespace {
 
 std::mutex g_mutex;
 std::shared_ptr<Vault> g_vault;
+std::string g_vault_root;
 // 0..1 while a package is being written or read. -1 when idle.
 std::atomic<double> g_package_progress{-1.0};
 
@@ -868,6 +870,27 @@ std::string tags_json() {
 
 extern "C" {
 
+JNI_METHOD(nativeInvokeExtension)(JNIEnv* env, jobject, jstring source, jstring command, jstring input_json) {
+    if (source == nullptr || command == nullptr || input_json == nullptr)
+        return to_jstring(env, err_msg("Missing extension input"));
+    if (env->GetStringLength(source) > 256*1024 || env->GetStringLength(command) > 64
+        || env->GetStringLength(input_json) > 64*1024)
+        return to_jstring(env, err_msg("Extension input exceeds host limits"));
+    try {
+        const auto code = jstring_to_string(env, source);
+        const auto action = jstring_to_string(env, command);
+        const auto input = jstring_to_string(env, input_json);
+        if (env->ExceptionCheck()) return nullptr;
+        if (code.size() > 256*1024 || input.size() > 64*1024)
+            return to_jstring(env, err_msg("Extension input exceeds host limits"));
+        const auto result = videovault::extensions::invoke(code, action, input);
+        if (!result.ok) return to_jstring(env, err_msg(result.error));
+        return to_jstring(env, ok_json("\"result\":" + (result.json.empty() ? "null" : result.json)));
+    } catch (...) {
+        return to_jstring(env, err_msg("Extension execution failed"));
+    }
+}
+
 JNIEXPORT jboolean JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVaultExists(
     JNIEnv* env, jobject, jstring root) {
     const std::string r = jstring_to_string(env, root);
@@ -886,6 +909,7 @@ JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring passwo
     auto result = Vault::create(r, p, params);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
+    g_vault_root = r;
     return to_jstring(env, ok_json());
 }
 
@@ -896,6 +920,7 @@ JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring password
     auto result = Vault::open(r, p);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
+    g_vault_root = r;
     return to_jstring(env, ok_json());
 }
 
@@ -929,6 +954,58 @@ JNI_METHOD(nativeImportFile)(JNIEnv* env, jobject, jstring path) {
         static_cast<long long>(result.value()),
         duplicate ? ",\"duplicate\":true" : "");
     return to_jstring(env, ok_json(buf));
+}
+
+// Pin both the Java bytes and the current vault identity until import completes.
+// g_mutex prevents open/lock/close from replacing or locking this vault mid-import.
+static jstring import_bytes_for_vault(JNIEnv* env, jbyteArray data, jstring name, jlong folder_id, jstring expected_root) {
+    if (data == nullptr || name == nullptr || folder_id < 0)
+        return to_jstring(env, err_msg("Invalid memory import"));
+    const jsize size = env->GetArrayLength(data);
+    if (size <= 0 || size > (128 << 20))
+        return to_jstring(env, err_msg("Memory import exceeds the 128 MiB ceiling"));
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault || !g_vault->is_unlocked())
+        return to_jstring(env, err_msg("Vault is locked"));
+    if (expected_root != nullptr && jstring_to_string(env, expected_root) != g_vault_root)
+        return to_jstring(env, err_msg("The destination vault changed"));
+    const std::string display_name = jstring_to_string(env, name);
+    if (env->ExceptionCheck()) return nullptr;
+    jboolean copied = JNI_FALSE;
+    jbyte* raw = env->GetByteArrayElements(data, &copied);
+    if (raw == nullptr) return nullptr;
+    struct Release {
+        JNIEnv* env; jbyteArray array; jbyte* bytes; jsize size; jboolean copied;
+        ~Release() {
+            // When ART copied, erase that native copy before releasing it. Never
+            // erase a pinned Java array: the plugin player still owns those bytes.
+            if (copied) {
+                volatile jbyte* p = bytes;
+                for (jsize i = 0; i < size; ++i) p[i] = 0;
+            }
+            env->ReleaseByteArrayElements(array, bytes, JNI_ABORT);
+        }
+    } release{env, data, raw, size, copied};
+    try {
+        auto result = g_vault->import_bytes(
+            std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(raw),
+                static_cast<std::size_t>(size)), display_name,
+            static_cast<std::int64_t>(folder_id));
+        if (!result) return to_jstring(env, err_json(result.error()));
+        return to_jstring(env, ok_json("\"id\":" + std::to_string(result.value())));
+    } catch (...) {
+        return to_jstring(env, err_msg("Memory import failed"));
+    }
+}
+
+JNI_METHOD(nativeImportBytes)(JNIEnv* env, jobject, jbyteArray data, jstring name, jlong folder_id) {
+    return import_bytes_for_vault(env, data, name, folder_id, nullptr);
+}
+
+JNI_METHOD(nativeImportBytesForVault)(JNIEnv* env, jobject, jbyteArray data, jstring name,
+    jlong folder_id, jstring expected_root) {
+    if (expected_root == nullptr) return to_jstring(env, err_msg("Missing destination vault"));
+    return import_bytes_for_vault(env, data, name, folder_id, expected_root);
 }
 
 JNI_METHOD(nativeRemoveVideo)(JNIEnv* env, jobject, jlong id) {

@@ -1,4 +1,5 @@
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/plugin_host.hpp"
 #include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
 #include <QtConcurrent/QtConcurrentRun>
@@ -118,7 +119,7 @@ QPushButton* action(const QString& title, const QString& name, QWidget* parent) 
     return button;
 }
 }
-SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidget* parent)
+SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidget* parent, PluginHost* pluginHost)
     : QWidget(parent), vault_(vault) {
     setObjectName(QStringLiteral("settingsPage"));
     setWindowTitle(QStringLiteral("Settings"));
@@ -230,18 +231,9 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     appearanceCard->addLayout(segments);
     appearance->addWidget(textLabel(QStringLiteral("System follows your device’s appearance. Your choice is saved for the next launch."), this, true));
 
-    auto* plugins = section(QStringLiteral("Plugins"), QStringLiteral("A future home for external extensions."));
-    auto* pluginCard = card(plugins);
-    auto* empty = textLabel(QStringLiteral("External plugin loading is not supported yet"), this);
-    empty->setObjectName(QStringLiteral("pluginsEmptyState")); pluginCard->addWidget(empty);
-    pluginCard->addWidget(textLabel(QStringLiteral("There is no plugin loader or supported plugin API in this version. Files in this folder are not loaded or executed."), this, true));
-    auto* openPlugins = action(QStringLiteral("Open plugins folder"), QStringLiteral("openPluginsFolder"), this);
-    pluginCard->addWidget(openPlugins, 0, Qt::AlignLeft);
-    connect(openPlugins, &QPushButton::clicked, this, [this] {
-        const QString path = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + QStringLiteral("/plugins");
-        if (!QDir().mkpath(path)) { setStatus(QStringLiteral("Could not create the plugins folder."), true); return; }
-        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) setStatus(QStringLiteral("Could not open the plugins folder."), true);
-    });
+    auto* plugins = section(QStringLiteral("Extensions"), QStringLiteral("Local sandboxed tools and permission-controlled providers."));
+    if (!pluginHost) pluginHost = new PluginHost({}, this);
+    plugins->addWidget(pluginHost->manager(vault_, this));
 
     auto* security = section(QStringLiteral("Security"), QStringLiteral("Protect your vault and control when it locks."));
     auto* lockCard = card(security);

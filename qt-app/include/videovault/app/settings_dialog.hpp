@@ -21,6 +21,7 @@ class Result;
 } // namespace videovault::core
 
 namespace videovault::app {
+class PluginHost;
 
 // In-window page. The host owns navigation, updating and application theming.
 class SettingsDialog final : public QWidget {
@@ -28,7 +29,7 @@ class SettingsDialog final : public QWidget {
 public:
     explicit SettingsDialog(
         const std::shared_ptr<videovault::core::Vault>& vault,
-        QWidget* parent = nullptr);
+        QWidget* parent = nullptr, PluginHost* plugins = nullptr);
     void reject();
     void setUpdateStatus(const QString& message, bool busy = false);
     QSize sizeHint() const override;

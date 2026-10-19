@@ -13,6 +13,8 @@
 #include "videovault/app/record_document.hpp"
 #include "videovault/app/record_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/plugin_host.hpp"
+#include "videovault/app/plugin_tools.hpp"
 #include "videovault/app/tag_filter_button.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/app/share_server.hpp"
@@ -1607,6 +1609,8 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    if (pluginMusic_) pluginMusic_->setVault({});
+    if (extensionTools_) extensionTools_->stopAndClear();
     closeSync();
     qApp->removeEventFilter(this);
     if (shareServer_) {
@@ -1992,6 +1996,24 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, long* r
 }
 
 void MainWindow::buildInterface() {
+    pluginHost_ = new PluginHost({}, this);
+    connect(pluginHost_, &PluginHost::changed, this, [this] {
+        bool music = false, tools = false;
+        for (const auto& manifest : pluginHost_->manifests()) {
+            music |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+            tools |= manifest.protocol=="megavault-actions-v1" && pluginHost_->enabled(manifest.id);
+        }
+        if (pluginMusicButton_) pluginMusicButton_->setVisible(music);
+        if (extensionToolsButton_) extensionToolsButton_->setVisible(tools);
+        if (!music && pluginMusic_ && contentStack_->currentWidget() == pluginMusic_) contentStack_->setCurrentWidget(pages_);
+        if (!tools && extensionTools_ && contentStack_->currentWidget() == extensionTools_) contentStack_->setCurrentWidget(pages_);
+    });
+    connect(pluginHost_, &PluginHost::openRequested, this, [this](const QString& id) {
+        for(const auto& m:pluginHost_->manifests())if(m.id==id) {
+            if(m.protocol=="monochrome-tracks-v1")openPluginMusic();else openExtensionTools(id);
+            return;
+        }
+    });
     auto* shell = new QWidget(this);
     auto* shellLayout = new QVBoxLayout(shell);
     shellLayout->setContentsMargins(0, 0, 0, 0);
@@ -2278,6 +2300,25 @@ QWidget* MainWindow::buildUnlockedPage() {
                                          "and let it sync lazily in both directions"));
     connect(syncButton, &QPushButton::clicked, this, &MainWindow::openSync);
     titleRow->addWidget(syncButton);
+    pluginMusicButton_ = new QPushButton(QStringLiteral("Music"), toolbar);
+    pluginMusicButton_->setObjectName(QStringLiteral("musicSection"));
+    pluginMusicButton_->setStyleSheet(syncButton->styleSheet());
+    pluginMusicButton_->setCursor(Qt::PointingHandCursor);
+    pluginMusicButton_->setToolTip(QStringLiteral("Music from your enabled plugin providers"));
+    bool musicEnabled = false;
+    for (const auto& manifest : pluginHost_->manifests()) musicEnabled |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+    pluginMusicButton_->setVisible(musicEnabled);
+    connect(pluginMusicButton_, &QPushButton::clicked, this, &MainWindow::openPluginMusic);
+    titleRow->addWidget(pluginMusicButton_);
+    extensionToolsButton_ = new QPushButton(QStringLiteral("Tools"), toolbar);
+    extensionToolsButton_->setObjectName(QStringLiteral("toolsSection"));
+    extensionToolsButton_->setStyleSheet(syncButton->styleSheet());
+    extensionToolsButton_->setCursor(Qt::PointingHandCursor);
+    bool toolsEnabled = false;
+    for(const auto& manifest:pluginHost_->manifests()) toolsEnabled |= manifest.protocol=="megavault-actions-v1" && pluginHost_->enabled(manifest.id);
+    extensionToolsButton_->setVisible(toolsEnabled);
+    connect(extensionToolsButton_,&QPushButton::clicked,this,[this]{openExtensionTools();});
+    titleRow->addWidget(extensionToolsButton_);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
     toolbarLayout->addLayout(titleRow);
@@ -3814,13 +3855,41 @@ void MainWindow::closeSync() {
     if (syncEngine_) { syncEngine_->stop(); delete syncEngine_; syncEngine_ = nullptr; }
 }
 
+void MainWindow::openPluginMusic() {
+    if (!vault_ || !vault_->is_unlocked()) return;
+    bool enabled = false;
+    for (const auto& manifest : pluginHost_->manifests()) enabled |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+    if (!enabled) return;
+    if (!pluginMusic_) {
+        pluginMusic_ = new MusicPluginPage(pluginHost_, contentStack_);
+        contentStack_->addWidget(pluginMusic_);
+        connect(pluginMusic_, &MusicPluginPage::closed, this, [this] { contentStack_->setCurrentWidget(pages_); });
+        connect(pluginMusic_, &MusicPluginPage::imported, this, [this] { refreshGallery(); });
+    }
+    pluginMusic_->setVault(vault_);
+    contentStack_->setCurrentWidget(pluginMusic_);
+}
+
+void MainWindow::openExtensionTools(const QString& id) {
+    if(!vault_ || !vault_->is_unlocked())return;
+    bool enabled=false;
+    for(const auto& m:pluginHost_->manifests())enabled |= m.protocol=="megavault-actions-v1" && pluginHost_->enabled(m.id);
+    if(!enabled)return;
+    if(!extensionTools_) {
+        extensionTools_=new ExtensionToolsPage(pluginHost_,contentStack_);contentStack_->addWidget(extensionTools_);
+        connect(extensionTools_,&ExtensionToolsPage::closed,this,[this]{contentStack_->setCurrentWidget(pages_);});
+    }
+    if(!id.isEmpty())extensionTools_->selectExtension(id);
+    contentStack_->setCurrentWidget(extensionTools_);
+}
+
 void MainWindow::openSettings() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
     setError(galleryStatus_, {});
     if (!settingsPage_) {
-        auto* page = new SettingsDialog(vault_, contentStack_);
+        auto* page = new SettingsDialog(vault_, contentStack_, pluginHost_);
         settingsPage_ = page;
         contentStack_->addWidget(page);
         connect(page, &SettingsDialog::settingsChanged, this, [this] {
@@ -7380,6 +7449,7 @@ void MainWindow::showLogin(const std::filesystem::path& path) {
 }
 
 void MainWindow::showUnlocked() {
+    if (pluginMusic_) pluginMusic_->setVault(vault_);
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
@@ -8187,6 +8257,8 @@ void MainWindow::lockVault() {
         delete page;
     }
     closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
+    if (pluginMusic_) { pluginMusic_->setVault({}); contentStack_->setCurrentWidget(pages_); }
+    if (extensionTools_) { extensionTools_->stopAndClear(); contentStack_->setCurrentWidget(pages_); }
     syncKeys_.wipe(); // The derived sync keys die with the unlock.
     // Sharing stays up until Stop sharing, including a swap. The lock screen
     // only hides this library; the other side can still look and copy.

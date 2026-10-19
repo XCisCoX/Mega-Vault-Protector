@@ -106,8 +106,9 @@ int main(int argc, char** argv) {
         }
         check(appearanceChanges == 3 && libraryChanges == 0, "appearance isolated signal");
         tabs->setCurrentIndex(2); app.processEvents();
-        check(child.operator()<QLabel>("pluginsEmptyState")->text() == "External plugin loading is not supported yet", "honest plugins empty state");
-        check(child.operator()<QPushButton>("openPluginsFolder")->isVisible(), "plugins folder action reachable");
+        check(page.findChild<QWidget*>("pluginManager") != nullptr, "real data-only plugin manager");
+        check(!child.operator()<QCheckBox>("pluginEnable_org.megavault.monochrome")->isChecked(), "Monochrome starts disabled");
+        check(child.operator()<QPushButton>("installPlugin")->isVisible(), "manifest installer reachable");
         tabs->setCurrentIndex(3); app.processEvents();
         auto* lock = child.operator()<QComboBox>("autoLockMinutes");
         check(lock->currentData().toInt() == 5 && lock->count() == 5, "auto-lock choices and default");

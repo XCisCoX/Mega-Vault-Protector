@@ -1,0 +1,1 @@
+<RCC><qresource prefix="/plugins"><file alias="monochrome.json">../../plugins/monochrome/plugin.json</file><file alias="text-tools.json">../../plugins/text-tools/plugin.json</file></qresource></RCC>

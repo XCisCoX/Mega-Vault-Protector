@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -138,7 +139,11 @@ fun MvpInput(
         singleLine = true,
         enabled = enabled,
         textStyle = TextStyle(color = Mvp.title, fontSize = 14.sp),
-        keyboardOptions = KeyboardOptions.Default,
+        // Masking only changes rendering; the IME must also know this is a password.
+        keyboardOptions = if (isPassword) KeyboardOptions(
+            keyboardType = KeyboardType.Password,
+            autoCorrectEnabled = false,
+        ) else KeyboardOptions.Default,
         shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Mvp.title,

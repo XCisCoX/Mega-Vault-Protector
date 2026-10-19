@@ -63,6 +63,9 @@ class SyncEngine;
 class SyncPage;
 class TagFilterButton;
 class SettingsDialog;
+class PluginHost;
+class MusicPluginPage;
+class ExtensionToolsPage;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -170,6 +173,13 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
+    void openPluginMusic();
+    void openExtensionTools(const QString& id = {});
+    PluginHost* pluginHost_{nullptr};
+    MusicPluginPage* pluginMusic_{nullptr};
+    QPushButton* pluginMusicButton_{nullptr};
+    ExtensionToolsPage* extensionTools_{nullptr};
+    QPushButton* extensionToolsButton_{nullptr};
     void openSync();
     void closeSync();
 

@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private var shareHoldsVault = false
 
     private fun show(next: Screen) {
+        if (next !is Screen.Plugins) PluginRuntime.close()
         screen = next
         AppSession.screen = next
     }
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lockNow() {
+        PluginRuntime.close()
         if (MusicHub.active) {
             startService(
                 Intent(this, MusicPlaybackService::class.java)
@@ -128,7 +130,7 @@ class MainActivity : ComponentActivity() {
                 // Login leaves on one press. Setup has nowhere to go back to.
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync, is Screen.Plugins -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -196,6 +198,7 @@ class MainActivity : ComponentActivity() {
                             onLock = { lockNow() },
                             onOpenPeer = { show(Screen.Peer) },
                             onOpenSync = { show(Screen.Sync) },
+                            onOpenPlugins = { show(Screen.Plugins) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
                             onOpenMusic = {
@@ -238,6 +241,10 @@ class MainActivity : ComponentActivity() {
                                     show(next)
                                 }
                             },
+                        )
+                        is Screen.Plugins -> PluginScreen(
+                            vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
+                            onClose = { show(Screen.Vault) },
                         )
                         is Screen.Sync -> SyncScreen(
                             vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
@@ -309,7 +316,7 @@ class MainActivity : ComponentActivity() {
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync
+            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && unlocked()) show(Screen.Vault)
     }
 
@@ -317,7 +324,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync
+            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }
@@ -332,7 +339,7 @@ class MainActivity : ComponentActivity() {
 private fun Screen.depth(): Int = when (this) {
     Screen.Setup, Screen.Login -> 0
     Screen.Vault -> 1
-    Screen.Peer, Screen.Sync -> 2
+    Screen.Peer, Screen.Sync, Screen.Plugins -> 2
     else -> 3
 }
 

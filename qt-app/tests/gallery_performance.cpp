@@ -20,6 +20,8 @@
 #include <QTimer>
 #include <QFile>
 #include <QDir>
+#include <QCheckBox>
+#include <QPushButton>
 #include <cstdio>
 
 namespace videovault::app {
@@ -50,6 +52,34 @@ struct GalleryPerformanceTestAccess {
         if (!created) return 2;
         MainWindow window;
         window.vault_ = std::make_shared<core::Vault>(std::move(created.value()));
+        if (qEnvironmentVariableIsSet("MVP_PLUGIN_NAVIGATION_TEST")) {
+            window.pages_->setCurrentIndex(2); window.show(); QApplication::processEvents();
+            window.openSettings(); QApplication::processEvents();
+            auto* enable = window.findChild<QCheckBox*>("pluginEnable_org.megavault.monochrome");
+            if (!enable || enable->isChecked()) return 41;
+            enable->setChecked(true);
+            window.settingsPage_->reject(); QApplication::processEvents();
+            auto* music = window.findChild<QPushButton*>("musicSection");
+            if (!music || !music->isVisible()) { std::fprintf(stderr,"FAIL: enabled plugin Music navigation absent\n"); return 42; }
+            music->click(); QApplication::processEvents();
+            if (window.contentStack_->currentWidget()->objectName() != "musicPluginPage") return 43;
+            window.findChild<QPushButton*>("musicBack")->click(); QApplication::processEvents();
+            if(window.contentStack_->currentWidget()!=window.pages_)return 44;
+            window.openSettings(); QApplication::processEvents();
+            enable=window.settingsPage_->findChild<QCheckBox*>("pluginEnable_org.megavault.monochrome"); enable->setChecked(false);
+            if(music->isVisible())return 45;
+            auto* toolEnable=window.settingsPage_->findChild<QCheckBox*>("pluginEnable_org.megavault.text-tools");
+            if(!toolEnable)return 46;toolEnable->setChecked(true);
+            window.settingsPage_->reject();QApplication::processEvents();
+            auto* tools=window.findChild<QPushButton*>("toolsSection");
+            if(!tools||!tools->isVisible()||music->isVisible()){std::fprintf(stderr,"FAIL: independent Tools navigation absent\n");return 47;}
+            tools->click();QApplication::processEvents();
+            if(window.contentStack_->currentWidget()->objectName()!="extensionToolsPage")return 48;
+            window.findChild<QPushButton*>("extensionBack")->click();QApplication::processEvents();
+            if(window.contentStack_->currentWidget()!=window.pages_)return 49;
+            window.lockVault(); QApplication::processEvents();
+            std::puts("PASS actual settings -> independent Music/Tools navigation -> inline pages -> back -> lock"); return 0;
+        }
         // Real encrypted photos exercise the decode/cache path as well as the
         // 20,000-row metadata fixture. All source pixels are generated here.
         for (int i = 1; i <= 64; ++i) {

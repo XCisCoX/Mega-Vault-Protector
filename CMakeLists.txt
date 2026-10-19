@@ -94,6 +94,7 @@ function(mvp_copy_runtime_dlls target)
     endif()
 endfunction()
 
+add_subdirectory(extensions)
 add_subdirectory(core)
 
 if(MVP_BUILD_APP)

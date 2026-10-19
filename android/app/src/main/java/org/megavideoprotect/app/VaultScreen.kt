@@ -330,6 +330,7 @@ fun VaultScreen(
     onOpenMusic: () -> Unit = {},
     onOpenPeer: () -> Unit = {},
     onOpenSync: () -> Unit = {},
+    onOpenPlugins: () -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
@@ -1910,6 +1911,10 @@ fun VaultScreen(
                 MvpButton("New folder", onClick = {
                     showAdd = false
                     namePrompt = NamePrompt.NewFolder(currentFolderId)
+                }, modifier = Modifier.fillMaxWidth())
+                if (!RemoteVault.connected()) MvpButton("Extensions…", onClick = {
+                    showAdd = false
+                    onOpenPlugins()
                 }, modifier = Modifier.fillMaxWidth())
                 if (!RemoteVault.connected()) MvpButton("Encrypted sync…", onClick = {
                     showAdd = false

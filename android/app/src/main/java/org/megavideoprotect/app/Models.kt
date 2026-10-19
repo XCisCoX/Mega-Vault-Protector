@@ -101,6 +101,7 @@ sealed interface Screen {
     data object Login : Screen
     data object Vault : Screen
     data object Sync : Screen
+    data object Plugins : Screen
     /** The swapped PC's library: read-only, copy only. */
     data object Peer : Screen
     data class Player(

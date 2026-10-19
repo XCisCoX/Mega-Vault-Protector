@@ -91,6 +91,18 @@ set(MVP_APP_SOURCES
     resources/resources.qrc
 )
 
+add_library(MegaVaultPlugins STATIC src/plugin_host.cpp src/plugin_audio.cpp src/plugin_tools.cpp src/media_decoder.cpp
+    include/videovault/app/plugin_audio.hpp include/videovault/app/plugin_tools.hpp include/videovault/app/plugin_host.hpp resources/plugins.qrc)
+target_include_directories(MegaVaultPlugins PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(MegaVaultPlugins PUBLIC cxx_std_20)
+set_target_properties(MegaVaultPlugins PROPERTIES AUTOMOC ON AUTORCC ON)
+target_link_libraries(MegaVaultPlugins PUBLIC VideoVault::Core MegaVaultExtensions Qt5::Widgets Qt5::Network Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
+if(WIN32)
+    target_include_directories(MegaVaultPlugins PRIVATE "${MVP_VCPKG_PREFIX}/include")
+elseif(ANDROID)
+    target_include_directories(MegaVaultPlugins PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+endif()
+
 add_library(MegaVaultSync STATIC
     src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp
     include/videovault/app/sync_state.hpp
@@ -145,6 +157,7 @@ target_link_libraries(VideoVaultApp
     PRIVATE
         VideoVault::Core
         MegaVaultSync
+        MegaVaultPlugins
         Qt5::Core
         Qt5::Concurrent
         Qt5::Widgets
@@ -227,6 +240,11 @@ endif()
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
     enable_testing()
+    add_executable(VideoVaultPluginTests tests/plugin_host.cpp)
+    target_link_libraries(VideoVaultPluginTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_host COMMAND VideoVaultPluginTests)
+    set_tests_properties(plugin_host PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultPluginTests)
     # Sync protocol 4: the state file, key derivation and validation run without
     # a server; the engine test runs against a real sync_server through
     # tests/run_sync_live.py and skips when it is started without one.
@@ -245,6 +263,19 @@ if(MVP_BUILD_TESTS)
     set_target_properties(VideoVaultGalleryPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON)
     add_test(NAME gallery_performance COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(gallery_performance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
+
+    add_executable(VideoVaultPluginToolsTests tests/plugin_tools.cpp)
+    target_link_libraries(VideoVaultPluginToolsTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_tools COMMAND VideoVaultPluginToolsTests)
+    set_tests_properties(plugin_tools PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultPluginToolsTests)
+    add_executable(VideoVaultPluginLiveTests tests/plugin_live.cpp)
+    target_link_libraries(VideoVaultPluginLiveTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_live COMMAND VideoVaultPluginLiveTests)
+    set_tests_properties(plugin_live PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
+    mvp_copy_runtime_dlls(VideoVaultPluginLiveTests)
+    add_test(NAME plugin_navigation COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(plugin_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_PLUGIN_NAVIGATION_TEST=1" TIMEOUT 60)
 
     add_executable(VideoVaultTagFilterTests
         tests/tag_filter_button.cpp
@@ -285,7 +316,7 @@ if(MVP_BUILD_TESTS)
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/sync_state.hpp)
     target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core Qt5::Widgets Qt5::Concurrent)
+    target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core MegaVaultPlugins Qt5::Widgets Qt5::Concurrent)
     target_compile_features(VideoVaultSettingsTests PRIVATE cxx_std_20)
     set_target_properties(VideoVaultSettingsTests PROPERTIES AUTOMOC ON FOLDER "Tests")
     add_test(NAME settings_page COMMAND VideoVaultSettingsTests)

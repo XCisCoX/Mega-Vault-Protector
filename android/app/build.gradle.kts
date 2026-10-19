@@ -6,6 +6,7 @@ plugins {
 
 android {
     namespace = "org.megavideoprotect.app"
+    sourceSets.getByName("main").assets.srcDir("../../plugins")
     compileSdk = 36
     // The SDK image ships no build-tools; the app build script provides a
     // 35.0.0 shim (zipalign/apksigner via apt + source.properties). AGP 8.13
