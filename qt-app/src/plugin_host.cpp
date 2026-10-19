@@ -33,6 +33,11 @@
 #include <QSlider>
 #include <QStandardPaths>
 #include <QTimer>
+#ifdef Q_OS_WIN
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winhttp.h>
+#endif
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
@@ -61,6 +66,151 @@ void wipe(QByteArray &bytes) {
     bytes.clear();
     bytes.squeeze();
 }
+#ifdef Q_OS_WIN
+// Qt 5.12 loads OpenSSL 1.1, while the shipped app carries OpenSSL 3, so
+// QSslSocket cannot initialise in the release build and every Qt HTTPS request
+// fails before it is sent. The updater already goes through WinHTTP for the
+// same reason; provider requests take that path too so music works in the
+// shipped Windows build, with the Windows certificate store and no extra DLLs.
+struct WinHttpHandle {
+    HINTERNET handle{nullptr};
+    ~WinHttpHandle() {
+        if (handle != nullptr)
+            WinHttpCloseHandle(handle);
+    }
+};
+QString winHttpError(const wchar_t *step) {
+    return QStringLiteral("%1 failed (Windows error %2).")
+        .arg(QString::fromWCharArray(step))
+        .arg(GetLastError());
+}
+bool winHttpGet(const QUrl &url, const qint64 limit,
+                const std::function<void(qint64, qint64)> &progress,
+                QByteArray *body, int *status, QUrl *location, QString *error) {
+    if (!url.isValid() || url.host().isEmpty()) {
+        *error = QStringLiteral("Invalid provider URL.");
+        return false;
+    }
+    QString target = url.path(QUrl::FullyEncoded);
+    if (target.isEmpty())
+        target = QStringLiteral("/");
+    if (!url.query().isEmpty())
+        target += QLatin1Char('?') + url.query(QUrl::FullyEncoded);
+
+    WinHttpHandle session(WinHttpOpen(L"MegaVaultProtect", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session.handle) {
+        *error = winHttpError(L"WinHttpOpen");
+        return false;
+    }
+    WinHttpSetTimeouts(session.handle, 8000, 8000, 30000, 30000);
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+    protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+    WinHttpSetOption(session.handle, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+
+    WinHttpHandle connection(WinHttpConnect(session.handle,
+                                            reinterpret_cast<LPCWSTR>(url.host().utf16()),
+                                            static_cast<INTERNET_PORT>(url.port(443)), 0));
+    if (!connection.handle) {
+        *error = winHttpError(L"WinHttpConnect");
+        return false;
+    }
+    WinHttpHandle request(WinHttpOpenRequest(connection.handle, L"GET",
+                                             reinterpret_cast<LPCWSTR>(target.utf16()), nullptr,
+                                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             WINHTTP_FLAG_SECURE));
+    if (!request.handle) {
+        *error = winHttpError(L"WinHttpOpenRequest");
+        return false;
+    }
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(request.handle, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy,
+                     sizeof(redirectPolicy));
+    const QString headerText =
+        QStringLiteral("User-Agent: MegaVaultProtect/2.0.3 (music plugin)") + QChar(13) +
+        QChar(10) + QStringLiteral("Accept: application/json, audio/*") + QChar(13) + QChar(10);
+    WinHttpAddRequestHeaders(request.handle, reinterpret_cast<LPCWSTR>(headerText.utf16()),
+                             static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD);
+    if (!WinHttpSendRequest(request.handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request.handle, nullptr)) {
+        const DWORD failure = GetLastError();
+        // 12002/12029/12030 mean timed out, could not connect, or connection
+        // aborted. On a filtered network that is the provider being
+        // unreachable, so say so instead of printing a Windows error number.
+        if (failure == ERROR_WINHTTP_TIMEOUT || failure == ERROR_WINHTTP_CANNOT_CONNECT ||
+            failure == ERROR_WINHTTP_CONNECTION_ERROR) {
+            *error = QStringLiteral(
+                "the provider is unreachable from this network (connection timed out). "
+                "If it is blocked here, turn on your VPN or system proxy and try again.");
+        } else {
+            *error = winHttpError(L"WinHttpSendRequest");
+        }
+        return false;
+    }
+
+    DWORD code = 0;
+    DWORD codeSize = sizeof(code);
+    WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeSize, WINHTTP_NO_HEADER_INDEX);
+    *status = static_cast<int>(code);
+    if (code >= 300 && code < 400) {
+        DWORD length = 0;
+        if (WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION,
+                                WINHTTP_HEADER_NAME_BY_INDEX, WINHTTP_NO_OUTPUT_BUFFER, &length,
+                                WINHTTP_NO_HEADER_INDEX) ||
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            std::wstring value(length / sizeof(wchar_t) + 1, L'\0');
+            if (WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION,
+                                    WINHTTP_HEADER_NAME_BY_INDEX, value.data(), &length,
+                                    WINHTTP_NO_HEADER_INDEX))
+                *location = QUrl(QString::fromWCharArray(value.c_str()));
+        }
+        return true;
+    }
+    if (code < 200 || code >= 300) {
+        *error = QStringLiteral("HTTP %1").arg(code);
+        return true;
+    }
+
+    DWORD reportedLength = 0;
+    DWORD lengthSize = sizeof(reportedLength);
+    const bool hasLength =
+        WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &reportedLength, &lengthSize,
+                            WINHTTP_NO_HEADER_INDEX) != FALSE;
+    if (hasLength && qint64(reportedLength) > limit) {
+        *error = QStringLiteral("Response is %1 MiB, over the %2 MiB limit.")
+                     .arg(double(reportedLength) / (1024 * 1024), 0, 'f', 1)
+                     .arg(double(limit) / (1024 * 1024), 0, 'f', 0);
+        return false;
+    }
+    qint64 received = 0;
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request.handle, &available) || available == 0)
+            break;
+        if (received + qint64(available) > limit) {
+            *error = QStringLiteral("Response exceeds the configured memory limit.");
+            return false;
+        }
+        const int offset = body->size();
+        body->resize(offset + int(available));
+        DWORD read = 0;
+        if (!WinHttpReadData(request.handle, body->data() + offset, available, &read) || read == 0) {
+            body->resize(offset);
+            break;
+        }
+        body->resize(offset + int(read));
+        received += qint64(read);
+        if (progress)
+            progress(received, hasLength ? qint64(reportedLength) : 0);
+    }
+    return true;
+}
+#endif
 class Switch final : public QCheckBox {
   public:
     explicit Switch(QWidget *p) : QCheckBox(p) {
@@ -473,12 +623,14 @@ MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
     auto *top = new QHBoxLayout;
     auto *back = new QPushButton("‹ Library", this);
     back->setObjectName("musicBack");
+    back_ = back;
     top->addWidget(back);
     auto *title = new QLabel("Music", this);
     auto font = title->font();
     font.setPointSize(17);
     font.setBold(true);
     title->setFont(font);
+    title_ = title;
     top->addWidget(title, 1);
     providers_ = new QComboBox(this);
     providers_->setObjectName("musicProvider");
@@ -594,6 +746,21 @@ MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
     refreshProviders();
 }
 MusicPluginPage::~MusicPluginPage() { stopAndClear(); }
+void MusicPluginPage::setEmbedded(const bool embedded) {
+    if (embedded_ == embedded)
+        return;
+    embedded_ = embedded;
+    // Embedded in the library folder the page has no chrome of its own: the
+    // breadcrumb already says where the user is and the library closes it.
+    if (back_ != nullptr)
+        back_->setVisible(!embedded);
+    if (title_ != nullptr)
+        title_->setVisible(!embedded);
+    if (auto *layout = qobject_cast<QVBoxLayout *>(this->layout())) {
+        layout->setContentsMargins(embedded ? 12 : 20, embedded ? 8 : 16,
+                                   embedded ? 12 : 20, embedded ? 8 : 16);
+    }
+}
 QString MusicPluginPage::vaultIdentity() const { return identity(vault_); }
 PluginManifest MusicPluginPage::manifest() const {
     for (const auto &m : host_->manifests())
@@ -692,12 +859,57 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                     "Provider DNS rejected: destination must resolve only to public Internet addresses.");
                 return;
             }
+#ifdef Q_OS_WIN
+            QPointer<MusicPluginPage> self(this);
+            auto deliver = [self, url, limit, done, redirects, generation](
+                                     QByteArray body, int status, QUrl location, QString error) mutable {
+                if (!self)
+                    return;
+                self->completeRequest(url, std::move(body), status, location, error, limit,
+                                      done, redirects, generation);
+            };
+            QtConcurrent::run([self, url, limit, deliver, generation]() mutable {
+                if (!self)
+                    return;
+                QByteArray body;
+                int status = 0;
+                QUrl location;
+                QString error;
+                const auto progress = [self, generation, limit](qint64 received, qint64 total) {
+                    if (!self)
+                        return;
+                    QMetaObject::invokeMethod(
+                        self,
+                        [self, generation, limit, received, total] {
+                            if (!self || generation != self->generation_ || limit <= metadataLimit)
+                                return;
+                            self->status_->setText(
+                                QString("Loading audio: %1 MiB%2")
+                                    .arg(double(received) / (1024 * 1024), 0, 'f', 1)
+                                    .arg(total > 0 ? QString(" / %1 MiB")
+                                                         .arg(double(total) / (1024 * 1024), 0, 'f', 1)
+                                                   : QString()));
+                        },
+                        Qt::QueuedConnection);
+                };
+                const bool ok = winHttpGet(url, limit, progress, &body, &status, &location, &error);
+                if (!self)
+                    return;
+                QMetaObject::invokeMethod(
+                    self,
+                    [deliver, body = std::move(body), status, location,
+                     error = ok ? QString() : error]() mutable {
+                        deliver(std::move(body), status, location, error);
+                    },
+                    Qt::QueuedConnection);
+            });
+            return;
+#endif
             QNetworkRequest req(url);
             req.setRawHeader("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)");
             req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
             req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
             req.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
-            network_->setProxy(QNetworkProxy::NoProxy);
             auto *reply = network_->get(req);
             replies_.insert(reply);
             reply->setReadBufferSize(std::min<qint64>(limit + 1, 65536));
@@ -744,39 +956,47 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                             wipe(*bytes);
                             return;
                         }
-                        const auto redirect =
-                            reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
-                        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                        if (*exceeded) {
-                            wipe(*bytes);
-                            status_->setText("Response exceeds the configured memory limit. Choose 64 or 128 "
-                                             "MiB in Plugins for large FLAC tracks.");
-                            return;
-                        }
-                        if (code >= 300 && code < 400 && !redirect.isEmpty()) {
-                            wipe(*bytes);
-                            request(url.resolved(redirect), limit, done, redirects + 1);
-                            return;
-                        }
-                        if (reply->error() != QNetworkReply::NoError || code < 200 || code >= 300) {
-                            wipe(*bytes);
-                            status_->setText("Provider request failed (HTTP " + QString::number(code) +
-                                             "): " + reply->errorString());
-                            if (thumbnailBusy_) {
-                                thumbnailBusy_ = false;
-                                thumbnailNext();
-                            }
-                            return;
-                        }
-                        if (bytes->size() + reply->bytesAvailable() > limit) {
-                            wipe(*bytes);
-                            status_->setText("Response exceeds memory limit.");
-                            return;
-                        }
                         bytes->append(reply->readAll());
-                        done(std::move(*bytes));
+                        completeRequest(
+                            url, std::move(*bytes),
+                            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                            reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl(),
+                            reply->error() == QNetworkReply::NoError ? QString()
+                                                                     : reply->errorString(),
+                            limit, done, redirects, generation);
                     });
         });
+}
+void MusicPluginPage::completeRequest(const QUrl &url, QByteArray bytes, const int code,
+                                      const QUrl &redirect, const QString &error, const qint64 limit,
+                                      const std::function<void(QByteArray)> &done, const int redirects,
+                                      const quint64 generation) {
+    if (generation != generation_ || !vault_ || !vault_->is_unlocked()) {
+        wipe(bytes);
+        return;
+    }
+    if (code >= 300 && code < 400 && redirect.isValid() && !redirect.isEmpty()) {
+        wipe(bytes);
+        request(url.resolved(redirect), limit, done, redirects + 1);
+        return;
+    }
+    if (!error.isEmpty() || code < 200 || code >= 300) {
+        wipe(bytes);
+        status_->setText("Provider request failed (HTTP " + QString::number(code) + "): " +
+                         (error.isEmpty() ? QStringLiteral("no response") : error));
+        if (thumbnailBusy_) {
+            thumbnailBusy_ = false;
+            thumbnailNext();
+        }
+        return;
+    }
+    if (bytes.size() > limit) {
+        wipe(bytes);
+        status_->setText("Response exceeds the configured memory limit. Choose 64 or 128 "
+                         "MiB in Extensions for large FLAC tracks.");
+        return;
+    }
+    done(std::move(bytes));
 }
 void MusicPluginPage::search() {
     const auto q = query_->text().trimmed();

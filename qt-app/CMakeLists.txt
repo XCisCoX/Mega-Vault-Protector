@@ -97,8 +97,11 @@ target_include_directories(MegaVaultPlugins PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/i
 target_compile_features(MegaVaultPlugins PUBLIC cxx_std_20)
 set_target_properties(MegaVaultPlugins PROPERTIES AUTOMOC ON AUTORCC ON)
 target_link_libraries(MegaVaultPlugins PUBLIC VideoVault::Core MegaVaultExtensions Qt5::Widgets Qt5::Network Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
-if(WIN32)
+if(WIN32 OR MINGW)
     target_include_directories(MegaVaultPlugins PRIVATE "${MVP_VCPKG_PREFIX}/include")
+    # Provider requests use WinHTTP on Windows: Qt 5.12 links OpenSSL 1.1 while
+    # the shipped app carries OpenSSL 3, so QSslSocket cannot initialise there.
+    target_link_libraries(MegaVaultPlugins PUBLIC winhttp)
 elseif(ANDROID)
     target_include_directories(MegaVaultPlugins PRIVATE ${MVP_DEP_INCLUDE_DIRS})
 endif()

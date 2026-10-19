@@ -16,6 +16,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QSslSocket>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -503,6 +504,16 @@ void SyncPage::showEvent(QShowEvent* event) {
 
 void SyncPage::signIn() {
     if (engine_->busy()) {
+        return;
+    }
+    // Without a TLS backend Qt cannot open an https URL at all, and the generic
+    // network error it returns ("TLS initialization failed") hides that. Say it
+    // plainly instead of letting the user hunt for a server problem.
+    if (!QSslSocket::supportsSsl()) {
+        signInStatus_->setText(
+            QStringLiteral("This build has no TLS library, so it cannot reach an https server. "
+                           "Windows builds need libssl-1_1-x64.dll next to the exe."));
+        signInStatus_->show();
         return;
     }
     const QString password = password_->text();

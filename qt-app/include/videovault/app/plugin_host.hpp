@@ -68,6 +68,9 @@ class MusicPluginPage final : public QWidget {
     explicit MusicPluginPage(PluginHost *, QWidget *parent = nullptr);
     ~MusicPluginPage() override;
     void setVault(std::shared_ptr<core::Vault>);
+    // Embedded mode drops the page header (back button and title) so the
+    // surface can live inside the library page, above the folder's own items.
+    void setEmbedded(bool embedded);
     void stopAndClear();
   signals:
     void closed();
@@ -80,6 +83,11 @@ class MusicPluginPage final : public QWidget {
     void showResults(const QJsonObject &, bool detail = false);
     void applyFilter();
     void request(QUrl, qint64, std::function<void(QByteArray)>, int redirects = 0);
+    // Shared tail for both network backends: applies limits, redirects and
+    // error reporting, then hands the body to the caller.
+    void completeRequest(const QUrl &, QByteArray, int status, const QUrl &redirect,
+                         const QString &error, qint64 limit,
+                         const std::function<void(QByteArray)> &, int redirects, quint64 generation);
     void thumbnailNext();
     void saveAudio();
     QString vaultIdentity() const;
@@ -98,7 +106,10 @@ class MusicPluginPage final : public QWidget {
     QLabel *nowPlaying_;
     QPushButton *play_;
     QPushButton *download_;
+    QPushButton *back_{nullptr};
+    QLabel *title_{nullptr};
     QSlider *seek_;
+    bool embedded_{false};
     int filter_ = 0;
     quint64 generation_ = 0;
     bool autoSave_ = false, saved_ = false, importBusy_ = false;
