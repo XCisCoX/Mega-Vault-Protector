@@ -5471,11 +5471,11 @@ void MainWindow::beginNewRecord() {
     }
 
     // The item is created before the editor opens, so it appears in this folder
-    // immediately — the same shape as creating a folder. The content is an
-    // empty record, which keeps the item recognisable as a record before its
-    // first edit; a zero-byte item could not be routed to the editor.
+    // immediately — the same shape as creating a folder. The content is an empty
+    // file of records, which keeps the item recognisable as a record before its
+    // first record is added; a zero-byte item could not be routed to the editor.
+    // The title lives on the library item, not inside the content.
     RecordDocument document;
-    document.title = title;
     const QByteArray bytes = serializeRecord(document);
 
     const auto vault = vault_;

@@ -219,7 +219,7 @@ Full SDK prerequisites, build procedure, and signing: [docs/ANDROID-BUILD.md](do
 | `VideoVault.Playback` | Headless decode through the encrypted reader: duration, frames, seek, and audio. No temp file. |
 | `VideoVaultCore.Tags` | Add, filter, rename, and remove tags. |
 | `VideoVaultCore.Records` | Create a record from memory, read it back, replace its content in place (same id, folders and tags kept, old package gone), and reject bad names or unknown targets. |
-| `VideoVaultRecords.Format` | The record container: marker at byte 0, escaping round-trip, version 1 migration, every common JSON value type, validation of good and bad text, members this build does not know, and the inferred value kinds. |
+| `VideoVaultRecords.Format` | The record container: marker at byte 0, escaping round-trip, a file of records, nested objects and arrays, secrets by path at any depth, sorted keys, number normalisation and the values it refuses, and the refusals for versions 1/2, booleans and null. |
 
 ```text
 ctest --preset linux-debug --output-on-failure

@@ -7,6 +7,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QShortcut>
 #include <QVBoxLayout>
@@ -68,6 +70,12 @@ InWindowSheet::InWindowSheet(QWidget* host)
 
     auto* escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(escape, &QShortcut::activated, this, [this] { finish(0); });
+}
+
+void InWindowSheet::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event);
+    QPainter painter(this);
+    painter.fillRect(rect(), QColor(0, 0, 0, 160));
 }
 
 void InWindowSheet::setTitle(const QString& title) {

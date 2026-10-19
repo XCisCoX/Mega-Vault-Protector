@@ -33,6 +33,9 @@ public:
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // The dimmed backdrop is painted, not styled: a type selector cannot match this
+    // class (it has no Q_OBJECT, so Qt knows it as a plain QWidget).
+    void paintEvent(QPaintEvent* event) override;
 
 private:
     QFrame* card_{nullptr};
