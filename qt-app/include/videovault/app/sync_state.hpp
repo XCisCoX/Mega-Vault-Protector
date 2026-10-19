@@ -131,6 +131,10 @@ struct SyncState {
 
     QMap<QString, RecordRef> records;  // record id -> what we know
     QStringList pendingDownload;       // record ids queued for a lazy download
+    // Records the user removed from *this* device on purpose. They stay in the
+    // vault (and on the other devices) and must not be pulled back down by the
+    // next pass, so the download queue skips them until they are asked for.
+    QStringList remoteOnly;
 
     bool signedIn() const { return !token.isEmpty(); }
     bool ready() const { return signedIn() && !vaultId.isEmpty() && !folder.isEmpty(); }

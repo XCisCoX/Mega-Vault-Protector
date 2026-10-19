@@ -5,10 +5,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -208,19 +210,47 @@ object LibraryArrivals {
 /** One quiet line. Tap it for the list. */
 @Composable
 fun TransferBar(onOpen: () -> Unit) {
-    val line = TransferHub.headline ?: return
-    Text(
-        line,
-        color = Color.White,
-        fontSize = 13.sp,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
+    val sync = SyncV4Run.progress
+    val line = TransferHub.headline
+    if (sync == null && line == null) return
+    Row(
+        Modifier
             .fillMaxWidth()
             .background(Color(0xFF16324F))
             .clickable(onClick = onOpen)
             .padding(horizontal = 14.dp, vertical = 8.dp),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // A sync in flight owns the left of the bar, so leaving the Sync page
+        // never hides that work is still happening.
+        if (sync != null) {
+            Text(
+                "⇅ Syncing",
+                color = Mvp.accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (line != null) "$line · ${sync.label}" else sync.label,
+                color = Color.White,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Text(
+                line.orEmpty(),
+                color = Color.White,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
 }
 
 /** What is coming in, what is moving, and what you can stop. */

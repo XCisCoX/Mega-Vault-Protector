@@ -294,6 +294,8 @@ QJsonObject SyncState::toJson() const {
     }
     QJsonArray download;
     for (const auto& id : pendingDownload) download.append(id);
+    QJsonArray remote;
+    for (const auto& id : remoteOnly) remote.append(id);
     return QJsonObject{{QStringLiteral("version"), 4},
                        {QStringLiteral("server"), server},
                        {QStringLiteral("email"), email},
@@ -305,7 +307,8 @@ QJsonObject SyncState::toJson() const {
                        {QStringLiteral("folder"), folder},
                        {QStringLiteral("cursor"), cursor},
                        {QStringLiteral("records"), recordArray},
-                       {QStringLiteral("download"), download}};
+                       {QStringLiteral("download"), download},
+                       {QStringLiteral("remoteOnly"), remote}};
 }
 
 SyncState SyncState::fromJson(const QJsonObject& object) {
@@ -328,6 +331,10 @@ SyncState SyncState::fromJson(const QJsonObject& object) {
     for (const auto& value : object.value(QStringLiteral("download")).toArray()) {
         const QString id = value.toString();
         if (isRecordId(id) && !state.pendingDownload.contains(id)) state.pendingDownload.append(id);
+    }
+    for (const auto& value : object.value(QStringLiteral("remoteOnly")).toArray()) {
+        const QString id = value.toString();
+        if (isRecordId(id) && !state.remoteOnly.contains(id)) state.remoteOnly.append(id);
     }
     return state;
 }

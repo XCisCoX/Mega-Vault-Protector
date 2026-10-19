@@ -111,11 +111,18 @@ int main(int argc, char** argv) {
         auto* lastRun = page.findChild<QLabel*>("syncLastRun");
         auto* progress = page.findChild<QProgressBar*>("syncProgress");
         auto* progressText = page.findChild<QLabel*>("syncProgressText");
-        auto* debris = page.findChild<QListWidget*>("syncDebris");
+        auto* itemList = page.findChild<QListWidget*>("syncItems");
+        auto* selectAll = page.findChild<QPushButton*>("syncSelectAll");
+        auto* keep = page.findChild<QPushButton*>("syncKeep");
+        auto* offload = page.findChild<QPushButton*>("syncOffload");
+        auto* restore = page.findChild<QPushButton*>("syncRestore");
+        auto* recycle = page.findChild<QPushButton*>("syncRecycle");
+        auto* purge = page.findChild<QPushButton*>("syncPurge");
         auto* signInStatus = page.findChild<QLabel*>("syncSignInStatus");
         check(card && work && url && email && password && signIn && back && vaults && chooseFolder
-                  && run && stop && lastRun && progress && progressText && debris && signInStatus,
-              "the sign-in card, the vault rows, Choose folder, Sync now, the progress bar and the debris list all exist");
+                  && run && stop && lastRun && progress && progressText && itemList && selectAll
+                  && keep && offload && restore && recycle && purge && signInStatus,
+              "the sign-in card, the vault rows, Choose folder, Sync now, the progress bar and the item list with its bulk actions all exist");
 
         // -- it is a page, not a dialog ------------------------------------
         check(page.findChild<QDialog*>() == nullptr, "no dialog anywhere in the sync surface");
@@ -149,10 +156,11 @@ int main(int argc, char** argv) {
               "the fields are at least 38px high");
         check(!run->isEnabled(), "Sync now waits for a signed-in account");
         check(stop->isHidden(), "there is nothing to stop before a transfer");
-        check(work->isHidden() && debris->count() == 0, "no debris rows before a sync");
-        check(page.findChildren<QPushButton*>("syncRestore").isEmpty()
-                  && page.findChildren<QPushButton*>("syncPurge").isEmpty(),
-              "Restore and Delete permanently are row actions, so none exists without a row");
+        check(work->isHidden() && itemList->count() == 0, "no item rows before a sync");
+        check(!keep->isEnabled() && !offload->isEnabled() && !restore->isEnabled()
+                  && !recycle->isEnabled() && !purge->isEnabled(),
+              "the bulk actions stay disabled until something is selected");
+        check(selectAll->text() == "Select all", "the list offers Select all");
 
         // A local item is listed as pending: already local, openable, and
         // waiting for the first pass to carry it up.

@@ -2,6 +2,8 @@
 
 #include <QDateTime>
 #include <QJsonObject>
+#include <QSet>
+#include <QStringList>
 #include <QWidget>
 
 #include <memory>
@@ -34,10 +36,11 @@ class SyncEngine;
 //   2. Signed in: the account's vaults as rows (name, usage), one inline
 //      "Choose folder" control that shows the chosen folder's name, one
 //      primary "Sync now" button, a quiet last-sync line, transfer progress
-//      as an inline bar with counts and bytes, conflict copies, and the
-//      tombstones under "Removed on another device" as rows whose own actions
-//      are Restore and Delete permanently (confirmed inside the row, not in a
-//      popup).
+//      as an inline bar with counts and bytes, and one list of everything in
+//      the vault with a checkbox on every row. The list carries the bulk
+//      actions: Select all, Keep on device, Remove from device, Restore,
+//      Recycle and Delete permanently, applied to every ticked row in one
+//      pass. A permanent delete asks inside the list before it runs.
 //
 // The page never blocks the window: a running pass only dims its own primary
 // action and shows the bar, and the rest of the app stays usable.
@@ -66,11 +69,14 @@ private:
     void signOut();
     void refresh();
     void rebuildVaults();
-    void rebuildDebris();
-    void rebuildConflicts();
+    void rebuildItems();
+    void updateSelection();
+    void selectAll(bool select);
+    QStringList checkedRecords(const QStringList& states) const;
+    void requestPurge();
+    void confirmPurge();
     void updateProgress();
     void updateFolderControl();
-    QWidget* debrisRow(const QJsonObject& item);
     QString lastRunLine() const;
     QString displayedStatus() const;
 
@@ -101,17 +107,24 @@ private:
     QLabel* progressText_{nullptr};
     QPushButton* stop_{nullptr};
     QLabel* status_{nullptr};
-    QWidget* debrisBox_{nullptr};
-    QListWidget* debris_{nullptr};
-    QWidget* conflictBox_{nullptr};
-    QListWidget* conflicts_{nullptr};
+    QWidget* itemsBox_{nullptr};
+    QListWidget* items_{nullptr};
+    QPushButton* selectAll_{nullptr};
+    QLabel* selectionLabel_{nullptr};
+    QPushButton* keep_{nullptr};
+    QPushButton* offload_{nullptr};
+    QPushButton* restore_{nullptr};
+    QPushButton* recycle_{nullptr};
+    QPushButton* purgeButton_{nullptr};
+    QWidget* confirmBar_{nullptr};
+    QLabel* confirmText_{nullptr};
+    QPushButton* confirmDelete_{nullptr};
+    QPushButton* confirmCancel_{nullptr};
 
     QString vaultSignature_;
-    QString debrisSignature_;
-    QString conflictSignature_;
-    // The debris row that asked to confirm, so its actions become "Delete" and
-    // "Cancel" in place.
-    QString confirmingRecord_;
+    QString itemsSignature_;
+    QSet<QString> checked_;
+    QStringList pendingPurge_;
     bool building_{false};
     bool firstShown_{false};
     bool vaultsRequested_{false};

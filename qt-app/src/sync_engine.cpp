@@ -148,7 +148,12 @@ QJsonArray buildItems(const std::shared_ptr<core::Vault>& vault, const sync::Syn
     }
     for (auto entry = state.records.cbegin(); entry != state.records.cend(); ++entry) {
         if (entry->localId != 0 && seen.contains(entry->localId)) continue;
-        const QString stateText = entry->deleted ? QStringLiteral("removed") : QStringLiteral("pending");
+        // A record with no local copy is either waiting to be pulled down or
+        // was taken off this device on purpose; the page words the two
+        // differently, so the state has to say which.
+        const QString stateText = entry->deleted ? QStringLiteral("removed")
+            : state.remoteOnly.contains(entry->id) ? QStringLiteral("remote")
+                                                   : QStringLiteral("pending");
         rows.append(QJsonObject{{QStringLiteral("record"), entry->id},
                                 {QStringLiteral("local"), 0.0},
                                 {QStringLiteral("name"), entry->name},
@@ -270,6 +275,114 @@ public:
     }
 
     void tombstoneOne(sync::Client& client, const QString& recordId) {
+        tombstoneRecord(client, recordId);
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Removed on every device. It stays in Removed items until it is deleted permanently.");
+    }
+
+    void restoreOne(sync::Client& client, const QString& recordId) {
+        restoreRecord(client, recordId);
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Restored. It will appear on the other devices on their next sync.");
+    }
+
+    void purgeOne(sync::Client& client, const QString& recordId) {
+        purgeRecord(client, recordId);
+        items = buildItems(vault_, state);
+        status = QStringLiteral("Deleted permanently, on the server and on this device.");
+    }
+
+    // -- a whole selection in one pass --------------------------------------
+
+    // Records the user ticked stay in the vault; only this device's copy goes.
+    void removeLocalMany(const QStringList& recordIds) {
+        if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
+        int dropped = 0;
+        for (const auto& recordId : recordIds) {
+            checkStop();
+            auto it = state.records.find(recordId);
+            if (it == state.records.end()) continue;
+            if (it->localId != 0) {
+                const qint64 localId = it->localId;
+                it->localId = 0;
+                it->localPackage.clear();
+                // The bytes go only when no other record still claims them.
+                if (state.liveRecordFor(localId) == nullptr && !claimedByOther(localId)) {
+                    if (vault_->remove_video(localId).has_value()) libraryChanged = true;
+                }
+                ++dropped;
+            }
+            if (!state.remoteOnly.contains(recordId)) state.remoteOnly.append(recordId);
+            dropPending(recordId);
+            save();
+        }
+        bump("removed_local");
+        items = buildItems(vault_, state);
+        status = dropped == 1
+            ? QStringLiteral("Removed from this device. It stays in the vault and can be restored.")
+            : QStringLiteral("Removed %1 items from this device. They stay in the vault and can be restored.")
+                  .arg(dropped);
+    }
+
+    void receiveMany(sync::Client& client, const QStringList& recordIds) {
+        int kept = 0;
+        for (const auto& recordId : recordIds) {
+            checkStop();
+            // Asking for it back takes it off the shelf, so a later pass keeps it.
+            state.remoteOnly.removeAll(recordId);
+            downloadRecord(client, recordId);
+            auto it = state.records.find(recordId);
+            if (it != state.records.end() && it->localId != 0) ++kept;
+            items = buildItems(vault_, state);
+            save();
+        }
+        items = buildItems(vault_, state);
+        status = kept == 1
+            ? QStringLiteral("Kept on this device.")
+            : QStringLiteral("Kept %1 items on this device.").arg(kept);
+    }
+
+    void tombstoneMany(sync::Client& client, const QStringList& recordIds) {
+        int count = 0;
+        for (const auto& recordId : recordIds) {
+            checkStop();
+            tombstoneRecord(client, recordId);
+            ++count;
+        }
+        items = buildItems(vault_, state);
+        status = count == 1
+            ? QStringLiteral("Removed on every device; it stays under Removed until deleted permanently.")
+            : QStringLiteral("Removed %1 items on every device; they stay under Removed until deleted permanently.")
+                  .arg(count);
+    }
+
+    void restoreMany(sync::Client& client, const QStringList& recordIds) {
+        int count = 0;
+        for (const auto& recordId : recordIds) {
+            checkStop();
+            restoreRecord(client, recordId);
+            ++count;
+        }
+        items = buildItems(vault_, state);
+        status = count == 1 ? QStringLiteral("Restored; the other devices will see it on their next sync.")
+                            : QStringLiteral("Restored %1 items; the other devices will see them on their next sync.")
+                                  .arg(count);
+    }
+
+    void purgeMany(sync::Client& client, const QStringList& recordIds) {
+        int count = 0;
+        for (const auto& recordId : recordIds) {
+            checkStop();
+            purgeRecord(client, recordId);
+            ++count;
+        }
+        items = buildItems(vault_, state);
+        status = count == 1
+            ? QStringLiteral("Deleted permanently, on the server and on this device.")
+            : QStringLiteral("Deleted %1 items permanently, on the server and on this device.").arg(count);
+    }
+
+    void tombstoneRecord(sync::Client& client, const QString& recordId) {
         if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
         const RecordRef answer = client.tombstone(state.vaultId, recordId);
         auto it = state.records.find(recordId);
@@ -281,11 +394,9 @@ public:
         state.pendingDownload.removeAll(recordId);
         bump("tombstoned");
         save();
-        items = buildItems(vault_, state);
-        status = QStringLiteral("Removed on every device. It stays in Removed items until it is deleted permanently.");
     }
 
-    void restoreOne(sync::Client& client, const QString& recordId) {
+    void restoreRecord(sync::Client& client, const QString& recordId) {
         if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
         const RecordRef answer = client.restore(state.vaultId, recordId);
         auto it = state.records.find(recordId);
@@ -295,21 +406,23 @@ public:
             it->deleted = false;
             if (answer.version > 0) it->version = answer.version;
             if (answer.updated > 0) it->updated = answer.updated;
+            // A restore asks for the item back: it leaves the shelf, so a
+            // deliberate "removed from this device" does not suppress the pull.
+            state.remoteOnly.removeAll(it->id);
             if (it->localId == 0 && !it->package.isEmpty()) queueDownload(it->id);
         }
         bump("restored");
         save();
-        items = buildItems(vault_, state);
-        status = QStringLiteral("Restored. It will appear on the other devices on their next sync.");
     }
 
-    void purgeOne(sync::Client& client, const QString& recordId) {
+    void purgeRecord(sync::Client& client, const QString& recordId) {
         if (state.vaultId.isEmpty()) fail(QStringLiteral("Choose a vault first."));
         const auto it = state.records.find(recordId);
         const qint64 localId = it == state.records.end() ? 0 : it->localId;
         client.purge(state.vaultId, recordId);
         state.records.remove(recordId);
         state.pendingDownload.removeAll(recordId);
+        state.remoteOnly.removeAll(recordId);
         // The local copy goes only when no other record still claims it, so
         // "delete permanently" can never take an item that is still shared.
         if (localId != 0 && state.liveRecordFor(localId) == nullptr && !claimedByOther(localId)) {
@@ -317,8 +430,6 @@ public:
         }
         bump("purged");
         save();
-        items = buildItems(vault_, state);
-        status = QStringLiteral("Deleted permanently, on the server and on this device.");
     }
 
 private:
@@ -692,6 +803,12 @@ private:
             return;
         }
         if (record.package.isEmpty()) return;
+        // Taken off this device on purpose: the record is known and current, and
+        // nothing is downloaded until the user asks for it back.
+        if (record.localId == 0 && state.remoteOnly.contains(record.id) && !contentChanged) {
+            dropPending(record.id);
+            return;
+        }
         if (contentChanged || record.localId == 0 || !itemExists(record.localId)) {
             queueDownload(record.id);
             return;
@@ -1180,6 +1297,36 @@ void SyncEngine::restore(const QString& recordId) {
 void SyncEngine::purge(const QString& recordId) {
     launch(QStringLiteral("Deleting permanently..."), Launch::Vault,
            [recordId](Job& job, sync::Client& client) { job.purgeOne(client, recordId); });
+}
+
+void SyncEngine::receiveMany(const QStringList& recordIds) {
+    if (recordIds.isEmpty()) return;
+    launch(QStringLiteral("Downloading items..."), Launch::Vault,
+           [recordIds](Job& job, sync::Client& client) { job.receiveMany(client, recordIds); });
+}
+
+void SyncEngine::tombstoneMany(const QStringList& recordIds) {
+    if (recordIds.isEmpty()) return;
+    launch(QStringLiteral("Removing items..."), Launch::Vault,
+           [recordIds](Job& job, sync::Client& client) { job.tombstoneMany(client, recordIds); });
+}
+
+void SyncEngine::restoreMany(const QStringList& recordIds) {
+    if (recordIds.isEmpty()) return;
+    launch(QStringLiteral("Restoring items..."), Launch::Vault,
+           [recordIds](Job& job, sync::Client& client) { job.restoreMany(client, recordIds); });
+}
+
+void SyncEngine::purgeMany(const QStringList& recordIds) {
+    if (recordIds.isEmpty()) return;
+    launch(QStringLiteral("Deleting items permanently..."), Launch::Vault,
+           [recordIds](Job& job, sync::Client& client) { job.purgeMany(client, recordIds); });
+}
+
+void SyncEngine::removeFromDevice(const QStringList& recordIds) {
+    if (recordIds.isEmpty()) return;
+    launch(QStringLiteral("Removing from this device..."), Launch::Vault,
+           [recordIds](Job& job, sync::Client&) { job.removeLocalMany(recordIds); });
 }
 
 void SyncEngine::stop() {

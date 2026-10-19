@@ -18,6 +18,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -28,7 +30,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -82,6 +86,41 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
     var status by remember { mutableStateOf("") }
     var summary by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var items by remember { mutableStateOf<List<SyncV4Engine.Item>>(emptyList()) }
+    var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var askingPurge by remember { mutableStateOf(false) }
+
+    suspend fun reloadItems(current: SyncV4Link) {
+        items = runCatching {
+            withContext(Dispatchers.IO) { SyncV4Engine(context, store, current).items() }
+        }.getOrDefault(emptyList())
+    }
+
+    // Everything in the list acts on the ticked rows in one pass, like the
+    // desktop page: one engine, one save, then the list is rebuilt.
+    fun act(block: (SyncV4Engine) -> Unit) {
+        val current = link ?: return
+        if (busy || SyncV4Run.running) return
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    val engine = SyncV4Engine(context, store, current)
+                    block(engine)
+                    engine.link
+                }
+                link = updated
+                reloadItems(updated)
+                picked = picked.filter { id -> items.any { it.recordId == id } }.toSet()
+                GalleryCache.clear()
+            } catch (failure: Throwable) {
+                fail(failure)
+            } finally {
+                busy = false
+            }
+        }
+    }
 
     // Only ask the relay whether it takes signups once the URL is well formed.
     LaunchedEffect(server) {
@@ -183,25 +222,16 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
 
     fun syncNow() {
         val current = link ?: return
-        if (busy) return
-        busy = true
+        if (busy || SyncV4Run.running) return
         error = null
-        scope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) {
-                    val engine = SyncV4Engine(context, store, current)
-                    engine.syncNow { step -> status = step }
-                    engine.link to engine.summary
-                }
-                link = result.first
-                summary = result.second
-                status = ""
-                GalleryCache.clear()
-            } catch (failure: Throwable) {
-                fail(failure)
-            } finally {
-                busy = false
-            }
+        // The pass runs in the process, not in this screen, so opening a video
+        // or leaving the page does not interrupt it.
+        SyncV4Run.start(context, store, current) { updated, text ->
+            link = updated
+            summary = text
+            status = ""
+            scope.launch { reloadItems(updated) }
+            GalleryCache.clear()
         }
     }
 
@@ -216,7 +246,13 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
             password = ""
             summary = ""
             error = null
+            items = emptyList()
+            picked = emptySet()
         }
+    }
+
+    LaunchedEffect(link?.token) {
+        link?.let { reloadItems(it) }
     }
 
     Column(
@@ -251,6 +287,39 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
                 summary = summary,
                 status = status,
                 busy = busy,
+                items = items,
+                picked = picked,
+                running = SyncV4Run.running,
+                progressLabel = SyncV4Run.progress?.label.orEmpty(),
+                askingPurge = askingPurge,
+                onToggle = { id ->
+                    picked = if (picked.contains(id)) picked - id else picked + id
+                },
+                onSelectAll = {
+                    picked = if (picked.size == items.size) emptySet()
+                    else items.map { it.recordId }.toSet()
+                },
+                onKeep = {
+                    val ids = items.filter { it.recordId in picked && it.state != "synced" }
+                        .map { it.recordId }
+                    act { engine -> engine.downloadItems(ids) }
+                },
+                onRemove = {
+                    val ids = items.filter { it.recordId in picked && it.state == "synced" }
+                        .map { it.recordId }
+                    act { engine -> engine.removeFromDevice(ids) }
+                },
+                onRecycle = {
+                    val ids = items.filter { it.recordId in picked }.map { it.recordId }
+                    act { engine -> engine.tombstoneItems(ids) }
+                },
+                onAskPurge = { askingPurge = true },
+                onCancelPurge = { askingPurge = false },
+                onConfirmPurge = {
+                    askingPurge = false
+                    val ids = items.filter { it.recordId in picked }.map { it.recordId }
+                    act { engine -> engine.purgeItems(ids) }
+                },
                 onSync = { syncNow() },
                 onDisconnect = { disconnect() },
             )
@@ -421,6 +490,19 @@ private fun ConnectedCard(
     summary: String,
     status: String,
     busy: Boolean,
+    items: List<SyncV4Engine.Item>,
+    picked: Set<String>,
+    running: Boolean,
+    progressLabel: String,
+    askingPurge: Boolean,
+    onToggle: (String) -> Unit,
+    onSelectAll: () -> Unit,
+    onKeep: () -> Unit,
+    onRemove: () -> Unit,
+    onRecycle: () -> Unit,
+    onAskPurge: () -> Unit,
+    onCancelPurge: () -> Unit,
+    onConfirmPurge: () -> Unit,
     onSync: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
@@ -437,18 +519,136 @@ private fun ConnectedCard(
             fontSize = 12.sp,
             modifier = Modifier.padding(top = 4.dp),
         )
-        Text(
-            "${link.mappings.size} linked item${if (link.mappings.size == 1) "" else "s"}",
-            color = Mvp.description,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(top = 2.dp, bottom = 14.dp),
-        )
+        Row(
+            Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "${items.size} item${if (items.size == 1) "" else "s"} in this vault",
+                color = Mvp.description,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                if (picked.size == items.size && items.isNotEmpty()) "Clear" else "Select all",
+                color = Mvp.accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = items.isNotEmpty()) { onSelectAll() }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+
+        if (items.isEmpty()) {
+            Text(
+                "Nothing here yet. Run a sync to list what the vault holds.",
+                color = Mvp.description,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
+        }
+        items.take(200).forEach { item ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (item.recordId in picked) Mvp.selection else Mvp.glass)
+                    .clickable { onToggle(item.recordId) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = item.recordId in picked,
+                    onCheckedChange = { onToggle(item.recordId) },
+                    colors = CheckboxDefaults.colors(checkedColor = Mvp.accent, uncheckedColor = Mvp.description),
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        item.name,
+                        color = Mvp.title,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        itemStateLabel(item) + if (item.path.contains('/')) " · ${item.path.substringBeforeLast('/')}" else "",
+                        color = Mvp.description,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MvpButton(
+                text = "Keep here",
+                onClick = onKeep,
+                modifier = Modifier.weight(1f),
+                enabled = !busy && !running && items.any { it.recordId in picked && it.state != "synced" },
+            )
+            MvpButton(
+                text = "Remove here",
+                onClick = onRemove,
+                modifier = Modifier.weight(1f),
+                enabled = !busy && !running && items.any { it.recordId in picked && it.state == "synced" },
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MvpButton(
+                text = "Recycle",
+                onClick = onRecycle,
+                modifier = Modifier.weight(1f),
+                enabled = !busy && !running && picked.isNotEmpty(),
+            )
+            MvpButton(
+                text = "Delete forever",
+                onClick = onAskPurge,
+                modifier = Modifier.weight(1f),
+                enabled = !busy && !running && picked.isNotEmpty(),
+            )
+        }
+        if (askingPurge) {
+            Text(
+                if (picked.size == 1) "Delete 1 item permanently? It cannot be restored."
+                else "Delete ${picked.size} items permanently? They cannot be restored.",
+                color = Color(0xFFFF6B6B),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MvpButton(text = "Cancel", onClick = onCancelPurge, modifier = Modifier.weight(1f))
+                MvpButton(text = "Delete", onClick = onConfirmPurge, modifier = Modifier.weight(1f), primary = true)
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
         MvpButton(
-            text = "Sync now",
+            text = if (running) "Syncing…" else "Sync now",
             onClick = onSync,
             modifier = Modifier.fillMaxWidth(),
             primary = true,
-            enabled = !busy,
+            enabled = !busy && !running,
+        )
+        if (running && progressLabel.isNotBlank()) {
+            Text(
+                progressLabel,
+                color = Mvp.accent,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        Text(
+            "Sync keeps running when you leave this page or play something.",
+            color = Mvp.description,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp),
         )
         Spacer(Modifier.height(8.dp))
         MvpButton(text = "Disconnect", onClick = onDisconnect, modifier = Modifier.fillMaxWidth(), enabled = !busy)
@@ -459,4 +659,11 @@ private fun ConnectedCard(
             Text(summary, color = Mvp.description, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
         }
     }
+}
+
+/** Where one row stands, in the words the screen uses. */
+private fun itemStateLabel(item: SyncV4Engine.Item): String = when (item.state) {
+    "synced" -> "On this phone"
+    "remote" -> "Only in the cloud"
+    else -> "Waiting to download"
 }

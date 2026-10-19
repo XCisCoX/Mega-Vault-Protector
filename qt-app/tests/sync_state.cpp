@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
         record.localId = 7;
         state.records.insert(record.id, record);
         state.pendingDownload.append(QStringLiteral("rec-2"));
+        state.remoteOnly.append(QStringLiteral("rec-3"));
         state.packageKey = QString(64, 'e');
         saveState(path, first.state, state);
 
@@ -104,6 +105,8 @@ int main(int argc, char** argv) {
         check(back.version == 3 && back.name == "note.txt" && back.path == "Work", "record fields round trip");
         check(back.tags.size() == 2 && back.package == record.package && back.localId == 7, "tags, package and mapping round trip");
         check(loaded.pendingDownload == QStringList{QStringLiteral("rec-2")}, "the download queue round trips");
+        check(loaded.remoteOnly == QStringList{QStringLiteral("rec-3")},
+              "items removed from this device are remembered, so a pass will not pull them back");
         check(loaded.packageKey == state.packageKey, "the package password round trips inside the state");
 
         // A state file written by a build from before the package key existed:
