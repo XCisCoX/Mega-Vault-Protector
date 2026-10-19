@@ -74,10 +74,16 @@ class MusicPluginPage final : public QWidget {
     // The library's search offers "Search <provider> for ..." and hands the
     // term here, so the provider opens already showing those results.
     void searchFor(const QString &term);
+    // Hands one catalogue entry (a song, an album or an artist) to the page's
+    // own player / detail fetch, so the library can drive it without a second
+    // playback path.
+    void activateItem(const QJsonObject &item);
     void stopAndClear();
   signals:
     void closed();
     void imported();
+    // A search answer, so a library folder can list what the provider has.
+    void catalogueReady(const QString &term, const QJsonObject &results);
 
   private:
     void refreshProviders();

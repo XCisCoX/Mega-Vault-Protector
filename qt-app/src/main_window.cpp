@@ -151,6 +151,9 @@ constexpr int kKindPhone = 3;
 // The library's search offers "Search <provider> for ..." as an entry that
 // opens the music provider with those results.
 constexpr int kKindPluginSearch = 4;
+constexpr int kKindPluginBack = 5;
+constexpr int kKindPluginCategory = 6;
+constexpr int kKindPluginEntry = 7;
 // Set on a gallery row while it is cut (Ctrl+X). The delegate fades the row.
 constexpr int kCutDimRole = Qt::UserRole + 17;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
@@ -2667,6 +2670,21 @@ QWidget* MainWindow::buildUnlockedPage() {
         this, [this](QTreeWidgetItem* item, int) {
             const int kind = item->data(0, Qt::UserRole + 12).toInt();
             const auto id = item->data(0, Qt::UserRole).toLongLong();
+                        if (pluginFolder_) {
+                if (kind == kKindPluginBack) {
+                    leavePluginFolder();
+                } else if (kind == kKindPluginCategory) {
+                    pluginCategory_ = item->data(0, Qt::UserRole + 21).toInt();
+                    rebuildPluginFolder();
+                } else if (kind == kKindPluginEntry) {
+                    const int entry = item->data(0, Qt::UserRole + 21).toInt();
+                    if (entry >= 0 && entry < static_cast<int>(pluginRows_.size())) {
+                        ensurePluginPage();
+                        pluginMusic_->activateItem(pluginRows_[static_cast<std::size_t>(entry)]);
+                    }
+                }
+                return;
+            }
             if (kind == 1) {
                 openFolder(-id);
             } else if (kind == 2) {
@@ -2674,7 +2692,7 @@ QWidget* MainWindow::buildUnlockedPage() {
             } else if (kind == kKindPhone) {
                 openPeerBrowser();
             } else if (kind == kKindPluginSearch) {
-                openPluginMusic(searchText_);
+                enterPluginFolder(searchText_);
             } else {
                 beginPlayback(id);
             }
@@ -2683,6 +2701,21 @@ QWidget* MainWindow::buildUnlockedPage() {
         this, [this](QListWidgetItem* item) {
             const int kind = item->data(Qt::UserRole + 12).toInt();
             const auto id = item->data(Qt::UserRole).toLongLong();
+                        if (pluginFolder_) {
+                if (kind == kKindPluginBack) {
+                    leavePluginFolder();
+                } else if (kind == kKindPluginCategory) {
+                    pluginCategory_ = item->data(Qt::UserRole + 21).toInt();
+                    rebuildPluginFolder();
+                } else if (kind == kKindPluginEntry) {
+                    const int entry = item->data(Qt::UserRole + 21).toInt();
+                    if (entry >= 0 && entry < static_cast<int>(pluginRows_.size())) {
+                        ensurePluginPage();
+                        pluginMusic_->activateItem(pluginRows_[static_cast<std::size_t>(entry)]);
+                    }
+                }
+                return;
+            }
             if (kind == 1) {
                 openFolder(-id);
             } else if (kind == 2) {
@@ -2690,7 +2723,7 @@ QWidget* MainWindow::buildUnlockedPage() {
             } else if (kind == kKindPhone) {
                 openPeerBrowser();
             } else if (kind == kKindPluginSearch) {
-                openPluginMusic(searchText_);
+                enterPluginFolder(searchText_);
             } else {
                 beginPlayback(id);
             }
@@ -3874,6 +3907,162 @@ void MainWindow::openPluginMusic(const QString& query) {
     if (!query.isEmpty()) {
         pluginMusic_->searchFor(query);
     }
+}
+
+void MainWindow::ensurePluginPage() {
+    if (pluginMusic_ != nullptr) {
+        return;
+    }
+    pluginMusic_ = new MusicPluginPage(pluginHost_, contentStack_);
+    contentStack_->addWidget(pluginMusic_);
+    connect(pluginMusic_, &MusicPluginPage::closed, this, [this] {
+        if (pluginFolder_) {
+            leavePluginFolder();
+        } else {
+            contentStack_->setCurrentWidget(pages_);
+        }
+    });
+    connect(pluginMusic_, &MusicPluginPage::imported, this, [this] { refreshGallery(); });
+    connect(pluginMusic_, &MusicPluginPage::catalogueReady, this,
+        [this](const QString& term, const QJsonObject& results) {
+            if (!pluginFolder_ || term != pluginQuery_) {
+                return;
+            }
+            pluginCatalogue_ = results;
+            rebuildPluginFolder();
+        });
+}
+
+// A provider entry is a folder like any other, so the library's own rows,
+// sorting and Back behaviour carry it: no separate browsing surface.
+void MainWindow::enterPluginFolder(const QString& term) {
+    if (!vault_ || !vault_->is_unlocked() || iconList_ == nullptr) {
+        return;
+    }
+    ensurePluginPage();
+    pluginFolder_ = true;
+    pluginQuery_ = term;
+    pluginCategory_ = 0;
+    pluginCatalogue_ = QJsonObject();
+    pluginRows_.clear();
+    pluginMusic_->setVault(vault_);
+    iconList_->clear();
+    detailsTree_->clear();
+    rebuildPluginFolder();
+    pluginMusic_->searchFor(term);
+}
+
+void MainWindow::leavePluginFolder() {
+    pluginFolder_ = false;
+    pluginCatalogue_ = QJsonObject();
+    pluginRows_.clear();
+    refreshGallery();
+}
+
+void MainWindow::rebuildPluginFolder() {
+    if (!pluginFolder_ || iconList_ == nullptr || detailsTree_ == nullptr) {
+        return;
+    }
+    iconList_->clear();
+    detailsTree_->clear();
+    pluginRows_.clear();
+    constexpr qlonglong kSynthetic = -910000;
+
+    auto addRow = [&](const int kind, const qlonglong id, const QString& label,
+                      const QString& note, const int entry) {
+        addLibraryEntry(iconList_, detailsTree_, id, kind, label, note);
+        QListWidgetItem* iconRow = iconList_->item(iconList_->count() - 1);
+        QTreeWidgetItem* treeRow = detailsTree_->topLevelItem(detailsTree_->topLevelItemCount() - 1);
+        if (iconRow != nullptr) {
+            iconRow->setData(Qt::UserRole + 12, kind);
+            iconRow->setData(Qt::UserRole + 21, entry);
+        }
+        if (treeRow != nullptr) {
+            treeRow->setData(0, Qt::UserRole + 12, kind);
+            treeRow->setData(0, Qt::UserRole + 21, entry);
+        }
+    };
+
+    QString provider = QStringLiteral("the provider");
+    for (const auto& manifest : pluginHost_->manifests()) {
+        if (manifest.protocol == "monochrome-tracks-v1" && pluginHost_->enabled(manifest.id)) {
+            provider = manifest.name;
+            break;
+        }
+    }
+
+    addRow(kKindPluginBack, kSynthetic, QStringLiteral("\u2039 Back to library"),
+           QStringLiteral("Folder"), -1);
+
+    const QJsonArray songs = pluginCatalogue_.value(QStringLiteral("tracks")).toArray();
+    const QJsonArray albums = pluginCatalogue_.value(QStringLiteral("releases")).toArray();
+    const QJsonArray artists = pluginCatalogue_.value(QStringLiteral("artists")).toArray();
+    if (pluginCatalogue_.isEmpty()) {
+        addRow(kKindPluginEntry, kSynthetic - 1,
+               QStringLiteral("Searching %1 for \u201C%2\u201D\u2026").arg(provider, pluginQuery_),
+               QStringLiteral("Waiting"), -1);
+        recountLibrary();
+        return;
+    }
+    if (pluginCategory_ == 0) {
+        addRow(kKindPluginCategory, kSynthetic - 10, QStringLiteral("Songs"),
+               QStringLiteral("%1 results").arg(songs.size()), 1);
+        addRow(kKindPluginCategory, kSynthetic - 11, QStringLiteral("Albums"),
+               QStringLiteral("%1 results").arg(albums.size()), 2);
+        addRow(kKindPluginCategory, kSynthetic - 12, QStringLiteral("Artists"),
+               QStringLiteral("%1 results").arg(artists.size()), 3);
+        recountLibrary();
+        return;
+    }
+
+    const QJsonArray list = pluginCategory_ == 1 ? songs : pluginCategory_ == 2 ? albums : artists;
+    const int kind = pluginCategory_ == 1 ? 1 : pluginCategory_ == 2 ? 3 : 2;
+    for (const auto& value : list) {
+        QJsonObject item = value.toObject();
+        QString id;
+        if (pluginCategory_ == 1) {
+            id = item.value(QStringLiteral("trackId")).toString();
+        } else if (pluginCategory_ == 2) {
+            id = item.value(QStringLiteral("releaseId")).toString();
+        } else {
+            id = item.value(QStringLiteral("artistId")).toString();
+        }
+        if (id.isEmpty()) {
+            id = item.value(QStringLiteral("id")).toString();
+        }
+        if (id.isEmpty()) {
+            continue;
+        }
+        item.insert(QStringLiteral("_id"), id);
+        item.insert(QStringLiteral("_kind"), kind);
+        QString name = pluginCategory_ == 3
+            ? item.value(QStringLiteral("name")).toString(
+                  item.value(QStringLiteral("displayName")).toString())
+            : item.value(QStringLiteral("title")).toString();
+        if (name.isEmpty()) {
+            name = QStringLiteral("Untitled");
+        }
+        QString note = pluginCategory_ == 1 ? QStringLiteral("Song")
+                      : pluginCategory_ == 2 ? QStringLiteral("Album")
+                                             : QStringLiteral("Artist");
+        const QJsonArray artistList = item.value(QStringLiteral("artists")).toArray();
+        QStringList names;
+        for (const auto& artist : artistList) {
+            const QJsonObject entry = artist.toObject();
+            const QString label = entry.value(QStringLiteral("name")).toString(
+                entry.value(QStringLiteral("displayName")).toString());
+            if (!label.isEmpty()) {
+                names << label;
+            }
+        }
+        if (!names.isEmpty()) {
+            note = names.join(QStringLiteral(", ")) + QStringLiteral(" \u00B7 ") + note;
+        }
+        pluginRows_.push_back(item);
+        addRow(kKindPluginEntry, kSynthetic - 100 - pluginRows_.size(), name, note,
+               static_cast<int>(pluginRows_.size() - 1));
+    }
+    recountLibrary();
 }
 
 // Searching the library also asks the enabled provider whether it has
@@ -6608,6 +6797,9 @@ void MainWindow::decorateVisible() {
 }
 
 void MainWindow::refreshGallery() {
+    if (pluginFolder_) {
+        return;  // the folder owns the view until Back
+    }
     // Invalidate callbacks before deleting any rows, including error paths.
     const auto generation = ++galleryGeneration_;
     galleryPaintGeneration_ = generation;

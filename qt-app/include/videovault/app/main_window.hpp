@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QJsonObject>
+
 #include "videovault/app/sync_state.hpp"
 
 #include <QMainWindow>
@@ -175,6 +177,17 @@ private:
     void openSettings();
     void openPluginMusic(const QString& query = QString());
     void offerPluginSearchRow();
+    // The provider shown as a folder of the library: the root lists the
+    // categories, a category lists its entries, Back returns to the real folder.
+    void ensurePluginPage();
+    void enterPluginFolder(const QString& term);
+    void leavePluginFolder();
+    void rebuildPluginFolder();
+    bool pluginFolder_{false};
+    QString pluginQuery_;
+    QJsonObject pluginCatalogue_;
+    int pluginCategory_{0};
+    std::vector<QJsonObject> pluginRows_;
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};

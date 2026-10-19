@@ -1007,6 +1007,13 @@ void MusicPluginPage::searchFor(const QString &term) {
     search();
 }
 
+void MusicPluginPage::activateItem(const QJsonObject &item) {
+    auto *row = new QListWidgetItem();
+    row->setData(Qt::UserRole, item);
+    activate(row);
+    delete row;
+}
+
 void MusicPluginPage::search() {
     const auto q = query_->text().trimmed();
     if (q.isEmpty() || manifest().id.isEmpty())
@@ -1029,6 +1036,9 @@ void MusicPluginPage::search() {
     });
 }
 void MusicPluginPage::showResults(const QJsonObject &o, bool detail) {
+    if (!detail) {
+        emit catalogueReady(query_ != nullptr ? query_->text().trimmed() : QString(), o);
+    }
     results_->clear();
     artwork_.clear();
     auto append = [this](const QJsonArray &arr, int kind) {
