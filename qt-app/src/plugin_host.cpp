@@ -310,6 +310,10 @@ bool PluginHost::remove(const QString& id, QString* error) {
 QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget *parent) {
     auto *page = new QWidget(parent);
     page->setObjectName("pluginManager");
+    // The section is laid out inside a 480px-wide settings window. Nothing here
+    // may impose a horizontal minimum wider than that: labels wrap and the
+    // compact controls below are shrinkable, so let the host width win.
+    page->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
     auto *description = new QLabel(
@@ -354,7 +358,10 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
             const auto key = settingKey(m.id);
             const auto vk = settingKey(m.id, identity(vault));
             auto *autoRow = new QHBoxLayout;
-            autoRow->addWidget(new QLabel("Save automatically after playback starts", options), 1);
+            auto *autoLabel = new QLabel("Save automatically after playback starts", options);
+            autoLabel->setTextFormat(Qt::PlainText);
+            autoLabel->setWordWrap(true);
+            autoRow->addWidget(autoLabel, 1);
             auto *autosave = new Switch(options);
             autosave->setAccessibleName("Save music automatically after playback starts");
             autosave->setObjectName("pluginAutoSave_" + m.id);
@@ -376,26 +383,37 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
             }
             int idx = folder->findData(QSettings().value(vk + "folder", qlonglong(0)));
             folder->setCurrentIndex(idx < 0 ? 0 : idx);
-            opts->addWidget(new QLabel("Encrypted destination (this vault only)", options));
+            auto *destinationLabel = new QLabel("Encrypted destination (this vault only)", options);
+            destinationLabel->setTextFormat(Qt::PlainText);
+            destinationLabel->setWordWrap(true);
+            opts->addWidget(destinationLabel);
             opts->addWidget(folder);
             connect(folder, qOverload<int>(&QComboBox::currentIndexChanged), this, [folder, vk](int i) {
                 if (i >= 0)
                     QSettings().setValue(vk + "folder", folder->itemData(i));
             });
             auto *caps = new QHBoxLayout;
-            caps->addWidget(new QLabel("Audio memory limit", options), 1);
-            auto *group = new QButtonGroup(options);
-            for (int cap : {32, 64, 128}) {
-                auto *b = new QPushButton(QString::number(cap) + " MiB", options);
-                b->setCheckable(true);
-                group->addButton(b);
-                b->setChecked(QSettings().value(key + "memoryMiB", 32).toInt() == cap);
-                caps->addWidget(b);
-                connect(b, &QPushButton::clicked, this, [this, key, cap, id=m.id] {
-                    QSettings().setValue(key + "memoryMiB", cap);
-                    emit changed(id);
-                });
-            }
+            auto *capLabel = new QLabel("Audio memory limit", options);
+            capLabel->setTextFormat(Qt::PlainText);
+            capLabel->setWordWrap(true);
+            caps->addWidget(capLabel, 1);
+            // One combo instead of three buttons: the same three choices fit a
+            // narrow window without pushing the whole section wider.
+            auto *capsBox = new QComboBox(options);
+            capsBox->setAccessibleName("Audio memory limit");
+            capsBox->setObjectName("pluginMemoryLimit_" + m.id);
+            for (int cap : {32, 64, 128})
+                capsBox->addItem(QString::number(cap) + " MiB", cap);
+            const int capIndex = capsBox->findData(QSettings().value(key + "memoryMiB", 32).toInt());
+            capsBox->setCurrentIndex(capIndex < 0 ? 0 : capIndex);
+            caps->addWidget(capsBox);
+            connect(capsBox, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                    [this, capsBox, key, id = m.id](int index) {
+                        if (index >= 0) {
+                            QSettings().setValue(key + "memoryMiB", capsBox->itemData(index));
+                            emit changed(id);
+                        }
+                    });
             opts->addLayout(caps);
             } else {
                 auto* explanation=new QLabel("Fresh runtime per command · bounded memory and execution time · plain-text results only",options);

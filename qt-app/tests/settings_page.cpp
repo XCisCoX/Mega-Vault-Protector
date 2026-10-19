@@ -3,6 +3,7 @@
 #include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
+#include <QAbstractButton>
 #include <QAccessible>
 #include <QCheckBox>
 #include <QComboBox>
@@ -22,7 +23,10 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <iostream>
+#include <algorithm>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace {
 void check(bool condition, const char* message) {
@@ -160,6 +164,21 @@ int main(int argc, char** argv) {
                 auto* scroll = qobject_cast<QScrollArea*>(sections->currentWidget());
                 if (scroll && scroll->widget()->width() > scroll->viewport()->width()) {
                     std::cerr << "layout size=" << size.width() << " section=" << index << " content=" << scroll->widget()->width() << " viewport=" << scroll->viewport()->width() << '\n';
+                    // Name the controls that force the width so a font-dependent
+                    // failure on another platform is diagnosable from CI logs.
+                    std::vector<std::pair<int, std::string>> widest;
+                    for (auto* child : scroll->widget()->findChildren<QWidget*>()) {
+                        const int minimum = child->minimumSizeHint().width();
+                        if (minimum < 200) continue;
+                        std::string name = child->metaObject()->className();
+                        if (!child->objectName().isEmpty()) name += " '" + child->objectName().toStdString() + "'";
+                        if (auto* text = qobject_cast<QLabel*>(child)) name += " text='" + text->text().left(40).toStdString() + "'";
+                        if (auto* button = qobject_cast<QAbstractButton*>(child)) name += " text='" + button->text().left(40).toStdString() + "'";
+                        widest.emplace_back(minimum, name);
+                    }
+                    std::sort(widest.rbegin(), widest.rend());
+                    for (std::size_t i = 0; i < widest.size() && i < 8; ++i)
+                        std::cerr << "  min=" << widest[i].first << ' ' << widest[i].second << '\n';
                 }
                 check(scroll && scroll->widget()->width() <= scroll->viewport()->width(), "no horizontally clipped content");
             }
