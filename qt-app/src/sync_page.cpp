@@ -510,7 +510,10 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     confirmLayout->addWidget(confirmCancel_);
     confirmLayout->addWidget(confirmDelete_);
     confirmBar_->hide();
-    itemsLayout->addWidget(confirmBar_);
+    // The question appears above the list, never where an action button was a
+    // moment ago: a click on "Delete permanently" must not land on "Delete"
+    // because the row grew under the pointer.
+    itemsLayout->insertWidget(1, confirmBar_);
 
     itemsBox_->hide();
     workLayout->addWidget(itemsBox_);
