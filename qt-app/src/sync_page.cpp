@@ -508,8 +508,13 @@ void SyncPage::signIn() {
     }
     // Without a TLS backend Qt cannot open an https URL at all, and the generic
     // network error it returns ("TLS initialization failed") hides that. Say it
-    // plainly instead of letting the user hunt for a server problem.
-    if (!QSslSocket::supportsSsl()) {
+    // plainly instead of letting the user hunt for a server problem. An empty
+    // address stays the engine's own refusal, which names the rule.
+    const QString address = url_->text().trimmed();
+    // Only https needs the missing library; a plain-http address still goes
+    // through the engine, which reports its own connection result.
+    if (address.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive) &&
+        !QSslSocket::supportsSsl()) {
         signInStatus_->setText(
             QStringLiteral("This build has no TLS library, so it cannot reach an https server. "
                            "Windows builds need libssl-1_1-x64.dll next to the exe."));
