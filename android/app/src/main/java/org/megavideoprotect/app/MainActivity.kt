@@ -211,34 +211,39 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onPlay = { id, name, playlist ->
-                                lifecycleScope.launch {
-                                    val kind = withContext(Dispatchers.IO) { FileKinds.resolve(id, name) }
-                                    if (kind.route == 0) {
-                                        notice = "this format currently not supported"
-                                        return@launch
-                                    }
-                                    val next = when {
-                                        FileKinds.isImage(kind) -> Screen.Image(id, name)
-                                        kind.route == 4 -> Screen.Text(id, name)
-                                        kind.route == 3 -> Screen.Pdf(id, name)
-                                        kind.route == 2 -> {
-                                            val songs = withContext(Dispatchers.IO) {
-                                                playlist.filter { FileKinds.resolve(it.id, it.name).route == 2 }
-                                                    .map { PlayItem(it.id, it.name) }
-                                            }
-                                            Screen.Music(id, name, songs)
+                                // A tap opens what was tapped, now. This used to
+                                // read the header of every file in the folder
+                                // (one vault read each, competing with the
+                                // gallery's probes) before the player appeared,
+                                // which is what made the first video take a
+                                // minute on a fresh vault. The name answers
+                                // without touching the vault; only a name that
+                                // says nothing at all falls back to a read.
+                                val known = FileKinds.peek(id) ?: FileKinds.fromNameOnly(name)
+                                when {
+                                    FileKinds.isImage(known) -> show(Screen.Image(id, name))
+                                    known.route == 4 -> show(Screen.Text(id, name))
+                                    known.route == 3 -> show(Screen.Pdf(id, name))
+                                    known.route == 2 -> show(Screen.Music(
+                                        id, name, playlist.filter { FileKinds.looksLikeAudio(it.name) }))
+                                    known.route == 1 -> show(Screen.Player(
+                                        id, name, playlist.filter { FileKinds.looksLikeVideo(it.name) }))
+                                    else -> lifecycleScope.launch {
+                                        // No extension and nothing cached: one
+                                        // read is unavoidable, and only for the
+                                        // item actually tapped.
+                                        val sniffed = withContext(Dispatchers.IO) { FileKinds.resolve(id, name) }
+                                        when {
+                                            FileKinds.isImage(sniffed) -> show(Screen.Image(id, name))
+                                            sniffed.route == 4 -> show(Screen.Text(id, name))
+                                            sniffed.route == 3 -> show(Screen.Pdf(id, name))
+                                            sniffed.route == 2 -> show(Screen.Music(
+                                                id, name, listOf(PlayItem(id, name))))
+                                            sniffed.route == 1 -> show(Screen.Player(
+                                                id, name, listOf(PlayItem(id, name))))
+                                            else -> notice = "this format currently not supported"
                                         }
-                                        else -> {
-                                            val playable = withContext(Dispatchers.IO) {
-                                                playlist.filter {
-                                                    val item = FileKinds.resolve(it.id, it.name)
-                                                    item.route == 1 && !FileKinds.isImage(item)
-                                                }.map { PlayItem(it.id, it.name) }
-                                            }
-                                            Screen.Player(id, name, playable)
-                                        }
                                     }
-                                    show(next)
                                 }
                             },
                         )
