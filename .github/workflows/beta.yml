@@ -238,6 +238,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Release notes compare against the previous published tag, so the
+          # whole history and every tag must be present.
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -256,6 +260,33 @@ jobs:
           test -f "$dir/app-release.apk"
           mv "$dir/app-release.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
+      # Deterministic summary of everything since the previous release tag. When
+      # the optional MVP_NOTES_API_KEY secret is set, the same facts are handed
+      # to an OpenAI-compatible endpoint to be written as prose; without it the
+      # notes are still accurate, just terser.
+      - name: Generate release notes
+        shell: bash
+        env:
+          MVP_NOTES_API_KEY: ${{ secrets.MVP_NOTES_API_KEY }}
+          MVP_NOTES_MODEL: ${{ vars.MVP_NOTES_MODEL }}
+          MVP_NOTES_ENDPOINT: ${{ vars.MVP_NOTES_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-notes.py \
+            --auto \
+            --version "${{ needs.version.outputs.tag }}" \
+            --to "${{ needs.version.outputs.tag }}" \
+            --out "$RUNNER_TEMP/notes.md"
+          {
+            echo "Prerelease. Windows, Linux, and Android downloads."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo "- **Windows x64:** unzip and run \`MegaVaultProtect.exe\`."
+            echo "- **Linux x64:** extract and run \`./MegaVaultProtect.sh\`. Built on Ubuntu 24.04; needs glibc 2.39 or newer."
+            echo "- **Android (arm64):** install \`MegaVaultProtect-android-arm64.apk\` on an arm64 phone running Android 8 or newer."
+          } > "$RUNNER_TEMP/body.md"
+
       - name: Create GitHub Beta
         uses: softprops/action-gh-release@v2
         with:
@@ -263,12 +294,7 @@ jobs:
           name: Mega Vault Protect ${{ needs.version.outputs.tag }}
           prerelease: true
           fail_on_unmatched_files: true
-          body: |
-            Prerelease. Windows, Linux, and Android downloads.
-
-            - **Windows x64:** unzip and run `MegaVaultProtect.exe`.
-            - **Linux x64:** extract and run `./MegaVaultProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer.
-            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer.
+          body_path: ${{ runner.temp }}/body.md
           files: |
             ${{ runner.temp }}/artifacts/MegaVaultProtect-windows-x64.zip
             ${{ runner.temp }}/artifacts/MegaVaultProtect-linux-x64.tar.gz

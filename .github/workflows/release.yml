@@ -250,6 +250,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The notes diff against the previous published tag.
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -268,20 +271,42 @@ jobs:
           test -f "$dir/app-release.apk"
           mv "$dir/app-release.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
+      # Deterministic change summary since the previous release tag, optionally
+      # written as prose by an OpenAI-compatible endpoint when
+      # MVP_NOTES_API_KEY is configured. Without the secret the notes are still
+      # accurate and the release never depends on a network service.
+      - name: Generate release notes
+        shell: bash
+        env:
+          MVP_NOTES_API_KEY: ${{ secrets.MVP_NOTES_API_KEY }}
+          MVP_NOTES_MODEL: ${{ vars.MVP_NOTES_MODEL }}
+          MVP_NOTES_ENDPOINT: ${{ vars.MVP_NOTES_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-notes.py \
+            --auto \
+            --version "${{ needs.version.outputs.tag }}" \
+            --to "${{ needs.version.outputs.tag }}" \
+            --out "$RUNNER_TEMP/notes.md"
+          {
+            echo "Windows, Linux, and Android downloads for this version."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo "- **Windows x64:** unzip and run \`MegaVaultProtect.exe\`."
+            echo "- **Linux x64:** extract and run \`./MegaVaultProtect.sh\`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive."
+            echo "- **Android (arm64):** install \`MegaVaultProtect-android-arm64.apk\` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app."
+            echo
+            echo "The vault stays on your machine. Playback does not decrypt videos onto disk."
+          } > "$RUNNER_TEMP/body.md"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: Mega Vault Protect ${{ needs.version.outputs.tag }}
           fail_on_unmatched_files: true
-          body: |
-            Windows, Linux, and Android downloads for this version.
-
-            - **Windows x64:** unzip and run `MegaVaultProtect.exe`.
-            - **Linux x64:** extract and run `./MegaVaultProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive.
-            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app. Copies installed from releases published before this became the case carry a per-build CI key and need one uninstall before they can join that line.
-
-            The vault stays on your machine. Playback does not decrypt videos onto disk.
+          body_path: ${{ runner.temp }}/body.md
           files: |
             ${{ runner.temp }}/artifacts/MegaVaultProtect-windows-x64.zip
             ${{ runner.temp }}/artifacts/MegaVaultProtect-linux-x64.tar.gz
