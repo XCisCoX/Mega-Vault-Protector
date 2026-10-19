@@ -837,7 +837,14 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
         url.host(), this, [this, url, limit, done, redirects, generation](const QHostInfo &info) {
             if (generation != generation_ || !vault_ || !vault_->is_unlocked())
                 return;
-            bool publicOnly = info.error() == QHostInfo::NoError && !info.addresses().isEmpty();
+            // A resolver that answers nothing (filtered DNS is common) must not
+            // be read as "private address": the transport resolves the name
+            // again against the declared host, so let it try and report the
+            // real failure. Only an address that truly is not public stops it.
+            const bool lookupFailed =
+                info.error() != QHostInfo::NoError || info.addresses().isEmpty();
+            bool publicOnly = true;
+            QString offender;
             for (const auto &address : info.addresses()) {
                 bool ok = address.isGlobal();
                 if (address.protocol() == QAbstractSocket::IPv4Protocol) {
@@ -852,11 +859,15 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                          !address.isInSubnet(QHostAddress::parseSubnet("2001::/23")) &&
                          !address.isInSubnet(QHostAddress::parseSubnet("2002::/16"));
                 }
+                if (!ok && offender.isEmpty()) {
+                    offender = address.toString();
+                }
                 publicOnly = publicOnly && ok;
             }
-            if (!publicOnly) {
-                status_->setText(
-                    "Provider DNS rejected: destination must resolve only to public Internet addresses.");
+            if (!lookupFailed && !publicOnly) {
+                const QString reason = QStringLiteral("address %1 is not public").arg(offender);
+                status_->setText(QStringLiteral("Provider ") + reason + QStringLiteral("; the request was not sent."));
+                emit catalogueFailed(query_ != nullptr ? query_->text().trimmed() : QString(), reason);
                 return;
             }
 #ifdef Q_OS_WIN
@@ -982,8 +993,13 @@ void MusicPluginPage::completeRequest(const QUrl &url, QByteArray bytes, const i
     }
     if (!error.isEmpty() || code < 200 || code >= 300) {
         wipe(bytes);
-        status_->setText("Provider request failed (HTTP " + QString::number(code) + "): " +
-                         (error.isEmpty() ? QStringLiteral("no response") : error));
+        ++searchToken_;
+        const QString message = error.isEmpty() ? QStringLiteral("no response") : error;
+        status_->setText("Provider request failed (HTTP " + QString::number(code) + "): " + message);
+        if (url.path() == QLatin1String("/search")) {
+            emit catalogueFailed(query_ != nullptr ? query_->text().trimmed() : QString(),
+                                 QStringLiteral("HTTP %1 · %2").arg(code).arg(message));
+        }
         if (thumbnailBusy_) {
             thumbnailBusy_ = false;
             thumbnailNext();
@@ -1016,13 +1032,40 @@ void MusicPluginPage::activateItem(const QJsonObject &item) {
 
 void MusicPluginPage::search() {
     const auto q = query_->text().trimmed();
-    if (q.isEmpty() || manifest().id.isEmpty())
+    if (q.isEmpty())
         return;
+    // The page may be driven before it is on screen (the library's provider
+    // folder), so the provider is taken from the host rather than from a combo
+    // box that may not have been filled yet.
+    auto m = manifest();
+    if (m.id.isEmpty()) {
+        for (const auto &candidate : host_->manifests()) {
+            if (candidate.protocol == "monochrome-tracks-v1" && host_->enabled(candidate.id)) {
+                m = candidate;
+                break;
+            }
+        }
+    }
+    if (m.id.isEmpty()) {
+        status_->setText("No enabled music provider.");
+        emit catalogueFailed(q, QStringLiteral("no enabled provider"));
+        return;
+    }
     stopAndClear();
     query_->setText(q);
     query_->setCursorPosition(0);
     status_->setText("Searching Monochrome…");
-    auto u = manifest().baseUrl;
+    const int token = ++searchToken_;
+    // A provider that never answers (blocked host, dead network) must not look
+    // like a provider that is thinking: give the search a deadline.
+    QTimer::singleShot(15000, this, [this, token, q] {
+        if (token != searchToken_) {
+            return;  // answered, or a newer search replaced this one
+        }
+        status_->setText("The provider did not answer within 15 seconds.");
+        emit catalogueFailed(q, QStringLiteral("no answer within 15 s"));
+    });
+    auto u = m.baseUrl;
     u.setPath("/search");
     u.setQuery("q=" + QString::fromLatin1(QUrl::toPercentEncoding(q)));
     request(u, metadataLimit, [this](QByteArray b) {
@@ -1036,6 +1079,7 @@ void MusicPluginPage::search() {
     });
 }
 void MusicPluginPage::showResults(const QJsonObject &o, bool detail) {
+    ++searchToken_;
     if (!detail) {
         emit catalogueReady(query_ != nullptr ? query_->text().trimmed() : QString(), o);
     }

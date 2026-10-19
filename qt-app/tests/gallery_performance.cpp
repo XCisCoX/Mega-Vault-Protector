@@ -22,10 +22,49 @@
 #include <QDir>
 #include <QCheckBox>
 #include <QPushButton>
+#include <QLineEdit>
+#include <QComboBox>
+#include <QLabel>
 #include <cstdio>
 
 namespace videovault::app {
 struct GalleryPerformanceTestAccess {
+    static int creation() {
+        QTemporaryDir temp(qEnvironmentVariable("TMPDIR", QDir::tempPath())
+            + QStringLiteral("/MVP-creation-XXXXXX"));
+        if (!temp.isValid()) return 50;
+        for (int profile = 0; profile < 2; ++profile) {
+            MainWindow window;
+            window.showSetup();
+            window.show();
+            const QString root = temp.path() + QStringLiteral("/vault-%1").arg(profile);
+            window.setupLocation_->setText(root);
+            window.setupPassword_->setText(QStringLiteral("Disposable creation test"));
+            window.setupConfirmation_->setText(QStringLiteral("Disposable creation test"));
+            window.securityProfile_->setCurrentIndex(profile);
+            window.beginCreate();
+            QElapsedTimer clock;
+            clock.start();
+            while (window.watcher_ && clock.elapsed() < 60000) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!window.vault_ || !window.vault_->is_unlocked()) {
+                std::fprintf(stderr, "FAIL creation profile %d: %s\n", profile,
+                    qPrintable(window.setupError_->text()));
+                return 51;
+            }
+            window.lockVault();
+            auto opened = core::Vault::open(std::filesystem::path(root.toStdWString()),
+                "Disposable creation test");
+            if (!opened) {
+                std::fprintf(stderr, "FAIL reopen: %s\n", opened.error().technical_detail.c_str());
+                return 52;
+            }
+            std::printf("PASS real setup worker: profile %d creation, unlock, reopen\n", profile);
+        }
+        return 0;
+    }
     static void drain(MainWindow& window) {
         QElapsedTimer clock;
         clock.start();
@@ -42,6 +81,7 @@ struct GalleryPerformanceTestAccess {
         }
     }
     static int run() {
+        if (qEnvironmentVariableIsSet("MVP_VAULT_CREATION_TEST")) return creation();
         const auto scratch = qEnvironmentVariable("TMPDIR", QDir::tempPath());
         QTemporaryDir temp(scratch + QStringLiteral("/MVP-gallery-XXXXXX"));
         core::Argon2Parameters parameters;

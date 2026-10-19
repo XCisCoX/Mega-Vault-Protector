@@ -266,6 +266,9 @@ if(MVP_BUILD_TESTS)
     set_target_properties(VideoVaultGalleryPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON)
     add_test(NAME gallery_performance COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(gallery_performance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
+    add_test(NAME vault_creation_ui COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(vault_creation_ui PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_VAULT_CREATION_TEST=1" TIMEOUT 150)
 
     add_executable(VideoVaultPluginToolsTests tests/plugin_tools.cpp)
     target_link_libraries(VideoVaultPluginToolsTests PRIVATE MegaVaultPlugins)

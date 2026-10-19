@@ -84,6 +84,9 @@ class MusicPluginPage final : public QWidget {
     void imported();
     // A search answer, so a library folder can list what the provider has.
     void catalogueReady(const QString &term, const QJsonObject &results);
+    // The search could not be answered (offline, blocked, provider error), so
+    // the folder can say why instead of waiting forever.
+    void catalogueFailed(const QString &term, const QString &message);
 
   private:
     void refreshProviders();
@@ -119,6 +122,9 @@ class MusicPluginPage final : public QWidget {
     QLabel *title_{nullptr};
     QSlider *seek_;
     bool embedded_{false};
+    // Bumped whenever the provider answers; a search that never answers is
+    // reported by its own deadline instead of leaving the row at "Waiting".
+    int searchToken_{0};
     int filter_ = 0;
     quint64 generation_ = 0;
     bool autoSave_ = false, saved_ = false, importBusy_ = false;

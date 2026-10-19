@@ -3901,6 +3901,18 @@ void MainWindow::openPluginMusic(const QString& query) {
         contentStack_->addWidget(pluginMusic_);
         connect(pluginMusic_, &MusicPluginPage::closed, this, [this] { contentStack_->setCurrentWidget(pages_); });
         connect(pluginMusic_, &MusicPluginPage::imported, this, [this] { refreshGallery(); });
+    connect(pluginMusic_, &MusicPluginPage::catalogueFailed, this,
+        [this](const QString& term, const QString& message) {
+            if (!pluginFolder_ || term != pluginQuery_) {
+                return;
+            }
+            if (pluginDeadline_ != nullptr) {
+                pluginDeadline_->stop();
+            }
+
+            pluginCatalogue_ = QJsonObject();
+            rebuildPluginFolder(QStringLiteral("Could not reach the provider · ") + message);
+        });
     }
     pluginMusic_->setVault(vault_);
     contentStack_->setCurrentWidget(pluginMusic_);
@@ -3928,6 +3940,10 @@ void MainWindow::ensurePluginPage() {
             if (!pluginFolder_ || term != pluginQuery_) {
                 return;
             }
+            if (pluginDeadline_ != nullptr) {
+                pluginDeadline_->stop();
+            }
+
             pluginCatalogue_ = results;
             rebuildPluginFolder();
         });
@@ -3948,18 +3964,34 @@ void MainWindow::enterPluginFolder(const QString& term) {
     pluginMusic_->setVault(vault_);
     iconList_->clear();
     detailsTree_->clear();
+
     rebuildPluginFolder();
+    if (pluginDeadline_ == nullptr) {
+        pluginDeadline_ = new QTimer(this);
+        pluginDeadline_->setSingleShot(true);
+    }
+    pluginDeadline_->disconnect();
+    connect(pluginDeadline_, &QTimer::timeout, this, [this] {
+        if (pluginFolder_ && pluginCatalogue_.isEmpty()) {
+
+            rebuildPluginFolder(QStringLiteral("no answer within 12 s"));
+        }
+    });
+    pluginDeadline_->start(12000);
     pluginMusic_->searchFor(term);
 }
 
 void MainWindow::leavePluginFolder() {
+    if (pluginDeadline_ != nullptr) {
+        pluginDeadline_->stop();
+    }
     pluginFolder_ = false;
     pluginCatalogue_ = QJsonObject();
     pluginRows_.clear();
     refreshGallery();
 }
 
-void MainWindow::rebuildPluginFolder() {
+void MainWindow::rebuildPluginFolder(const QString& problem) {
     if (!pluginFolder_ || iconList_ == nullptr || detailsTree_ == nullptr) {
         return;
     }

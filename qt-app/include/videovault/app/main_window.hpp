@@ -182,12 +182,15 @@ private:
     void ensurePluginPage();
     void enterPluginFolder(const QString& term);
     void leavePluginFolder();
-    void rebuildPluginFolder();
+    void rebuildPluginFolder(const QString& problem = QString());
     bool pluginFolder_{false};
     QString pluginQuery_;
     QJsonObject pluginCatalogue_;
     int pluginCategory_{0};
     std::vector<QJsonObject> pluginRows_;
+    // The folder's own deadline: a provider that never answers must not leave
+    // the row at "Waiting" for the rest of the session.
+    QTimer* pluginDeadline_{nullptr};
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};
