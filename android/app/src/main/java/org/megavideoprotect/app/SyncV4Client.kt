@@ -199,7 +199,7 @@ class SyncV4Client(
         }
     }
 
-    private fun reject(status: Int) {
+    private fun reject(status: Int): Nothing {
         throw when (status) {
             401 -> Failure(
                 "The server rejected this device's token. Sign in again, or issue a new device token on the website.",
