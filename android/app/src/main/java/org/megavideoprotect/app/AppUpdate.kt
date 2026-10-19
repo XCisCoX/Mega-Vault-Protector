@@ -99,10 +99,19 @@ fun selectRelease(body: String, current: String, includeBeta: Boolean): AppRelea
 }
 
 /** Null when this install is already the latest release, or GitHub cannot be reached. */
-fun newerRelease(current: String, includeBeta: Boolean = false): AppRelease? {
-    val (body, status) = fetchText(if (includeBeta) RELEASES_ALL else RELEASES) ?: return null
-    if (status !in 200..299) return null
-    return selectRelease(body, current, includeBeta)
+fun newerRelease(current: String, includeBeta: Boolean = false): AppRelease? =
+    fetchRelease(current, includeBeta).second
+
+/**
+ * first = "GitHub answered", second = the release it named. A failed fetch and a
+ * genuine "you are up to date" both return null, and they must not be treated
+ * the same: only a real answer may clear what we remembered.
+ */
+private fun fetchRelease(current: String, includeBeta: Boolean): Pair<Boolean, AppRelease?> {
+    val answer = fetchText(if (includeBeta) RELEASES_ALL else RELEASES) ?: return false to null
+    val (body, status) = answer
+    if (status !in 200..299) return false to null
+    return true to selectRelease(body, current, includeBeta)
 }
 
 /**
@@ -112,19 +121,29 @@ fun newerRelease(current: String, includeBeta: Boolean = false): AppRelease? {
  */
 fun checkForUpdate(context: Context, force: Boolean = false): AppRelease? {
     val beta = ThemePrefs.includeBeta(context)
+    val installed = installedVersion(context)
     if (!force) {
-        if (!ThemePrefs.checkAutomatically(context)) return null
+        if (!ThemePrefs.checkAutomatically(context)) return cachedRelease(context, installed)
         val last = ThemePrefs.lastCheckMs(context)
         val elapsed = System.currentTimeMillis() - last
         if (last > 0L && elapsed in 0 until CHECK_INTERVAL_MS &&
             ThemePrefs.lastCheckBeta(context) == beta
         ) {
-            return null
+            // Within the interval: answer from what the last real check found,
+            // otherwise the update button disappears for six hours.
+            return cachedRelease(context, installed)
         }
     }
     ThemePrefs.recordCheck(context, beta, System.currentTimeMillis())
-    return newerRelease(installedVersion(context), beta)
+    val (answered, found) = fetchRelease(installed, beta)
+    if (!answered) return cachedRelease(context, installed)
+    ThemePrefs.rememberRelease(context, found)
+    return found
 }
+
+/** The last release a check found, while it is still newer than this install. */
+fun cachedRelease(context: Context, installed: String = installedVersion(context)): AppRelease? =
+    ThemePrefs.rememberedRelease(context)?.takeIf { isNewerVersion(it.version, installed) }
 
 fun isNewerVersion(latest: String, current: String): Boolean {
     fun parts(text: String): List<Int> {

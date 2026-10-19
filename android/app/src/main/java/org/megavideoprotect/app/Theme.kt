@@ -145,6 +145,9 @@ object ThemePrefs {
     private const val KEY_BETA = "updates/includeBeta"
     private const val KEY_LAST_CHECK = "updates/lastCheckUtcMs"
     private const val KEY_LAST_CHANNEL = "updates/lastCheckBeta"
+    private const val KEY_RELEASE_VERSION = "updates/foundVersion"
+    private const val KEY_RELEASE_URL = "updates/foundUrl"
+    private const val KEY_RELEASE_SIZE = "updates/foundSize"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -191,6 +194,30 @@ object ThemePrefs {
     fun lastCheckMs(context: Context): Long = prefs(context).getLong(KEY_LAST_CHECK, 0L)
 
     fun lastCheckBeta(context: Context): Boolean = prefs(context).getBoolean(KEY_LAST_CHANNEL, false)
+
+    /**
+     * The release the last successful check found. Remembering it is what keeps
+     * the update button visible: a throttled or offline check must return the
+     * answer we already have instead of pretending there is nothing to install.
+     */
+    fun rememberedRelease(context: Context): AppRelease? {
+        val stored = prefs(context)
+        val version = stored.getString(KEY_RELEASE_VERSION, null) ?: return null
+        val url = stored.getString(KEY_RELEASE_URL, null) ?: return null
+        return AppRelease(version, url, stored.getLong(KEY_RELEASE_SIZE, 0L))
+    }
+
+    fun rememberRelease(context: Context, release: AppRelease?) {
+        val edit = prefs(context).edit()
+        if (release == null) {
+            edit.remove(KEY_RELEASE_VERSION).remove(KEY_RELEASE_URL).remove(KEY_RELEASE_SIZE)
+        } else {
+            edit.putString(KEY_RELEASE_VERSION, release.version)
+                .putString(KEY_RELEASE_URL, release.apkUrl)
+                .putLong(KEY_RELEASE_SIZE, release.size)
+        }
+        edit.apply()
+    }
 
     fun recordCheck(context: Context, beta: Boolean, atMs: Long) {
         prefs(context).edit()

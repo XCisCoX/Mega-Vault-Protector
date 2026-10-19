@@ -728,6 +728,7 @@ fun VaultScreen(
     var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
     var updateProgress by remember { mutableStateOf<Float?>(null) }
     var stagedUpdateApk by remember { mutableStateOf<File?>(null) }
+    var updateCardHidden by remember { mutableStateOf(false) }
     var packagePlan by remember { mutableStateOf<PackagePlan?>(null) }
     var armedPackage by remember { mutableStateOf<PackagePlan?>(null) }
     var packagePassword by remember { mutableStateOf("") }
@@ -738,10 +739,13 @@ fun VaultScreen(
             runCatching { checkForUpdate(context) }.getOrNull()
         }
         pendingRelease = release
+        if (release == null) return@LaunchedEffect
+        val cached = File(context.cacheDir, "update-${release.version}.apk")
+        if (cached.isFile && cached.length() > 0L) stagedUpdateApk = cached
         // "Download automatically" prepares the package quietly; installing
         // still needs the phone's own installer confirmation, exactly like a
         // manual update tap.
-        if (release != null && ThemePrefs.downloadAutomatically(context)) {
+        if (stagedUpdateApk == null && ThemePrefs.downloadAutomatically(context)) {
             withContext(Dispatchers.IO) {
                 runCatching {
                     val apk = File(context.cacheDir, "update-${release.version}.apk")
@@ -849,34 +853,37 @@ fun VaultScreen(
             if (failure != null) error = failure else refresh()
         }
     }
-    fun startAppUpdate() {
+    /**
+     * Downloads only. Installing is a separate, deliberate tap: the system
+     * installer must not appear out of a progress bar that never ends.
+     */
+    fun downloadAppUpdate() {
         val release = pendingRelease ?: return
         if (updateProgress != null) return
+        updateCardHidden = false
         updateProgress = 0f
         scope.launch {
             val failure = withContext(Dispatchers.IO) {
                 try {
-                    val staged = stagedUpdateApk
-                    val apk = if (staged != null && staged.isFile && staged.length() > 0L) {
-                        updateProgress = 0.99f
-                        staged
-                    } else {
-                        File(context.cacheDir, "update.apk").also {
-                            downloadRelease(release, it) { progress -> updateProgress = progress }
-                        }
-                    }
-                    updateProgress = 1f
-                    installRelease(context, apk)
+                    val apk = File(context.cacheDir, "update-${release.version}.apk")
+                    downloadRelease(release, apk) { progress -> updateProgress = progress }
+                    stagedUpdateApk = apk
                     null
                 } catch (e: Exception) {
-                    e.message ?: "Update failed"
+                    e.message ?: "Download failed"
                 }
             }
-            if (failure != null) {
-                updateProgress = null
-                error = failure
-            }
+            // The bar is about bytes; when they are all here it goes away and
+            // the Install action takes its place.
+            updateProgress = null
+            if (failure != null) error = failure
         }
+    }
+
+    fun installStagedUpdate() {
+        val apk = stagedUpdateApk ?: return
+        runCatching { installRelease(context, apk) }
+            .onFailure { error = it.message ?: "The installer could not start" }
     }
 
     var showAdd by remember { mutableStateOf(false) }
@@ -1161,7 +1168,16 @@ fun VaultScreen(
             SettingsDialog(
                 currentTags = tags,
                 remote = RemoteVault.connected(),
-                onDismiss = { showSettings = false },
+                onDismiss = {
+                    showSettings = false
+                    // Settings can run a forced check ("Check now"); adopt its
+                    // answer so the update action appears without a restart.
+                    pendingRelease = cachedRelease(context)
+                    if (pendingRelease != null) {
+                        val cached = File(context.cacheDir, "update-${pendingRelease?.version}.apk")
+                        if (cached.isFile && cached.length() > 0L) stagedUpdateApk = cached
+                    }
+                },
                 onChanged = { refresh() },
             )
         }
@@ -1439,8 +1455,11 @@ fun VaultScreen(
                     GalleryCache.search = text
                 },
                 onMusic = { showMusic = true },
-                onUpdate = { startAppUpdate() },
-                updateReady = pendingRelease != null && updateProgress == null,
+                onUpdate = { downloadAppUpdate() },
+                updateReady = pendingRelease != null &&
+                    stagedUpdateApk == null && updateProgress == null,
+                updateStaged = stagedUpdateApk != null && updateProgress == null,
+                onInstallUpdate = { installStagedUpdate() },
                 onItemMenu = if (selectedIds.size == 1) {
                     {
                         videos.firstOrNull { it.id == selectedIds.first() }?.let { openActions(it) }
@@ -1523,15 +1542,57 @@ fun VaultScreen(
                     .fillMaxWidth()
                     .navigationBarsPadding()
                     .padding(16.dp)
-                    .background(Color(0xFF1C1C1E), RoundedCornerShape(14.dp))
+                    .background(Mvp.card, RoundedCornerShape(14.dp))
+                    .border(1.dp, Mvp.cardBorder, RoundedCornerShape(14.dp))
                     .padding(14.dp),
             ) {
-                Text("Updating…", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Downloading update…", color = Mvp.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 LinearProgressIndicator(
                     progress = { (updateProgress ?: 0f).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     color = Mvp.accent,
                     trackColor = Mvp.inputBg,
+                )
+            }
+        } else if (stagedUpdateApk != null && !updateCardHidden) {
+            Row(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(16.dp)
+                    .background(Mvp.card, RoundedCornerShape(14.dp))
+                    .border(1.dp, Mvp.cardBorder, RoundedCornerShape(14.dp))
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Update ready", color = Mvp.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        pendingRelease?.version?.let { "Version $it is downloaded." } ?: "The update is downloaded.",
+                        color = Mvp.description,
+                        fontSize = 12.sp,
+                    )
+                }
+                Text(
+                    "Later",
+                    color = Mvp.description,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { updateCardHidden = true }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                )
+                Text(
+                    "Install",
+                    color = Mvp.primary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Mvp.primary.copy(alpha = 0.16f))
+                        .clickable { installStagedUpdate() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                 )
             }
         }
@@ -2227,6 +2288,8 @@ private fun GalleryHeader(
     onMusic: () -> Unit,
     onUpdate: () -> Unit,
     updateReady: Boolean,
+    updateStaged: Boolean,
+    onInstallUpdate: () -> Unit,
     onItemMenu: (() -> Unit)?,
     onImport: () -> Unit,
     onSettings: () -> Unit,
@@ -2278,6 +2341,18 @@ private fun GalleryHeader(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
+            if (updateStaged) {
+                Text(
+                    "Install",
+                    color = Mvp.accent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(onClick = onInstallUpdate)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            }
             if (updateReady) {
                 HeaderIcon("Update", R.drawable.msg_download, onUpdate)
             }
