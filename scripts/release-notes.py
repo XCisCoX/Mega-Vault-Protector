@@ -183,6 +183,32 @@ def reviewable_diff(base: str, head: str, limit: int = MAX_DIFF_BYTES) -> str:
     return "".join(chunks)[:limit]
 
 
+def new_components(base: str, head: str, limit: int = 12) -> list[str]:
+    """Authored files that first appeared in this range, tests and vendor aside.
+
+    Picked round-robin by area so one platform cannot fill the whole list.
+    """
+    added = git("diff", "--diff-filter=A", "--name-only", f"{base}..{head}").splitlines()
+    by_area: dict[str, list[str]] = {}
+    for path in added:
+        path = path.strip()
+        if not path or area_of(path) == "vendored":
+            continue
+        if any(part in path for part in ("/tests/", "-tests/", "/test/")):
+            continue
+        if path.startswith(("tests/", "test/")) or path.endswith(("_test.py", ".test.js", ".test.ts")):
+            continue
+        by_area.setdefault(area_of(path), []).append(path)
+    picked: list[str] = []
+    depth = 0
+    while len(picked) < limit and any(len(v) > depth for v in by_area.values()):
+        for files in by_area.values():
+            if len(files) > depth and len(picked) < limit:
+                picked.append(files[depth])
+        depth += 1
+    return picked
+
+
 def notable_paths(base: str, head: str, limit: int = 40) -> list[str]:
     raw = git("diff", "--numstat", f"{base}..{head}")
     scored = []
@@ -218,6 +244,7 @@ def summarize(base: str, head: str, version: str) -> dict:
         "groups": {kind: value for kind, value in grouped.items() if value},
         "stat": diff_stat(base, head),
         "paths": notable_paths(base, head),
+        "new_components": new_components(base, head),
         "diff": reviewable_diff(base, head),
         "subjects": [c["subject"] for c in items if user_facing(c)],
     }
@@ -236,6 +263,12 @@ def deterministic_notes(summary: dict) -> str:
     if stat.get("vendored_files"):
         lines.append("")
         lines.append(f"Vendored sources updated separately ({stat['vendored_files']} files); they are not part of the user-facing changes above.")
+    components = summary.get("new_components") or []
+    if components:
+        lines.append("")
+        lines.append("### New files")
+        for path in components:
+            lines.append(f"- `{path}`")
     for kind in KIND_ORDER:
         items = summary["groups"].get(kind)
         if not items:
