@@ -41,6 +41,10 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    // The card has a fixed width, so its height has to come from the layout's
+    // heightForWidth at that width: a word-wrapped message is otherwise cut off.
+    void fitCard();
+
     QFrame* card_{nullptr};
     QLabel* title_{nullptr};
     QLabel* message_{nullptr};
