@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Mega Vault Protect
+GenericName=Encrypted file library
+Comment=A private, encrypted library for your files
+Exec=@EXEC@ %f
+Icon=MegaVaultProtect
+Terminal=false
+Categories=Utility;Security;FileTools;
+Keywords=vault;encrypt;library;password;
+MimeType=application/x-megavault-package;
+StartupWMClass=MegaVaultProtect

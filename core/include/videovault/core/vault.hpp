@@ -199,6 +199,10 @@ public:
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 
+    // Plaintext byte length for one id. Playback must never list/probe the
+    // whole library just to implement AVSEEK_SIZE for the selected item.
+    [[nodiscard]] Result<std::uint64_t> video_size(std::int64_t video_id) const;
+
     // Resolves the stored package file for a video and verifies it exists.
     [[nodiscard]] Result<std::filesystem::path> package_path(
         std::int64_t video_id) const;

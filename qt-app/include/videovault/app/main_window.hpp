@@ -1,5 +1,7 @@
 #pragma once
 
+#include "videovault/app/sync_state.hpp"
+
 #include <QMainWindow>
 #include <QStringList>
 
@@ -9,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 class QAbstractButton;
@@ -23,6 +26,9 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
+class QPixmap;
+class QThreadPool;
 class QProgressBar;
 class QPushButton;
 class QThread;
@@ -53,6 +59,10 @@ class PlayerWindow;
 class MusicWindow;
 class PdfWindow;
 class RecordWindow;
+class SyncEngine;
+class SyncPage;
+class TagFilterButton;
+class SettingsDialog;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -85,6 +95,7 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
+    friend struct GalleryPerformanceTestAccess;
     void buildInterface();
     QWidget* buildSetupPage();
     QWidget* buildLoginPage();
@@ -103,11 +114,32 @@ private:
     void flushExternalImports();
     bool handleExplorerDrag(QObject* watched, QEvent* event);
     void moveItemsToFolder(std::int64_t destination);
+    // Rows travel as (kind, signed role) pairs, exactly as the gallery stores
+    // them, so a drop moves what the drag carried, not the live selection.
+    using GalleryRow = std::pair<int, qlonglong>;
+    std::vector<GalleryRow> selectedRows() const;
+    void captureDragPayload(bool from_details);
+    void clearDragPayload();
+    // Returns true when every requested move landed. sourceFolder is where the
+    // rows were listed from, so moving them back there is a silent no-op.
+    bool moveRowsToFolder(const std::vector<GalleryRow>& rows, std::int64_t destination,
+        std::int64_t sourceFolder);
+    void selectGalleryRow(int kind, qlonglong role);
+    void applyPendingSelection();
+    void cutSelection();
+    void pasteCutSelection();
+    void clearCut();
+    void applyCutDimming();
+    void goUpFolder();
+    // Explorer-style folder pane on the left of both gallery views.
+    void rebuildFolderTree();
+    void setFolderPaneCollapsed(bool collapsed);
     void highlightDropFolder(std::int64_t folder_id, bool on);
     bool galleryHasFocus() const;
     void beginRestoreSelected();
     void beginExportPackage(std::int64_t only_folder_id = 0);
     void beginImportPackage();
+    bool importPackagePath(const QString& path);
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
     void revealVideo(qlonglong id, const QString& name, qlonglong size,
@@ -115,7 +147,11 @@ private:
     void revealFolder(qlonglong id, qlonglong parentId, const QString& name);
     void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
     void placeFolderRow(qlonglong id, const QString& name);
-    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize, bool loadThumbnail = true);
+    void rememberGalleryThumbnail(qlonglong id, const QPixmap& pixmap);
+    QListWidgetItem* galleryIconItem(qlonglong id) const;
+    QTreeWidgetItem* galleryTreeItem(qlonglong id) const;
+    void galleryTaskFinished();
     void paintGalleryBatch();
     void decorateVisible();
     void recountLibrary();
@@ -134,11 +170,14 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
+    void openSync();
+    void closeSync();
 
     // The running build against the newest GitHub release, the same check the
     // phone runs when its library opens. The whole flow is off the UI thread.
-    void beginUpdateCheck();
-    void beginUpdateInstall();
+    void configureUpdateChecks();
+    void beginUpdateCheck(bool manual = false);
+    void beginUpdateInstall(bool automatic = false);
     void setUpdateProgress(qint64 done, qint64 total);
     void offerUpdateRestart();
     void beginPlayback(std::int64_t video_id);
@@ -238,17 +277,24 @@ private:
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
     std::vector<std::filesystem::path> pendingExternal_;
+    // .mvpk files handed over by the shell file association, kept apart from
+    // media imports because they unlock and import as packages.
+    QStringList pendingPackageExternal_;
     QLocalServer* importServer_{nullptr};
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
+    SettingsDialog* settingsPage_{nullptr};
     QPushButton* shareButton_{nullptr};
     // Update offer: the release GitHub reported, shown as an icon in the library
     // bar only once a newer version exists. updatePayload_ holds the unpacked
     // folder while the user decides whether to restart into it.
     QPushButton* updateButton_{nullptr};
-    bool updateChecked_{false};
+    QTimer* updateCheckTimer_{nullptr};
+    bool updateChecking_{false};
     bool updateInstalling_{false};
+    bool updateChannelBeta_{false};
+    QString updateStatus_;
     QString updateVersion_;
     QString updateUrl_;
     qint64 updateSize_{0};
@@ -261,11 +307,31 @@ private:
     bool sortingGallery_{false};
     bool gallerySortAgain_{false};
     bool gallerySortQueued_{false};
-    QComboBox* tagFilterCombo_{nullptr};
+    TagFilterButton* tagFilterButton_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
     QListWidget* iconList_{nullptr};
+    // Folder pane: the tree and its narrow collapse strip, positioned by
+    // layoutLibraryChrome. expandedFolders_ survives every refresh so a rebuilt
+    // tree opens the same way.
+    QWidget* folderPane_{nullptr};
+    QLabel* folderPaneLabel_{nullptr};
+    QPushButton* folderPaneToggle_{nullptr};
+    QTreeWidget* folderTree_{nullptr};
+    bool folderPaneCollapsed_{false};
+    std::unordered_set<std::int64_t> expandedFolders_;
+    // Captured when a gallery drag starts, consumed by the next drop.
+    std::vector<GalleryRow> dragPayload_;
+    bool dragPayloadValid_{false};
+    // Pending Ctrl+X rows. Kept here, never on the OS clipboard.
+    std::vector<GalleryRow> cutItems_;
+    // Folder the cut rows were listed from, so pasting them back there is a no-op.
+    std::int64_t cutFolderId_{0};
+    // Rows to re-select once the post-move refresh has painted them.
+    std::vector<GalleryRow> pendingSelection_;
+    QTimer* dragExpandTimer_{nullptr};
+    std::int64_t dragExpandFolder_{0};
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
@@ -287,8 +353,7 @@ private:
     QLabel* statusCountLabel_{nullptr};
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
-    std::int64_t tagFilterId_{-1};
-    QString tagFilterName_;
+    QStringList tagFilterNames_;
     QString searchText_;
     // Label for the in-progress batch status text ("Importing"/"Restoring").
     QString batchLabel_;
@@ -312,6 +377,10 @@ private:
     std::uint64_t galleryPaintGeneration_{0};
     std::unordered_set<std::int64_t> decoratedIds_;
     int sortProbeCursor_{0};
+    int galleryTasksInFlight_{0};
+    std::size_t galleryResidentLimit_{128};
+    QThreadPool* galleryPool_{nullptr};
+    std::unordered_set<std::int64_t> metadataRequested_;
     // True while refreshGallery is rebuilding the rows. Arrivals during that
     // window are kept and merged into the snapshot, so a late list cannot
     // wipe a file that landed after the list was read.
@@ -359,6 +428,12 @@ private:
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
+    SyncEngine* syncEngine_{nullptr};
+    SyncPage* syncPage_{nullptr};
+    // Derived from the vault password at unlock and never written anywhere:
+    // the package password shared by this vault's devices, and the key that
+    // seals this device's sync state (token and record map). Wiped on lock.
+    sync::Keys syncKeys_;
     // Declared after the vault so sharing stops before the vault is destroyed.
     std::unique_ptr<ShareServer> shareServer_;
     // The swapped phone's library, while it is open. Deletes itself on close.

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Export packages written by Mega Vault Protect: a 68-byte header starting
+     with the magic "MVPVVP01", then XChaCha20-Poly1305 chunks. The icon is
+     application-x-megavault-package, derived from docs/branding/package-icon.png. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-megavault-package">
+    <comment>Mega Vault package</comment>
+    <comment xml:lang="en">Mega Vault package</comment>
+    <glob pattern="*.mvpk"/>
+    <magic priority="60">
+      <match type="string" value="MVPVVP01" offset="0"/>
+    </magic>
+    <icon name="application-x-megavault-package"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+</mime-info>

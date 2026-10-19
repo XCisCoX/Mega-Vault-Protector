@@ -7,7 +7,24 @@
 #include <QPalette>
 #include <QString>
 
+class QApplication;
+
 namespace videovault::app {
+
+// Missing/invalid preferences intentionally retain the original dark theme.
+enum class ThemeMode { System, Light, Dark };
+ThemeMode savedThemeMode();
+void setThemeMode(ThemeMode mode);
+void initializeTheme(QApplication& application);
+// Re-applies the mode in force: the palette, the application stylesheet and
+// every widget's themed inline styles. The manager already does this whenever
+// the application palette changes, so call it only after changing the palette
+// through a path that does not notify (a platform-theme override in a test).
+void refreshTheme();
+bool isDarkTheme();
+QPalette lightPalette();
+// Accepts a DARK source stylesheet; dark mode returns it byte-for-byte.
+QString themedStyleSheet(const QString& darkStyle);
 
 inline QPalette darkPalette() {
     QPalette palette;
@@ -21,6 +38,10 @@ inline QPalette darkPalette() {
     palette.setColor(QPalette::ButtonText, QColor(255, 255, 255));
     palette.setColor(QPalette::Highlight, QColor(51, 144, 236));
     palette.setColor(QPalette::HighlightedText, Qt::white);
+    // Explicit mid tones: Qt otherwise derives them from a light system
+    // palette, which painted near-white hairlines around dark cards.
+    palette.setColor(QPalette::Midlight, QColor(70, 70, 74));
+    palette.setColor(QPalette::Mid, QColor(90, 90, 95));
     return palette;
 }
 
@@ -64,6 +85,23 @@ inline QString appStyleSheet() {
             selection-background-color: #3390ec;
         }
         QLineEdit:focus, QComboBox:focus { border: 1px solid #3390ec; }
+        /* The native drop-down is a square block with its own frame, which
+           reads as a foreign control inside the rounded fields. Draw only a
+           chevron and keep the whole field on one surface. */
+        QComboBox { padding-right: 30px; }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: center right;
+            width: 26px;
+            border: none;
+            background: transparent;
+        }
+        QComboBox::down-arrow {
+            image: url(:/icons/chevron_down.png);
+            width: 12px;
+            height: 12px;
+        }
+        QComboBox QAbstractItemView::item { min-height: 28px; padding: 2px 8px; }
         QComboBox QAbstractItemView {
             background: #1c1c1e;
             color: #ffffff;

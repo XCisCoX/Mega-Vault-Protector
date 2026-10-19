@@ -67,7 +67,7 @@ fun TextScreen(
             )
             Text(
                 name,
-                color = Color.White,
+                color = Mvp.title,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,

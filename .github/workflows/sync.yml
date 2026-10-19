@@ -1,0 +1,78 @@
+name: sync
+
+# The relay, its web console and the client protocol have no other CI: this is
+# the only thing that keeps sync_server/ and the clients honest on a pull
+# request. Everything the server needs now lives inside sync_server/ (relay,
+# web/, tests/, deployment/), so one path filter covers the whole product.
+# The native client's live end-to-end run needs the full Qt toolchain and is
+# exercised locally with
+#   python qt-app/tests/run_sync_live.py <VideoVaultSyncEngineTests>
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sync_server/**'
+      - 'scripts/package-server-release.py'
+      - 'android/sync-tests/**'
+      - 'docs/sync-*.md'
+      - '.github/workflows/sync.yml'
+  pull_request:
+    paths:
+      - 'sync_server/**'
+      - 'scripts/package-server-release.py'
+      - 'android/sync-tests/**'
+      - '.github/workflows/sync.yml'
+  workflow_dispatch:
+
+jobs:
+  relay:
+    name: relay tests (real server, real sockets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Every test file runs the actual CLI and server binary
+        run: |
+          status=0
+          for file in sync_server/tests/test_*.py; do
+            echo "::group::${file}"
+            python "$file" -v || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+      - name: The server refuses to run without TLS off loopback
+        run: |
+          python -m sync_server --data "$RUNNER_TEMP/data" serve \
+            --host 0.0.0.0 --port 18766 && exit 1 || true
+      - name: Operator CLI answers --help
+        run: |
+          python -m sync_server --data "$RUNNER_TEMP/data2" --help
+          python -m sync_server --data "$RUNNER_TEMP/data2" gc --help
+
+  package:
+    name: server archive is one folder and carries no secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Pack, then prove the folder runs from the unpacked archive
+        run: |
+          python scripts/package-server-release.py --source . --output "$RUNNER_TEMP/server.zip"
+          cd "$RUNNER_TEMP" && mkdir pack && cd pack && unzip -q ../server.zip
+          test -f sync_server/web/index.html
+          test -f sync_server/deployment/compose.yaml
+          python -m sync_server --help | grep -q serve
+
+  android-guards:
+    name: android client static guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python android/sync-tests/test_integration.py -v

@@ -16,24 +16,61 @@ if(WIN32)
     enable_language(RC)
 endif()
 
+# Development-only escape hatch for a MinGW toolchain, which cannot compile
+# music_window.cpp / pdf_window.cpp (they need MSVC + the C++/WinRT headers for
+# SystemMediaTransportControls and Windows.Data.Pdf). When ON, those two
+# translation units are replaced by src/windows_fallback.cpp, an honest
+# "not available" implementation of the same two classes, so the rest of the
+# desktop app can be built and exercised locally. OFF by default; ignored for
+# MSVC builds, which always compile the real WinRT windows, so CI and release
+# artifacts are byte-for-byte unchanged.
+option(MVP_MINGW_APP_FALLBACK
+    "Build music/PDF as 'not available' stubs so the app links with MinGW (development only, never release)"
+    OFF)
+
+set(MVP_APP_WINRT_SOURCES
+    src/music_window.cpp
+    src/pdf_window.cpp
+)
+set(MVP_APP_FALLBACK_SOURCES "")
+if(MVP_MINGW_APP_FALLBACK)
+    if(MSVC)
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK ignored: MSVC builds always use the real "
+            "C++/WinRT music and PDF windows.")
+    elseif(WIN32 OR MINGW)
+        set(MVP_APP_WINRT_SOURCES "")
+        set(MVP_APP_FALLBACK_SOURCES src/windows_fallback.cpp)
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK=ON: music and PDF are 'not available' stubs. "
+            "This is a development smoke-test build, not a release configuration.")
+    else()
+        message(WARNING
+            "MVP_MINGW_APP_FALLBACK ignored: only supported for a non-MSVC "
+            "Windows (MinGW) build.")
+    endif()
+endif()
+
 set(MVP_APP_SOURCES
     src/main.cpp
     src/app_update.cpp
     src/main_window.cpp
     src/media_decoder.cpp
     src/player_window.cpp
-    src/music_window.cpp
-    src/pdf_window.cpp
+    ${MVP_APP_WINRT_SOURCES}
+    ${MVP_APP_FALLBACK_SOURCES}
     src/in_window_sheet.cpp
     src/record_document.cpp
     src/record_window.cpp
     src/settings_dialog.cpp
+    src/tag_filter_button.cpp
+    src/theme.cpp
     src/batch_worker.cpp
     src/share_server.cpp
     src/share_tls.cpp
     src/peer_link.cpp
     src/peer_browser.cpp
-    src/cloud_browser.cpp
+
     third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/app_update.hpp
     include/videovault/app/main_window.hpp
@@ -45,6 +82,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/record_document.hpp
     include/videovault/app/record_window.hpp
     include/videovault/app/settings_dialog.hpp
+    include/videovault/app/tag_filter_button.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
     include/videovault/app/share_tls.hpp
@@ -52,6 +90,27 @@ set(MVP_APP_SOURCES
     include/videovault/app/peer_browser.hpp
     resources/resources.qrc
 )
+
+add_library(MegaVaultSync STATIC
+    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp
+    include/videovault/app/sync_state.hpp
+    include/videovault/app/sync_client.hpp
+    include/videovault/app/sync_engine.hpp
+    include/videovault/app/sync_page.hpp)
+target_include_directories(MegaVaultSync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(MegaVaultSync PUBLIC cxx_std_20)
+set_target_properties(MegaVaultSync PROPERTIES AUTOMOC ON)
+target_link_libraries(MegaVaultSync PUBLIC VideoVault::Core Qt5::Core Qt5::Concurrent Qt5::Network Qt5::Widgets)
+if(WIN32)
+    target_link_libraries(MegaVaultSync PRIVATE MvpSodium)
+elseif(ANDROID)
+    target_include_directories(MegaVaultSync PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    target_link_libraries(MegaVaultSync PRIVATE ${MVP_SODIUM_LIBS})
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SYNC_SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    target_link_libraries(MegaVaultSync PRIVATE PkgConfig::SYNC_SODIUM)
+endif()
 
 if(ANDROID)
     # Android apps are shared libraries: androiddeployqt packages the .so into
@@ -85,6 +144,7 @@ endif()
 target_link_libraries(VideoVaultApp
     PRIVATE
         VideoVault::Core
+        MegaVaultSync
         Qt5::Core
         Qt5::Concurrent
         Qt5::Widgets
@@ -127,7 +187,9 @@ endif()
 
 mvp_copy_runtime_dlls(VideoVaultApp)
 
-if(NOT ANDROID)
+option(MVP_BUILD_LEGACY_CLOUD "Build deprecated remote vault-password service (NOT sync v2 E2EE)" OFF)
+if(NOT ANDROID AND MVP_BUILD_LEGACY_CLOUD)
+    message(WARNING "MegaVaultCloud is deprecated remote decrypted access, NOT sync v2 E2EE. Use the Python sync v2 relay.")
     add_executable(MegaVaultCloud
         src/cloud_server.cpp
         src/share_tls.cpp
@@ -164,6 +226,84 @@ endif()
 # Headless playback test: decodes frames from an imported video through the
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
+    enable_testing()
+    # Sync protocol 4: the state file, key derivation and validation run without
+    # a server; the engine test runs against a real sync_server through
+    # tests/run_sync_live.py and skips when it is started without one.
+    # Exercise the production gallery, not a separate model of its cache.
+    set(_gallery_sources ${MVP_APP_SOURCES})
+    list(REMOVE_ITEM _gallery_sources src/main.cpp)
+    add_executable(VideoVaultGalleryPerformanceTests tests/gallery_performance.cpp ${_gallery_sources})
+    get_target_property(_gallery_links VideoVaultApp LINK_LIBRARIES)
+    get_target_property(_gallery_includes VideoVaultApp INCLUDE_DIRECTORIES)
+    target_link_libraries(VideoVaultGalleryPerformanceTests PRIVATE ${_gallery_links})
+    if(WIN32 OR MINGW)
+        target_link_libraries(VideoVaultGalleryPerformanceTests PRIVATE crypt32 secur32 winhttp dwmapi)
+    endif()
+    target_include_directories(VideoVaultGalleryPerformanceTests PRIVATE ${_gallery_includes})
+    target_compile_features(VideoVaultGalleryPerformanceTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultGalleryPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON)
+    add_test(NAME gallery_performance COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(gallery_performance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
+
+    add_executable(VideoVaultTagFilterTests
+        tests/tag_filter_button.cpp
+        src/tag_filter_button.cpp
+        src/theme.cpp
+        include/videovault/app/tag_filter_button.hpp)
+    target_include_directories(VideoVaultTagFilterTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultTagFilterTests PRIVATE Qt5::Widgets)
+    target_compile_features(VideoVaultTagFilterTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultTagFilterTests PROPERTIES AUTOMOC ON FOLDER "Tests")
+    add_test(NAME tag_filter COMMAND VideoVaultTagFilterTests)
+    set_tests_properties(tag_filter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultTagFilterTests)
+
+    add_executable(VideoVaultThemeTests tests/theme.cpp src/theme.cpp src/tag_filter_button.cpp
+        include/videovault/app/tag_filter_button.hpp)
+    target_include_directories(VideoVaultThemeTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultThemeTests PRIVATE Qt5::Widgets)
+    target_compile_features(VideoVaultThemeTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultThemeTests PROPERTIES AUTOMOC ON)
+    add_test(NAME theme COMMAND VideoVaultThemeTests)
+    set_tests_properties(theme PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultThemeTests)
+
+    add_executable(VideoVaultAppUpdateTests tests/app_update.cpp src/app_update.cpp)
+    target_include_directories(VideoVaultAppUpdateTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultAppUpdateTests PRIVATE VideoVault::Core Qt5::Core Qt5::Network)
+    if(WIN32 OR MINGW)
+        target_link_libraries(VideoVaultAppUpdateTests PRIVATE winhttp)
+    endif()
+    target_compile_features(VideoVaultAppUpdateTests PRIVATE cxx_std_20)
+    add_test(NAME app_update COMMAND VideoVaultAppUpdateTests)
+    set_tests_properties(app_update PROPERTIES TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultAppUpdateTests)
+
+    add_executable(VideoVaultSettingsTests tests/settings_page.cpp
+        src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/sync_state.cpp
+        include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
+        include/videovault/app/sync_state.hpp)
+    target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core Qt5::Widgets Qt5::Concurrent)
+    target_compile_features(VideoVaultSettingsTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultSettingsTests PROPERTIES AUTOMOC ON FOLDER "Tests")
+    add_test(NAME settings_page COMMAND VideoVaultSettingsTests)
+    set_tests_properties(settings_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+    mvp_copy_runtime_dlls(VideoVaultSettingsTests)
+
+    add_executable(VideoVaultSyncStateTests tests/sync_state.cpp)
+    add_executable(VideoVaultSyncEngineTests tests/sync_engine.cpp)
+    add_executable(VideoVaultSyncDialogTests tests/sync_page.cpp)
+    foreach(_sync_test VideoVaultSyncStateTests VideoVaultSyncEngineTests VideoVaultSyncDialogTests)
+        target_link_libraries(${_sync_test} PRIVATE MegaVaultSync)
+    endforeach()
+    add_test(NAME sync_state COMMAND VideoVaultSyncStateTests)
+    add_test(NAME sync_engine COMMAND VideoVaultSyncEngineTests)
+    set_tests_properties(sync_engine PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME sync_page COMMAND VideoVaultSyncDialogTests)
+    set_tests_properties(sync_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp

@@ -1,6 +1,7 @@
 #include "videovault/app/app_update.hpp"
 #include "videovault/app/batch_worker.hpp"
-#include "videovault/app/cloud_browser.hpp"
+#include "videovault/app/sync_engine.hpp"
+#include "videovault/app/sync_page.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/music_window.hpp"
@@ -12,6 +13,8 @@
 #include "videovault/app/record_document.hpp"
 #include "videovault/app/record_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/tag_filter_button.hpp"
+#include "videovault/app/theme.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -36,6 +39,7 @@
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QComboBox>
+#include <QCursor>
 #include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -69,6 +73,8 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
+#include <QLinearGradient>
 #include <QLinearGradient>
 #include <QPen>
 #include <QPixmap>
@@ -109,6 +115,8 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <deque>
+#include <QThreadPool>
 #include <string>
 #include <utility>
 
@@ -122,6 +130,9 @@ struct FileIdentity {
 
 struct MainWindow::GalleryCache {
     std::unordered_map<std::int64_t, QPixmap> thumbs;
+    std::deque<std::int64_t> thumbOrder;
+    std::unordered_map<std::int64_t, QListWidgetItem*> iconRows;
+    std::unordered_map<std::int64_t, QTreeWidgetItem*> treeRows;
     std::unordered_map<std::int64_t, core::MediaInfo> media;
     std::unordered_map<std::int64_t, FileIdentity> kinds;
     // PDFs whose first page was already read or saved this session.
@@ -135,6 +146,8 @@ constexpr int kLoginPage = 1;
 constexpr int kUnlockedPage = 2;
 // Gallery item kinds (Qt::UserRole + 12).
 constexpr int kKindPhone = 3;
+// Set on a gallery row while it is cut (Ctrl+X). The delegate fades the row.
+constexpr int kCutDimRole = Qt::UserRole + 17;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
 // default, matching the previous fixed timer.
 int autoLockMilliseconds() {
@@ -151,6 +164,19 @@ std::filesystem::path pathFromText(const QString& text) {
 
 QString textFromPath(const std::filesystem::path& path) {
     return QString::fromStdWString(path.wstring());
+}
+
+// The sync keys come from the vault password, so they are derived while it is
+// still in the worker's hand; only the derived keys leave this function, never
+// the password. A failure here leaves sync locked and does not block the vault.
+sync::Keys deriveSyncKeys(const std::filesystem::path& root, const std::string& password) {
+    try {
+        const QString folder = textFromPath(root);
+        return sync::deriveKeys(SyncEngine::stateDirectoryFor(folder),
+                                QString::fromUtf8(password.data(), int(password.size())));
+    } catch (...) {
+        return {};
+    }
 }
 
 QPixmap scaledIcon(const char* resource, const int side) {
@@ -184,6 +210,7 @@ QIcon updateGlyph() {
 struct UpdateCheckOutcome {
     QString version;
     QString url;
+    QString error;
     qint64 size{0};
 };
 
@@ -205,6 +232,14 @@ QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
     painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
     painter.fillRect(plate.rect(), color);
     return plate;
+}
+
+void setChromeIcon(QAbstractButton* button, const QIcon& source) {
+    const auto apply = [button, source](const QPalette& palette) {
+        button->setIcon(QIcon(tintedIcon(source.pixmap(32, 32), palette.color(QPalette::ButtonText))));
+    };
+    apply(qApp->palette());
+    QObject::connect(qApp, &QApplication::paletteChanged, button, apply);
 }
 
 QPixmap musicPlaceholder(const int side) {
@@ -684,35 +719,32 @@ QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id
 
 const QPixmap& folderPixmap() {
     static const QPixmap pix = [] {
-        const QPixmap source(":/icons/files_folder.png");
-        QPixmap tinted = tintedIcon(source, QColor(0x4F, 0xA6, 0xF7));
-        if (tinted.isNull()) {
-            QPixmap image(256, 256);
-            image.fill(Qt::transparent);
-            return image;
-        }
-        // The file has a wide empty margin. Crop to the folder itself so a
-        // tile shows a folder, not a small mark in a dark square.
-        const QImage image = tinted.toImage().convertToFormat(QImage::Format_ARGB32);
-        int minX = image.width();
-        int minY = image.height();
-        int maxX = 0;
-        int maxY = 0;
-        for (int y = 0; y < image.height(); ++y) {
-            for (int x = 0; x < image.width(); ++x) {
-                if (qAlpha(image.pixel(x, y)) <= 16) {
-                    continue;
-                }
-                minX = std::min(minX, x);
-                minY = std::min(minY, y);
-                maxX = std::max(maxX, x);
-                maxY = std::max(maxY, y);
-            }
-        }
-        if (maxX > minX && maxY > minY) {
-            tinted = QPixmap::fromImage(image.copy(minX, minY, maxX - minX + 1, maxY - minY + 1));
-        }
-        return tinted.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        // Drawn as vector paths, not the old bitmap resource: tinting and
+        // stretching a small PNG left visibly aliased edges at row size.
+        constexpr int size = 256;
+        QPixmap image(size, size);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal width = size * 0.84;
+        const qreal height = size * 0.62;
+        const qreal left = (size - width) / 2.0;
+        const qreal top = (size - height) / 2.0 + size * 0.06;
+        const qreal radius = size * 0.055;
+        QPainterPath tab;
+        tab.addRoundedRect(QRectF(left, top - size * 0.11, width * 0.44, size * 0.22),
+            radius, radius);
+        painter.fillPath(tab, QColor(0x2F, 0x74, 0xC0));
+        QPainterPath body;
+        body.addRoundedRect(QRectF(left, top, width, height), radius, radius);
+        QLinearGradient shade(0, top, 0, top + height);
+        shade.setColorAt(0.0, QColor(0x63, 0xB4, 0xF7));
+        shade.setColorAt(1.0, QColor(0x33, 0x84, 0xD2));
+        painter.fillPath(body, shade);
+        painter.setPen(QPen(QColor(255, 255, 255, 30), size * 0.008));
+        painter.drawPath(body);
+        painter.end();
+        return image;
     }();
     return pix;
 }
@@ -811,16 +843,19 @@ public:
         if (view != nullptr && view->viewMode() == QListView::ListMode) {
             painter->save();
             painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            if (index.data(kCutDimRole).toBool()) {
+                painter->setOpacity(0.45);
+            }
             const QRect row = option.rect;
             const bool selected = option.state.testFlag(QStyle::State_Selected);
             const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
             if (selected) {
                 painter->fillRect(row, QColor(51, 144, 236, 70));
             } else if (hovered) {
-                painter->fillRect(row, QColor(255, 255, 255, 16));
+                painter->fillRect(row, isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 12));
             }
             const QRect thumb(row.left() + 14, row.top() + (row.height() - 44) / 2, 44, 44);
-            painter->fillRect(thumb, QColor(28, 28, 30));
+            painter->fillRect(thumb, isDarkTheme() ? QColor(28, 28, 30) : option.palette.color(QPalette::AlternateBase));
             const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
             const int rowKind = index.data(Qt::UserRole + 12).toInt();
             const bool folderRow = rowKind == 1 || rowKind == 2 || rowKind == kKindPhone;
@@ -850,29 +885,39 @@ public:
                 painter->drawText(thumb, Qt::AlignCenter, QStringLiteral("PDF"));
             }
             const int textLeft = thumb.right() + 12;
-            const QRect textRect(textLeft, row.top() + 8, row.width() - textLeft - 16, row.height() - 16);
-            QFont nameFont(QStringLiteral("Segoe UI"));
-            nameFont.setPointSize(10);
-            painter->setFont(nameFont);
             const QString name = index.data(Qt::UserRole + 1).toString();
-            const QFontMetrics nameMetrics(nameFont);
-            painter->setPen(Qt::white);
-            painter->drawText(
-                QRect(textRect.left(), textRect.top(), textRect.width(), nameMetrics.height()),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                nameMetrics.elidedText(name, Qt::ElideRight, textRect.width()));
             const QString sizeText = index.data(Qt::UserRole + 5).toString();
             const QString tags = index.data(Qt::UserRole + 2).toString();
-            const QString meta = tags.isEmpty() ? sizeText : QStringLiteral("%1  ·  %2").arg(sizeText, tags);
+            // One line per row: icon, name, then the meta pinned right. Folders
+            // carry no meta at all - the stacked "Folder" caption is what made
+            // list rows look like a broken table.
+            const QString meta = folderRow
+                ? tags
+                : (tags.isEmpty() ? sizeText : QStringLiteral("%1  ·  %2").arg(sizeText, tags));
+            QFont nameFont(QStringLiteral("Segoe UI"));
+            nameFont.setPointSize(10);
             QFont metaFont(QStringLiteral("Segoe UI"));
             metaFont.setPointSize(9);
-            painter->setFont(metaFont);
+            const QFontMetrics nameMetrics(nameFont);
             const QFontMetrics metaMetrics(metaFont);
-            painter->setPen(QColor(142, 142, 147));
-            painter->drawText(
-                QRect(textRect.left(), textRect.bottom() - metaMetrics.height(), textRect.width(), metaMetrics.height()),
+            const int metaWidth = meta.isEmpty()
+                ? 0
+                : std::min(metaMetrics.horizontalAdvance(meta) + 12, row.width() / 2);
+            const int nameRight = std::max(textLeft + 24, row.right() - 16 - metaWidth);
+            painter->setFont(nameFont);
+            painter->setPen(option.palette.color(QPalette::Text));
+            painter->drawText(QRect(textLeft, row.top(), nameRight - textLeft, row.height()),
                 Qt::AlignLeft | Qt::AlignVCenter,
-                metaMetrics.elidedText(meta, Qt::ElideRight, textRect.width()));
+                nameMetrics.elidedText(name, Qt::ElideRight, nameRight - textLeft));
+            if (!meta.isEmpty()) {
+                painter->setFont(metaFont);
+                painter->setPen(isDarkTheme() ? QColor(168, 168, 174) : QColor(99, 99, 104));
+                painter->drawText(QRect(nameRight, row.top(), metaWidth, row.height()),
+                    Qt::AlignRight | Qt::AlignVCenter,
+                    metaMetrics.elidedText(meta, Qt::ElideLeft, metaWidth));
+            }
+            painter->setPen(isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 20));
+            painter->drawLine(row.left() + 14, row.bottom(), row.right() - 14, row.bottom());
             painter->restore();
             return;
         }
@@ -882,8 +927,11 @@ public:
         }
         painter->save();
         painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        if (index.data(kCutDimRole).toBool()) {
+            painter->setOpacity(0.45);
+        }
         const QRect tile = option.rect.adjusted(1, 1, -2, -2);
-        painter->fillRect(tile, QColor(22, 22, 24));
+        painter->fillRect(tile, isDarkTheme() ? QColor(22, 22, 24) : option.palette.color(QPalette::AlternateBase));
         const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
         const int tileKind = index.data(Qt::UserRole + 12).toInt();
         const bool folderTile = tileKind == 1 || tileKind == 2 || tileKind == kKindPhone;
@@ -1059,6 +1107,10 @@ class IconGrid final : public QListWidget {
 public:
     using QListWidget::QListWidget;
 
+    // Called as a drag starts from this view, so the gallery can record the
+    // rows being dragged before any drop target is known.
+    std::function<void()> onDragStart;
+
     void setChromeInset(const int top, const int bottom) {
         if (chromeTop_ == top && chromeBottom_ == bottom) {
             return;
@@ -1069,6 +1121,13 @@ public:
     }
 
 protected:
+    void startDrag(Qt::DropActions actions) override {
+        if (onDragStart) {
+            onDragStart();
+        }
+        QListWidget::startDrag(actions);
+    }
+
     void resizeEvent(QResizeEvent* event) override {
         QListWidget::resizeEvent(event);
         layoutInstagramGrid(this);
@@ -1077,6 +1136,23 @@ protected:
 private:
     int chromeTop_{-1};
     int chromeBottom_{-1};
+};
+
+// The details tree needs the same drag-start hook as IconGrid. Qt hands the
+// drop target only mime data, so the rows are recorded by the source view.
+class GalleryTree final : public QTreeWidget {
+public:
+    using QTreeWidget::QTreeWidget;
+
+    std::function<void()> onDragStart;
+
+protected:
+    void startDrag(Qt::DropActions actions) override {
+        if (onDragStart) {
+            onDragStart();
+        }
+        QTreeWidget::startDrag(actions);
+    }
 };
 
 enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
@@ -1103,9 +1179,10 @@ protected:
         QPainter painter(this);
         const bool close = glyph_ == CaptionGlyph::Close;
         if (underMouse()) {
-            painter.fillRect(rect(), close ? QColor(232, 17, 35) : QColor(255, 255, 255, 24));
+            painter.fillRect(rect(), close ? QColor(232, 17, 35)
+                : (isDarkTheme() ? QColor(255, 255, 255, 24) : QColor(0, 0, 0, 18)));
         }
-        painter.setPen(QPen(Qt::white, 1.0));
+        painter.setPen(QPen(close && underMouse() ? QColor(Qt::white) : palette().color(QPalette::WindowText), 1.0));
         painter.setBrush(Qt::NoBrush);
         const QPointF center(width() / 2.0, height() / 2.0);
         switch (glyph_) {
@@ -1405,6 +1482,10 @@ void placePopup(QDialog* popup, const QPoint& globalPosition) {
 
 struct VaultOperationResult {
     bool succeeded{false};
+    // The sync keys, derived inside the worker while the password is still in
+    // hand. Empty when the derivation failed; the vault still opens, sync then
+    // says it is locked.
+    sync::Keys keys;
     // The vault was already open for a swap. The password checked out, so the
     // same vault stays in place instead of being opened a second time.
     bool resumed{false};
@@ -1414,6 +1495,8 @@ struct VaultOperationResult {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), autoLockTimer_(new QTimer(this)), galleryCache_(std::make_unique<GalleryCache>()) {
+    galleryPool_ = new QThreadPool(this);
+    galleryPool_->setMaxThreadCount(2);
     setWindowTitle(QStringLiteral("Mega Vault Protect"));
 #ifdef Q_OS_WIN
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint
@@ -1429,6 +1512,9 @@ MainWindow::MainWindow(QWidget* parent)
     searchTimer_->setSingleShot(true);
     searchTimer_->setInterval(180);
     connect(searchTimer_, &QTimer::timeout, this, [this] { refreshGallery(); });
+    updateCheckTimer_ = new QTimer(this);
+    updateCheckTimer_->setInterval(6 * 60 * 60 * 1000);
+    connect(updateCheckTimer_, &QTimer::timeout, this, [this] { beginUpdateCheck(); });
     connect(autoLockTimer_, &QTimer::timeout, this, [this] {
         // Never auto-lock in the middle of an import/restore/remove batch:
         // lock() blocks on the vault mutex a worker currently holds and the
@@ -1520,6 +1606,7 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    closeSync();
     qApp->removeEventFilter(this);
     if (shareServer_) {
         shareServer_->setOnRunning({});
@@ -1733,6 +1820,40 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             && key->key() == Qt::Key_N
             && key->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)) {
             beginNewFolder();
+            return true;
+        }
+        if (galleryHasFocus() && key->modifiers() == Qt::ControlModifier) {
+            if (key->key() == Qt::Key_X) {
+                cutSelection();
+                return true;
+            }
+            if (key->key() == Qt::Key_V) {
+                pasteCutSelection();
+                return true;
+            }
+            if (key->key() == Qt::Key_C) {
+                // The vault stores one copy of each file by content hash, so a
+                // duplicate cannot exist: say so instead of pretending to copy.
+                showStatus(QStringLiteral(
+                    "Files are stored once by content — there is no copy to paste. "
+                    "Use Cut (Ctrl+X) to move an item."), false);
+                return true;
+            }
+        }
+        // Escape drops a pending cut, the way Explorer cancels a cut.
+        if (galleryHasFocus() && key->key() == Qt::Key_Escape && !cutItems_.empty()) {
+            clearCut();
+            showStatus(QStringLiteral("Cut cancelled."), false);
+            return true;
+        }
+        if (galleryHasFocus() && key->key() == Qt::Key_Left
+            && key->modifiers() == Qt::AltModifier) {
+            goUpFolder();
+            return true;
+        }
+        if (galleryHasFocus() && key->key() == Qt::Key_F5
+            && key->modifiers() == Qt::NoModifier) {
+            refreshGallery();
             return true;
         }
         if (key->key() == Qt::Key_Backspace && key->modifiers() == Qt::NoModifier) {
@@ -1994,6 +2115,14 @@ QWidget* MainWindow::buildLoginPage() {
     auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
+    // The remembered vault path is longer than this field, and a line edit that
+    // keeps the caret at the end shows only "...\scratch\ux-vault", which reads
+    // as a clipped control. Show the start of the path and keep the whole value
+    // in a tooltip.
+    QObject::connect(loginLocation_, &QLineEdit::textChanged, loginLocation_, [this] {
+        loginLocation_->setCursorPosition(0);
+        loginLocation_->setToolTip(loginLocation_->text());
+    });
     layout->addWidget(loginLocationRow_);
 
     cloudFields_ = new QWidget(card);
@@ -2024,13 +2153,25 @@ QWidget* MainWindow::buildLoginPage() {
     loginPassword_->setEchoMode(QLineEdit::Password);
     loginPassword_->setPlaceholderText(QStringLiteral("Password"));
     layout->addWidget(loginPassword_);
+    // The card's vertical layout was squeezing these rows, so the text fields
+    // and Browse rendered with their bottom halves clipped. Give them a floor
+    // instead of letting the layout compress them below their usable height.
+    for (QLineEdit* field : {loginLocation_, loginPassword_, setupLocation_}) {
+        if (field != nullptr) {
+            field->setMinimumHeight(38);
+        }
+    }
+    browse->setMinimumHeight(38);
+    browse->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     loginError_ = errorLabel(card);
     layout->addWidget(loginError_);
 
     unlockButton_ = new QPushButton(QStringLiteral("Unlock vault"), card);
     unlockButton_->setProperty("primary", true);
-    auto* cloudButton = new QPushButton(QStringLiteral("Cloud login"), card);
+    auto* cloudButton = new QPushButton(QStringLiteral("Sync setup is available after unlocking a local vault"), card);
+    cloudButton->setEnabled(false);
+    cloudButton->setToolTip(QStringLiteral("Legacy remote vault-password login is disabled. Sync never sends your vault password."));
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
     layout->addWidget(unlockButton_);
     layout->addWidget(cloudButton);
@@ -2039,15 +2180,7 @@ QWidget* MainWindow::buildLoginPage() {
     connect(browse, &QPushButton::clicked, this, [this] { selectLoginLocation(); });
     connect(unlockButton_, &QPushButton::clicked, this, [this] { beginOpen(); });
     connect(loginPassword_, &QLineEdit::returnPressed, this, [this] { beginOpen(); });
-    connect(cloudButton, &QPushButton::clicked, this, [this, cloudButton, newVaultButton] {
-        cloudLogin_ = !cloudLogin_;
-        loginLocationRow_->setVisible(!cloudLogin_);
-        cloudFields_->setVisible(cloudLogin_);
-        newVaultButton->setVisible(!cloudLogin_);
-        unlockButton_->setText(cloudLogin_ ? QStringLiteral("Connect") : QStringLiteral("Unlock vault"));
-        cloudButton->setText(cloudLogin_ ? QStringLiteral("This PC") : QStringLiteral("Cloud login"));
-        setError(loginError_, {});
-    });
+
     connect(newVaultButton, &QPushButton::clicked, this, [this] { showSetup(); });
 
     placeCard(page, card);
@@ -2070,15 +2203,16 @@ QWidget* MainWindow::buildUnlockedPage() {
     viewModeCombo_->addItem(QStringLiteral("Icons"));
     viewModeCombo_->addItem(QStringLiteral("List"));
     viewModeCombo_->hide();
-    tagFilterCombo_ = new QComboBox(toolbar);
-    tagFilterCombo_->setMinimumWidth(150);
+    tagFilterButton_ = new TagFilterButton(toolbar);
+    tagFilterButton_->setMinimumWidth(150);
     searchEdit_ = new QLineEdit(toolbar);
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
     const auto makeIconButton = [](QWidget* parent, const QIcon& icon, const QString& tip, const bool filled) {
         auto* button = new QPushButton(parent);
-        button->setIcon(icon);
+        if (filled) button->setIcon(icon);
+        else setChromeIcon(button, icon);
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(36, 36);
         button->setCursor(Qt::PointingHandCursor);
@@ -2127,6 +2261,22 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addWidget(updateButton_);
     titleRow->addWidget(importButton_);
     titleRow->addWidget(shareButton_);
+    auto* syncButton = new QPushButton(QStringLiteral("Sync"), toolbar);
+    syncButton->setObjectName(QStringLiteral("syncSection"));
+    syncButton->setCursor(Qt::PointingHandCursor);
+    syncButton->setFocusPolicy(Qt::NoFocus);
+    // A section entry, drawn like the other text actions in the chrome, not a
+    // boxed button between the round icons.
+    syncButton->setStyleSheet(QStringLiteral(
+        "QPushButton { color: #3390ec; background: transparent; border: none;"
+        " padding: 0 10px; min-height: 32px; max-height: 32px;"
+        " font: 600 13px \"Segoe UI\"; }"
+        "QPushButton:hover { color: #5aa6f0; background: rgba(255, 255, 255, 18);"
+        " border-radius: 16px; }"));
+    syncButton->setToolTip(QStringLiteral("Encrypted sync: sign in to your account, pick a vault, "
+                                         "and let it sync lazily in both directions"));
+    connect(syncButton, &QPushButton::clicked, this, &MainWindow::openSync);
+    titleRow->addWidget(syncButton);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
     toolbarLayout->addLayout(titleRow);
@@ -2145,11 +2295,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* detailsMode = new QPushButton(modeHost);
     auto* iconsMode = new QPushButton(modeHost);
     auto* listMode = new QPushButton(modeHost);
-    detailsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_details.png")));
+    setChromeIcon(detailsMode, QIcon(QStringLiteral(":/icons/bar_details.png")));
     detailsMode->setToolTip(QStringLiteral("Details"));
-    iconsMode->setIcon(QIcon(QStringLiteral(":/icons/bar_icons.png")));
+    setChromeIcon(iconsMode, QIcon(QStringLiteral(":/icons/bar_icons.png")));
     iconsMode->setToolTip(QStringLiteral("Icons"));
-    listMode->setIcon(QIcon(QStringLiteral(":/icons/bar_list.png")));
+    setChromeIcon(listMode, QIcon(QStringLiteral(":/icons/bar_list.png")));
     listMode->setToolTip(QStringLiteral("List"));
     viewModeGroup_ = new QButtonGroup(toolbar);
     viewModeGroup_->setExclusive(true);
@@ -2181,7 +2331,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     filterRow->addWidget(searchEdit_, 1);
     filterRow->addWidget(sortButton_);
     filterRow->addWidget(modeHost);
-    filterRow->addWidget(tagFilterCombo_);
+    filterRow->addWidget(tagFilterButton_);
     toolbarLayout->addLayout(filterRow);
 
     crumbHost_ = new QWidget(toolbar);
@@ -2193,7 +2343,9 @@ QWidget* MainWindow::buildUnlockedPage() {
     rebuildBreadcrumb();
 
     // Explorer-style gallery views fill the window.
-    detailsTree_ = new QTreeWidget(page);
+    auto* galleryTree = new GalleryTree(page);
+    galleryTree->onDragStart = [this] { captureDragPayload(true); };
+    detailsTree_ = galleryTree;
     detailsTree_->setObjectName(QStringLiteral("gallery"));
     detailsTree_->setColumnCount(7);
     detailsTree_->setHeaderLabels({
@@ -2221,6 +2373,7 @@ QWidget* MainWindow::buildUnlockedPage() {
         }
     });
     iconList_ = new IconGrid(page);
+    static_cast<IconGrid*>(iconList_)->onDragStart = [this] { captureDragPayload(false); };
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setItemDelegate(new InstagramDelegate(iconList_));
     iconList_->setViewMode(QListView::IconMode);
@@ -2247,6 +2400,107 @@ QWidget* MainWindow::buildUnlockedPage() {
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
     galleryStack_->addWidget(iconList_);
+
+    // Explorer-style folder pane. It sits beside both gallery views and is laid
+    // out by layoutLibraryChrome, because the library page uses floating bars
+    // instead of a layout. Its width collapses to a thin strip.
+    folderPane_ = new QWidget(page);
+    folderPane_->setObjectName(QStringLiteral("folderPane"));
+    // Plain QWidget needs this for the stylesheet background and divider to paint.
+    folderPane_->setAttribute(Qt::WA_StyledBackground, true);
+    folderPane_->setStyleSheet(QStringLiteral(
+        "QWidget#folderPane { background: rgba(255, 255, 255, 8);"
+        " border-right: 1px solid rgba(255, 255, 255, 22); }"
+        "QTreeWidget#folderTree { background: transparent; border: none; color: #d8d8dc; }"
+        "QTreeWidget#folderTree::item { min-height: 26px; border-radius: 6px; }"
+        "QTreeWidget#folderTree::item:selected { background: rgba(51, 144, 236, 110); color: white; }"
+        "QLabel#folderPaneTitle { color: rgba(255, 255, 255, 150); font-size: 9pt;"
+        " font-weight: 600; background: transparent; }"
+        "QPushButton#folderPaneToggle { color: #8ec8ff; background: transparent;"
+        " border: none; font-size: 12pt; padding: 0; }"
+        "QPushButton#folderPaneToggle:hover { color: white; }"));
+    auto* paneLayout = new QVBoxLayout(folderPane_);
+    paneLayout->setContentsMargins(6, 6, 6, 6);
+    paneLayout->setSpacing(4);
+    auto* paneHeader = new QHBoxLayout();
+    paneHeader->setContentsMargins(6, 0, 0, 0);
+    paneHeader->setSpacing(2);
+    folderPaneLabel_ = new QLabel(QStringLiteral("Folders"), folderPane_);
+    folderPaneLabel_->setObjectName(QStringLiteral("folderPaneTitle"));
+    folderPaneToggle_ = new QPushButton(QStringLiteral("‹"), folderPane_);
+    folderPaneToggle_->setObjectName(QStringLiteral("folderPaneToggle"));
+    folderPaneToggle_->setToolTip(QStringLiteral("Collapse the folder pane"));
+    folderPaneToggle_->setFixedSize(20, 20);
+    folderPaneToggle_->setFocusPolicy(Qt::NoFocus);
+    folderPaneToggle_->setCursor(Qt::PointingHandCursor);
+    paneHeader->addWidget(folderPaneLabel_, 1);
+    paneHeader->addWidget(folderPaneToggle_, 0, Qt::AlignRight);
+    folderTree_ = new QTreeWidget(folderPane_);
+    folderTree_->setObjectName(QStringLiteral("folderTree"));
+    folderTree_->setHeaderHidden(true);
+    folderTree_->setRootIsDecorated(true);
+    folderTree_->setIndentation(14);
+    folderTree_->setUniformRowHeights(true);
+    folderTree_->setSelectionMode(QAbstractItemView::SingleSelection);
+    folderTree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    folderTree_->setAcceptDrops(true);
+    folderTree_->viewport()->setAcceptDrops(true);
+    folderTree_->installEventFilter(this);
+    folderTree_->viewport()->installEventFilter(this);
+    paneLayout->addLayout(paneHeader);
+    paneLayout->addWidget(folderTree_, 1);
+    folderPane_->hide();
+    connect(folderPaneToggle_, &QPushButton::clicked, this, [this] {
+        setFolderPaneCollapsed(!folderPaneCollapsed_);
+    });
+    connect(folderTree_, &QTreeWidget::itemClicked, this,
+        [this](QTreeWidgetItem* item, int) {
+            if (item == nullptr) {
+                return;
+            }
+            const auto id = item->data(0, Qt::UserRole).toLongLong();
+            if (id != currentFolderId_) {
+                openFolder(id);
+            }
+        });
+    // The set of open folders is replayed onto the rebuilt tree after a refresh.
+    connect(folderTree_, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item) {
+        if (item != nullptr) {
+            expandedFolders_.insert(item->data(0, Qt::UserRole).toLongLong());
+        }
+    });
+    connect(folderTree_, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem* item) {
+        if (item != nullptr) {
+            expandedFolders_.erase(item->data(0, Qt::UserRole).toLongLong());
+        }
+    });
+    // Hovering a closed folder mid-drag opens it, the way Explorer does.
+    dragExpandTimer_ = new QTimer(this);
+    dragExpandTimer_->setSingleShot(true);
+    connect(dragExpandTimer_, &QTimer::timeout, this, [this] {
+        const std::int64_t id = dragExpandFolder_;
+        dragExpandFolder_ = 0;
+        if (id == 0 || folderTree_ == nullptr) {
+            return;
+        }
+        std::function<QTreeWidgetItem*(QTreeWidgetItem*)> findItem =
+            [&findItem, id](QTreeWidgetItem* node) -> QTreeWidgetItem* {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* child = node->child(index);
+                if (child->data(0, Qt::UserRole).toLongLong() == id) {
+                    return child;
+                }
+                if (auto* hit = findItem(child)) {
+                    return hit;
+                }
+            }
+            return nullptr;
+        };
+        if (auto* item = findItem(folderTree_->invisibleRootItem())) {
+            expandedFolders_.insert(id);
+            item->setExpanded(true);
+        }
+    });
 
     libraryBottom_ = new FrostedBar(FrostedBar::Band::Bottom, page);
     auto* statusBar = libraryBottom_;
@@ -2358,11 +2612,11 @@ QWidget* MainWindow::buildUnlockedPage() {
             applyGallerySort(chosen->data().toInt());
         }
     });
-    connect(tagFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
-        this, [this](int) {
-            tagFilterId_ = tagFilterCombo_->currentData().toLongLong();
-            tagFilterName_ = tagFilterCombo_->currentData(Qt::UserRole + 1).toString();
-            refreshGallery();
+    connect(tagFilterButton_, &TagFilterButton::selectionChanged,
+        this, [this](const QStringList& tags) {
+            tagFilterNames_ = tags;
+            // Coalesce rapid checkmark changes just like gallery text search.
+            searchTimer_->start();
         });
     connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString& text) {
         searchText_ = text.trimmed();
@@ -2429,13 +2683,24 @@ void MainWindow::layoutLibraryChrome() {
     const int topHeight = std::max(libraryTop_->sizeHint().height(), 44);
     const int bottomHeight = std::max(libraryBottom_->sizeHint().height(), 28);
     const bool details = galleryStack_->currentWidget() == detailsTree_;
+    const bool paneVisible = folderPane_ != nullptr && folderPane_->isVisibleTo(page);
+    const int paneWidth = paneVisible ? (folderPaneCollapsed_ ? 34 : 208) : 0;
+    const int galleryWidth = std::max(0, page->width() - paneWidth);
+    if (paneVisible) {
+        // Keep the pane off the window border: flush at x=0 clipped the
+        // "Folders" header and let its labels paint over the window edge.
+        const int paneInset = folderPaneCollapsed_ ? 4 : 8;
+        folderPane_->setGeometry(paneInset, topHeight,
+            std::max(0, paneWidth - paneInset),
+            std::max(0, page->height() - topHeight - bottomHeight));
+    }
     if (details) {
         libraryTop_->setGeometry(0, 0, page->width(), topHeight);
         libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
         galleryStack_->setGeometry(
-            0, topHeight, page->width(), std::max(0, page->height() - topHeight - bottomHeight));
+            paneWidth, topHeight, galleryWidth, std::max(0, page->height() - topHeight - bottomHeight));
     } else {
-        galleryStack_->setGeometry(page->rect());
+        galleryStack_->setGeometry(paneWidth, 0, galleryWidth, page->height());
         libraryTop_->setGeometry(0, 0, page->width(), topHeight);
         libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
         galleryStack_->lower();
@@ -2800,35 +3065,15 @@ void MainWindow::refreshTagFilter() {
         if (generation != tagGeneration_ || vault_ != vault) {
             return;
         }
-        const std::int64_t previous = tagFilterId_;
-        tagFilterCombo_->blockSignals(true);
-        tagFilterCombo_->clear();
-        tagFilterCombo_->addItem(QStringLiteral("All items"),
-            QVariant::fromValue<qlonglong>(-1));
-        tagFilterCombo_->setItemData(0, QString(), Qt::UserRole + 1);
-        if (outcome) {
-            for (const auto& tag : outcome.value()) {
-                tagFilterCombo_->addItem(
-                    QStringLiteral("%1 (%2)")
-                        .arg(QString::fromStdString(tag.name))
-                        .arg(tag.video_count),
-                    QVariant::fromValue<qlonglong>(tag.id));
-                tagFilterCombo_->setItemData(
-                    tagFilterCombo_->count() - 1,
-                    QString::fromStdString(tag.name), Qt::UserRole + 1);
-            }
+        // A transient read failure must not silently discard the selection.
+        if (!outcome) return;
+        QVector<TagFilterOption> options;
+        options.reserve(static_cast<int>(outcome.value().size()));
+        for (const auto& tag : outcome.value()) {
+            options.push_back({QString::fromStdString(tag.name),
+                static_cast<quint64>(tag.video_count)});
         }
-        int index = 0;
-        for (int i = 0; i < tagFilterCombo_->count(); ++i) {
-            if (tagFilterCombo_->itemData(i).toLongLong() == previous) {
-                index = i;
-                break;
-            }
-        }
-        tagFilterCombo_->setCurrentIndex(index);
-        tagFilterCombo_->blockSignals(false);
-        tagFilterId_ = tagFilterCombo_->itemData(index).toLongLong();
-        tagFilterName_ = tagFilterCombo_->itemData(index, Qt::UserRole + 1).toString();
+        tagFilterButton_->setTags(options);
     });
     watcher->setFuture(QtConcurrent::run([vault] {
         return std::make_shared<core::Result<std::vector<core::TagInfo>>>(
@@ -3070,6 +3315,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         menu.addCommand(QStringLiteral("New note"), 2);
         menu.addCommand(QStringLiteral("New record"), 3);
         menu.addCommand(QStringLiteral("Import package…"), 4);
+        if (!cutItems_.empty()) {
+            menu.addCommand(QStringLiteral("Paste"), 5);
+        }
         placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
@@ -3084,6 +3332,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         case 4:
             beginImportPackage();
             break;
+        case 5:
+            pasteCutSelection();
+            break;
         default:
             break;
         }
@@ -3093,6 +3344,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         const qlonglong folder_id = -role;
         menu.addCommand(QStringLiteral("Open"), 1);
         menu.addCommand(QStringLiteral("Rename"), 2);
+        menu.addCommand(QStringLiteral("Cut"), 6);
+        if (!cutItems_.empty()) {
+            menu.addCommand(QStringLiteral("Paste"), 7);
+        }
         menu.addCommand(QStringLiteral("Move to…"), 3);
         menu.addCommand(QStringLiteral("Export as package…"), 5);
         menu.addCommand(QStringLiteral("Remove folder"), 4, true);
@@ -3104,6 +3359,17 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         case 2:
             beginRenameFolder(folder_id);
             break;
+        case 6:
+            cutSelection();
+            break;
+        case 7: {
+            // Paste into the folder that was right-clicked, as Explorer does.
+            const auto rows = cutItems_;
+            if (moveRowsToFolder(rows, folder_id, cutFolderId_)) {
+                clearCut();
+            }
+            break;
+        }
         case 3:
             beginMoveSelection(folder_id);
             break;
@@ -3135,6 +3401,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     menu.addCommand(count > 1
         ? QStringLiteral("Move") + countText + QStringLiteral("…")
         : QStringLiteral("Move to…"), 4);
+    menu.addCommand(QStringLiteral("Cut"), 8);
+    if (!cutItems_.empty()) {
+        menu.addCommand(QStringLiteral("Paste"), 9);
+    }
     menu.addCommand(count > 1
         ? QStringLiteral("Restore") + countText
         : QStringLiteral("Restore to folder…"), 5);
@@ -3160,6 +3430,12 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         break;
     case 4:
         beginMoveSelection(0);
+        break;
+    case 8:
+        cutSelection();
+        break;
+    case 9:
+        pasteCutSelection();
         break;
     case 5:
         beginRestoreSelected();
@@ -3218,50 +3494,21 @@ void MainWindow::beginCreate() {
     watcher_->setFuture(QtConcurrent::run([root, password, parameters] {
         auto outcome = std::make_shared<VaultOperationResult>();
         auto result = core::Vault::create(root, *password, parameters);
-        clearSecret(*password);
         if (result) {
+            outcome->keys = deriveSyncKeys(root, *password);
             outcome->succeeded = true;
             outcome->vault = std::make_unique<core::Vault>(std::move(result.value()));
         } else {
             outcome->error = result.error();
         }
+        clearSecret(*password);
         return outcome;
     }));
 }
 
 void MainWindow::beginCloudLogin() {
-    setError(loginError_, {});
-    const QString address = cloudAddress_->text().trimmed();
-    const QString fingerprint = cloudFingerprint_->text().trimmed();
-    const QString password = loginPassword_->text();
-    if (!address.contains(QLatin1Char(':')) || address.startsWith(QLatin1Char(':'))) {
-        setError(loginError_, QStringLiteral("Enter the cloud address as host:port."));
-        return;
-    }
-    if (fingerprint.size() != 64) {
-        setError(loginError_, QStringLiteral("Paste the cloud server's public key."));
-        return;
-    }
-    if (password.isEmpty()) {
-        setError(loginError_, QStringLiteral("Enter the vault password."));
-        return;
-    }
-    if (cloudPage_ != nullptr) {
-        pages_->removeWidget(cloudPage_);
-        cloudPage_->deleteLater();
-        cloudPage_ = nullptr;
-    }
-    auto* browser = new CloudBrowser(pages_);
-    cloudPage_ = browser;
-    pages_->addWidget(browser);
-    browser->setOnLeave([this] {
-        if (cloudPage_ != nullptr) {
-            pages_->setCurrentWidget(loginPage_);
-        }
-    });
     loginPassword_->clear();
-    browser->openSession(address, fingerprint, password);
-    pages_->setCurrentWidget(browser);
+    setError(loginError_, QStringLiteral("Legacy remote vault-password login is disabled. Unlock a local vault, then use Sync setup."));
 }
 
 void MainWindow::beginOpen() {
@@ -3296,25 +3543,27 @@ void MainWindow::beginOpen() {
         auto outcome = std::make_shared<VaultOperationResult>();
         if (resumeShare) {
             auto checked = core::Vault::validate_password(root, *password);
-            clearSecret(*password);
             if (!checked) {
                 outcome->error = checked.error();
             } else if (!checked.value()) {
                 outcome->error = core::VaultError{core::VaultErrorCode::WrongPassword, {}};
             } else {
+                outcome->keys = deriveSyncKeys(root, *password);
                 outcome->succeeded = true;
                 outcome->resumed = true;
             }
+            clearSecret(*password);
             return outcome;
         }
         auto result = core::Vault::open(root, *password);
-        clearSecret(*password);
         if (result) {
+            outcome->keys = deriveSyncKeys(root, *password);
             outcome->succeeded = true;
             outcome->vault = std::make_unique<core::Vault>(std::move(result.value()));
         } else {
             outcome->error = result.error();
         }
+        clearSecret(*password);
         return outcome;
     }));
 }
@@ -3344,6 +3593,9 @@ void MainWindow::finishOperation() {
             shareServer_->setLocalVault(vault_);
         }
     }
+    // A fresh set of sync keys for this unlock; the old material is wiped.
+    syncKeys_.wipe();
+    syncKeys_ = outcome->keys;
     QSettings settings;
     settings.setValue(QStringLiteral("vault/location"), textFromPath(vault_->root_path()));
     showUnlocked();
@@ -3417,11 +3669,18 @@ void MainWindow::acceptExternalPaths(const QStringList& paths) {
     raise();
     activateWindow();
     for (const QString& path : paths) {
-        if (QFileInfo::exists(path)) {
-            pendingExternal_.push_back(pathFromText(path));
+        if (!QFileInfo::exists(path)) {
+            continue;
         }
+        // The shell file association hands .mvpk packages to this app; they are
+        // imported as packages, not as files for the library.
+        if (path.endsWith(QStringLiteral(".mvpk"), Qt::CaseInsensitive)) {
+            pendingPackageExternal_.push_back(path);
+            continue;
+        }
+        pendingExternal_.push_back(pathFromText(path));
     }
-    if (pendingExternal_.empty()) {
+    if (pendingExternal_.empty() && pendingPackageExternal_.isEmpty()) {
         return;
     }
     if (!vault_ || !vault_->is_unlocked()) {
@@ -3434,7 +3693,21 @@ void MainWindow::acceptExternalPaths(const QStringList& paths) {
 }
 
 void MainWindow::flushExternalImports() {
-    if (pendingExternal_.empty() || !vault_ || !vault_->is_unlocked() || batchBusy_) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    if (!pendingPackageExternal_.isEmpty()) {
+        // A package import holds the batch slot, so media that arrived with it
+        // waits for finishBatch() to call back into here.
+        const QString package = pendingPackageExternal_.takeFirst();
+        if (importPackagePath(package)) {
+            return;
+        }
+        // Dismissing the password prompt drops the rest of the packages, but
+        // still lets the media queue through.
+        pendingPackageExternal_.clear();
+    }
+    if (pendingExternal_.empty()) {
         return;
     }
     auto paths = std::move(pendingExternal_);
@@ -3508,47 +3781,181 @@ void MainWindow::finishBatch(const bool ok, const QString& message, const int co
     flushExternalImports();
 }
 
+void MainWindow::openSync() {
+    if (!vault_ || !vault_->is_unlocked() || pages_->currentWidget() != unlockedPage_) return;
+    if (!syncEngine_) {
+        syncEngine_ = new SyncEngine(vault_, syncKeys_, {}, this);
+        connect(syncEngine_, &SyncEngine::libraryChanged, this, [this] { refreshGallery(); refreshTagFilter(); });
+        connect(syncEngine_, &SyncEngine::changed, this, [this] {
+            if (syncEngine_ && syncEngine_->failed()) showStatus(syncEngine_->status(), true);
+        });
+    }
+    if (!syncPage_) {
+        // The sync surface is a page in the content stack, like the player and
+        // the text reader: same window, same chrome, no second frame.
+        syncPage_ = new SyncPage(syncEngine_, vault_, contentStack_);
+        connect(syncPage_, &SyncPage::closed, this, [this] {
+            if (contentStack_ != nullptr && syncPage_ != nullptr
+                && contentStack_->currentWidget() == syncPage_) {
+                fadeStack(contentStack_, pages_);
+            }
+        });
+        connect(syncPage_, &QObject::destroyed, this, [this] { syncPage_ = nullptr; });
+    }
+    fadeStack(contentStack_, syncPage_);
+}
+void MainWindow::closeSync() {
+    if (contentStack_ != nullptr && syncPage_ != nullptr
+        && contentStack_->currentWidget() == syncPage_ && pages_ != nullptr) {
+        contentStack_->setCurrentWidget(pages_);
+    }
+    if (syncPage_) { contentStack_->removeWidget(syncPage_); delete syncPage_; syncPage_ = nullptr; }
+    if (syncEngine_) { syncEngine_->stop(); delete syncEngine_; syncEngine_ = nullptr; }
+}
+
 void MainWindow::openSettings() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
     setError(galleryStatus_, {});
-    auto* dialog = new SettingsDialog(vault_, this);
-    connect(dialog, &SettingsDialog::settingsChanged, this, [this] {
-        refreshTagFilter();
-        refreshGallery();
-        resetAutoLock();
-    });
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->show();
+    if (!settingsPage_) {
+        auto* page = new SettingsDialog(vault_, contentStack_);
+        settingsPage_ = page;
+        contentStack_->addWidget(page);
+        connect(page, &SettingsDialog::settingsChanged, this, [this] {
+            refreshTagFilter();
+            refreshGallery();
+            resetAutoLock();
+        });
+        connect(page, &SettingsDialog::appearanceChanged, this, [this] {
+            setThemeMode(savedThemeMode());
+            update();
+        });
+        connect(page, &SettingsDialog::updateCheckRequested, this, [this] { beginUpdateCheck(true); });
+        connect(page, &SettingsDialog::updatePreferencesChanged, this, [this] { configureUpdateChecks(); });
+        connect(page, &SettingsDialog::passwordChanged, this, [this] {
+            // The sync key comes from the vault password, so every engine and
+            // key derived from the old one is now stale. Drop them; the next
+            // unlock derives from the new password and the re-sealed state.
+            if (syncPage_ != nullptr) {
+                contentStack_->removeWidget(syncPage_);
+                syncPage_->deleteLater();
+                syncPage_ = nullptr;
+            }
+            if (syncEngine_ != nullptr) {
+                syncEngine_->stop();
+                syncEngine_->deleteLater();
+                syncEngine_ = nullptr;
+            }
+            syncKeys_.wipe();
+            setError(galleryStatus_, QStringLiteral(
+                "Password changed. Sync is locked until you unlock the vault again; "
+                "items already shared stay readable to your other devices."));
+        });
+        connect(page, &SettingsDialog::closed, this, [this, page] {
+            if (settingsPage_ != page) return;
+            settingsPage_ = nullptr;
+            contentStack_->setCurrentWidget(pages_);
+            contentStack_->removeWidget(page);
+            page->deleteLater();
+            restoreGalleryFocus();
+            decorateVisible();
+        });
+        connect(page, &QObject::destroyed, this, [this, page] {
+            if (settingsPage_ == page) settingsPage_ = nullptr;
+        });
+    }
+    settingsPage_->setUpdateStatus(updateStatus_.isEmpty()
+        ? QStringLiteral("Installed version %1").arg(installedVersion()) : updateStatus_,
+        updateChecking_ || updateInstalling_);
+    contentStack_->setCurrentWidget(settingsPage_);
+    settingsPage_->setFocus();
 }
 
-void MainWindow::beginUpdateCheck() {
-    if (updateChecked_ || updateButton_ == nullptr || !appUpdateSupported()) {
+void MainWindow::configureUpdateChecks() {
+    const QSettings preferences;
+    const bool automatic = preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool();
+    const bool beta = preferences.value(QStringLiteral("updates/includeBeta"), false).toBool();
+    if (beta != updateChannelBeta_ && !updateVersion_.isEmpty()) {
+        updateVersion_.clear();
+        updateUrl_.clear();
+        updatePayload_.clear();
+        updateButton_->hide();
+    }
+    if (automatic && appUpdateSupported()) {
+        updateCheckTimer_->start();
+        beginUpdateCheck();
+    } else {
+        updateCheckTimer_->stop();
+    }
+}
+
+void MainWindow::beginUpdateCheck(const bool manual) {
+    if (updateChecking_ || updateInstalling_ || updateButton_ == nullptr) return;
+    if (!appUpdateSupported()) {
+        updateStatus_ = QStringLiteral("In-app updates are not available on this platform.");
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
         return;
     }
-    updateChecked_ = true;
+    QSettings preferences;
+    const bool beta = preferences.value(QStringLiteral("updates/includeBeta"), false).toBool();
+    if (!manual) {
+        if (!preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool()) return;
+        const QDateTime last = preferences.value(QStringLiteral("updates/lastCheckUtc")).toDateTime();
+        const qint64 elapsed = last.secsTo(QDateTime::currentDateTimeUtc());
+        if (last.isValid() && elapsed >= 0 && elapsed < 6 * 60 * 60
+            && preferences.value(QStringLiteral("updates/lastCheckBeta"), false).toBool() == beta) return;
+    }
+    preferences.setValue(QStringLiteral("updates/lastCheckUtc"), QDateTime::currentDateTimeUtc());
+    preferences.setValue(QStringLiteral("updates/lastCheckBeta"), beta);
+    updateChecking_ = true;
+    updateChannelBeta_ = beta;
+    updateStatus_ = QStringLiteral("Checking for updates…");
+    if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_, true);
     auto* watcher = new QFutureWatcher<UpdateCheckOutcome>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, beta] {
         const UpdateCheckOutcome outcome = watcher->result();
         watcher->deleteLater();
-        if (outcome.version.isEmpty() || updateButton_ == nullptr) {
-            // Newest release already, or GitHub unreachable. The phone stays
-            // quiet in both cases too, so nothing is shown here either.
+        updateChecking_ = false;
+        const QSettings preferences;
+        if (beta != preferences.value(QStringLiteral("updates/includeBeta"), false).toBool()) {
+            updateStatus_ = QStringLiteral("Update channel changed. Check again for the selected channel.");
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            configureUpdateChecks();
             return;
         }
+        if (!outcome.error.isEmpty()) {
+            updateStatus_ = outcome.error;
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
+        if (outcome.version.isEmpty()) {
+            updateStatus_ = QStringLiteral("You’re up to date · Version %1").arg(installedVersion());
+            updateVersion_.clear();
+            updateUrl_.clear();
+            updatePayload_.clear();
+            updateButton_->hide();
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
+        if (updateVersion_ != outcome.version) updatePayload_.clear();
         updateVersion_ = outcome.version;
         updateUrl_ = outcome.url;
         updateSize_ = outcome.size;
+        updateStatus_ = QStringLiteral("Version %1 is available.").arg(updateVersion_);
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
         updateButton_->setToolTip(
             QStringLiteral("Download and install version %1").arg(updateVersion_));
         updateButton_->show();
+        if (preferences.value(QStringLiteral("updates/checkAutomatically"), true).toBool()
+            && preferences.value(QStringLiteral("updates/downloadAutomatically"), false).toBool()) {
+            beginUpdateInstall(true);
+        }
     });
-    watcher->setFuture(QtConcurrent::run([] {
+    watcher->setFuture(QtConcurrent::run([beta] {
         UpdateCheckOutcome outcome;
         AppRelease release;
-        QString error;
-        if (!fetchLatestRelease(installedVersion(), &release, &error)) {
+        if (!fetchLatestRelease(installedVersion(), &release, &outcome.error, beta)) {
             return outcome;
         }
         outcome.version = release.version;
@@ -3558,20 +3965,24 @@ void MainWindow::beginUpdateCheck() {
     }));
 }
 
-void MainWindow::beginUpdateInstall() {
+void MainWindow::beginUpdateInstall(const bool automatic) {
     if (updateInstalling_ || updateVersion_.isEmpty()) {
         return;
     }
     if (!updatePayload_.isEmpty()) {
-        offerUpdateRestart();   // unpacked on an earlier visit
+        if (!automatic) offerUpdateRestart();
         return;
     }
     updateInstalling_ = true;
     updateButton_->setEnabled(false);
-    progressBar_->setRange(0, 1000);
-    progressBar_->setValue(0);
-    progressBar_->show();
-    showStatus(QStringLiteral("Updating…"), false);
+    if (!batchBusy_) {
+        progressBar_->setRange(0, 1000);
+        progressBar_->setValue(0);
+        progressBar_->show();
+    }
+    updateStatus_ = QStringLiteral("Downloading update…");
+    if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_, true);
+    showStatus(updateStatus_, false);
 
     AppRelease release;
     release.version = updateVersion_;
@@ -3581,21 +3992,31 @@ void MainWindow::beginUpdateInstall() {
     // reaching a window that is already gone.
     const QPointer<MainWindow> guard(this);
     auto* watcher = new QFutureWatcher<UpdateInstallOutcome>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, release] {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, release, automatic] {
         const UpdateInstallOutcome outcome = watcher->result();
         watcher->deleteLater();
         updateInstalling_ = false;
-        progressBar_->hide();
+        if (!batchBusy_) progressBar_->hide();
         if (updateButton_ != nullptr) {
             updateButton_->setEnabled(true);
         }
         if (!outcome.error.isEmpty()) {
+            updateStatus_ = outcome.error;
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
             showStatus(outcome.error, true);
             return;
         }
+        if (updateVersion_ != release.version) {
+            updateStatus_ = QStringLiteral("Update channel changed; the old download will not be installed.");
+            if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+            return;
+        }
         updatePayload_ = outcome.payload;
-        showStatus(QStringLiteral("Version %1 is ready to install.").arg(release.version), false);
-        offerUpdateRestart();
+        updateStatus_ = QStringLiteral("Version %1 is ready. Use the update button to restart and install.").arg(release.version);
+        if (settingsPage_) settingsPage_->setUpdateStatus(updateStatus_);
+        showStatus(updateStatus_, false);
+        // Background downloads never quit an open vault without consent.
+        if (!automatic) offerUpdateRestart();
     });
     watcher->setFuture(QtConcurrent::run([release, guard] {
         UpdateInstallOutcome outcome;
@@ -3621,7 +4042,7 @@ void MainWindow::beginUpdateInstall() {
 }
 
 void MainWindow::setUpdateProgress(const qint64 done, const qint64 total) {
-    if (progressBar_ == nullptr) {
+    if (progressBar_ == nullptr || batchBusy_) {
         return;
     }
     if (total > 0) {
@@ -3652,7 +4073,7 @@ void MainWindow::offerUpdateRestart() {
     box.setDefaultButton(restart);
     box.exec();
     if (box.clickedButton() != restart) {
-        showStatus(QStringLiteral("Version %1 installs at the next restart.").arg(release.version), false);
+        showStatus(QStringLiteral("Version %1 is ready. Use the update button when you want to install.").arg(release.version), false);
         return;
     }
     if (batchBusy_) {
@@ -4081,9 +4502,16 @@ void MainWindow::beginImportPackage() {
     if (selected.isEmpty()) {
         return;
     }
+    importPackagePath(selected);
+}
+
+bool MainWindow::importPackagePath(const QString& selected) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return false;
+    }
     PackagePassword prompt = askPackagePassword(this, false);
     if (!prompt.accepted) {
-        return;
+        return false;
     }
     batchBusy_ = true;
     batchLabel_ = QStringLiteral("Importing");
@@ -4106,6 +4534,7 @@ void MainWindow::beginImportPackage() {
             worker->importPackage(vault, path, password, folderId);
         },
         Qt::QueuedConnection);
+    return true;
 }
 
 std::vector<std::int64_t> MainWindow::selectedVideoIds() const {
@@ -4178,6 +4607,21 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
             item->setBackground(hit ? mark : QBrush());
         }
     }
+    if (folderTree_ != nullptr) {
+        // The pane uses its own background for "current folder", so restore that
+        // rather than clearing to default.
+        std::function<void(QTreeWidgetItem*)> paint = [&](QTreeWidgetItem* node) {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* item = node->child(index);
+                const auto id = item->data(0, Qt::UserRole).toLongLong();
+                const bool hit = on && id == folder_id;
+                const bool current = id == currentFolderId_;
+                item->setBackground(0, hit ? mark : (current ? QBrush(QColor(51, 144, 236, 70)) : QBrush()));
+                paint(item);
+            }
+        };
+        paint(folderTree_->invisibleRootItem());
+    }
     if (crumbHost_ != nullptr) {
         const auto buttons = crumbHost_->findChildren<QPushButton*>();
         for (auto* button : buttons) {
@@ -4194,30 +4638,94 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
     }
 }
 
-void MainWindow::moveItemsToFolder(const std::int64_t destination) {
-    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
-        return;
-    }
-    std::vector<std::int64_t> videos;
-    std::vector<std::int64_t> folders;
-    const auto take = [&videos, &folders](const int kind, const qlonglong role) {
+std::vector<MainWindow::GalleryRow> MainWindow::selectedRows() const {
+    std::vector<GalleryRow> rows;
+    const auto take = [&rows](const int kind, const qlonglong role) {
         if (kind == 0 && role > 0) {
-            videos.push_back(role);
+            rows.emplace_back(0, role);
         } else if (kind == 1 && role < 0) {
-            folders.push_back(-role);
+            rows.emplace_back(1, role);
         }
     };
-    if (galleryStack_->currentWidget() == detailsTree_) {
+    if (galleryStack_ != nullptr && galleryStack_->currentWidget() == detailsTree_) {
         for (auto* item : detailsTree_->selectedItems()) {
             take(item->data(0, Qt::UserRole + 12).toInt(),
                 item->data(0, Qt::UserRole).toLongLong());
         }
-    } else {
+    } else if (iconList_ != nullptr) {
         for (auto* item : iconList_->selectedItems()) {
             take(item->data(Qt::UserRole + 12).toInt(),
                 item->data(Qt::UserRole).toLongLong());
         }
     }
+    return rows;
+}
+
+void MainWindow::captureDragPayload(const bool from_details) {
+    dragPayload_.clear();
+    const auto take = [this](const int kind, const qlonglong role) {
+        if (kind == 0 && role > 0) {
+            dragPayload_.emplace_back(0, role);
+        } else if (kind == 1 && role < 0) {
+            dragPayload_.emplace_back(1, role);
+        }
+    };
+    if (from_details) {
+        if (detailsTree_ != nullptr) {
+            for (auto* item : detailsTree_->selectedItems()) {
+                take(item->data(0, Qt::UserRole + 12).toInt(),
+                    item->data(0, Qt::UserRole).toLongLong());
+            }
+        }
+    } else if (iconList_ != nullptr) {
+        for (auto* item : iconList_->selectedItems()) {
+            take(item->data(Qt::UserRole + 12).toInt(),
+                item->data(Qt::UserRole).toLongLong());
+        }
+    }
+    dragPayloadValid_ = !dragPayload_.empty();
+}
+
+void MainWindow::clearDragPayload() {
+    dragPayload_.clear();
+    dragPayloadValid_ = false;
+}
+
+void MainWindow::moveItemsToFolder(const std::int64_t destination) {
+    // What the drag carried, captured in startDrag. The selection can have
+    // changed by the time the drop lands, so it is only a fallback. The rows
+    // came from this view, which lists the open folder.
+    std::vector<GalleryRow> rows = dragPayloadValid_ ? dragPayload_ : selectedRows();
+    clearDragPayload();
+    (void)moveRowsToFolder(rows, destination, currentFolderId_);
+}
+
+bool MainWindow::moveRowsToFolder(const std::vector<GalleryRow>& rows,
+    const std::int64_t destination, const std::int64_t sourceFolder) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_ || rows.empty()) {
+        return false;
+    }
+    std::vector<std::int64_t> videos;
+    std::vector<std::int64_t> folders;
+    for (const auto& row : rows) {
+        if (row.first == 0 && row.second > 0) {
+            videos.push_back(row.second);
+        } else if (row.first == 1 && row.second < 0) {
+            folders.push_back(-row.second);
+        }
+    }
+    if (videos.empty() && folders.empty()) {
+        return false;
+    }
+    auto parentOf = [this](const std::int64_t folder_id, std::int64_t* parent) {
+        for (const auto& folder : folders_) {
+            if (folder.id == folder_id) {
+                *parent = folder.parent_id;
+                return true;
+            }
+        }
+        return false;
+    };
     auto contains = [this](const std::int64_t ancestor, std::int64_t node) {
         for (int guard = 0; guard < 64 && node != 0; ++guard) {
             if (node == ancestor) {
@@ -4239,22 +4747,48 @@ void MainWindow::moveItemsToFolder(const std::int64_t destination) {
         }
         return false;
     };
+    // A file lives in exactly one folder, so a drop back onto the folder it is
+    // already in is a no-op rather than an error. The rows came from
+    // sourceFolder, so the move only has work to do when that differs.
+    const bool videosStay = destination == sourceFolder;
+    // Check every folder before touching the vault: one impossible target must
+    // not leave a half-applied batch.
     QString problem;
     for (const auto folder_id : folders) {
         if (folder_id == destination || contains(folder_id, destination)) {
             problem = QStringLiteral("A folder can't be moved into itself.");
-            continue;
-        }
-        auto moved = vault_->move_folder(folder_id, destination);
-        if (!moved) {
-            problem = vaultErrorText(moved.error());
+            break;
         }
     }
-    for (const auto video_id : videos) {
-        auto moved = vault_->move_video(video_id, destination);
-        if (!moved) {
-            problem = vaultErrorText(moved.error());
+    if (!problem.isEmpty()) {
+        setError(galleryStatus_, problem);
+        galleryStatus_->setVisible(true);
+        return false;
+    }
+    std::vector<GalleryRow> moved;
+    moved.reserve(rows.size());
+    for (const auto folder_id : folders) {
+        std::int64_t parent = -1;
+        if (parentOf(folder_id, &parent) && parent == destination) {
+            continue;
         }
+        auto result = vault_->move_folder(folder_id, destination);
+        if (!result) {
+            problem = vaultErrorText(result.error());
+            continue;
+        }
+        moved.emplace_back(1, -folder_id);
+    }
+    for (const auto video_id : videos) {
+        if (videosStay) {
+            continue;
+        }
+        auto result = vault_->move_video(video_id, destination);
+        if (!result) {
+            problem = vaultErrorText(result.error());
+            continue;
+        }
+        moved.emplace_back(0, video_id);
     }
     if (!problem.isEmpty()) {
         setError(galleryStatus_, problem);
@@ -4262,7 +4796,269 @@ void MainWindow::moveItemsToFolder(const std::int64_t destination) {
     } else {
         setError(galleryStatus_, {});
     }
+    // Explorer leaves the moved rows selected when the destination is the folder
+    // that is on screen; the paint pass re-selects them once the rows exist.
+    pendingSelection_ = destination == currentFolderId_ ? moved : std::vector<GalleryRow>{};
+    // A cut whose rows just moved by drag or paste has been spent.
+    if (problem.isEmpty() && !cutItems_.empty()) {
+        for (const auto& row : moved) {
+            const bool wasCut = std::any_of(cutItems_.begin(), cutItems_.end(),
+                [&row](const GalleryRow& cut) {
+                    return cut.first == row.first && cut.second == row.second;
+                });
+            if (wasCut) {
+                clearCut();
+                break;
+            }
+        }
+    }
     refreshGallery();
+    return problem.isEmpty();
+}
+
+void MainWindow::selectGalleryRow(const int kind, const qlonglong role) {
+    if (galleryStack_ == nullptr) {
+        return;
+    }
+    if (galleryStack_->currentWidget() == detailsTree_ && detailsTree_ != nullptr) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            if (item->data(0, Qt::UserRole + 12).toInt() == kind
+                && item->data(0, Qt::UserRole).toLongLong() == role) {
+                item->setSelected(true);
+                return;
+            }
+        }
+        return;
+    }
+    if (iconList_ == nullptr) {
+        return;
+    }
+    for (int index = 0; index < iconList_->count(); ++index) {
+        auto* item = iconList_->item(index);
+        if (item->data(Qt::UserRole + 12).toInt() == kind
+            && item->data(Qt::UserRole).toLongLong() == role) {
+            item->setSelected(true);
+            return;
+        }
+    }
+}
+
+void MainWindow::applyPendingSelection() {
+    if (galleryStack_ == nullptr) {
+        pendingSelection_.clear();
+        return;
+    }
+    if (pendingSelection_.empty()) {
+        return;
+    }
+    const auto rows = pendingSelection_;
+    pendingSelection_.clear();
+    QAbstractItemView* view = galleryStack_->currentWidget() == detailsTree_
+        ? static_cast<QAbstractItemView*>(detailsTree_)
+        : static_cast<QAbstractItemView*>(iconList_);
+    if (view == nullptr) {
+        return;
+    }
+    view->clearSelection();
+    for (const auto& row : rows) {
+        selectGalleryRow(row.first, row.second);
+    }
+    const auto selected = view->selectionModel()->selectedIndexes();
+    if (!selected.isEmpty()) {
+        view->setCurrentIndex(selected.first());
+        view->scrollTo(selected.first());
+    }
+}
+
+void MainWindow::cutSelection() {
+    const auto rows = selectedRows();
+    if (rows.empty()) {
+        showStatus(QStringLiteral("Select files or folders, then press Ctrl+X."), false);
+        return;
+    }
+    cutItems_ = rows;
+    cutFolderId_ = currentFolderId_;
+    applyCutDimming();
+    showStatus(QStringLiteral("Cut %1 item%2. Ctrl+V moves here, Escape cancels.")
+        .arg(rows.size())
+        .arg(rows.size() == 1 ? QString() : QStringLiteral("s")), false);
+}
+
+void MainWindow::pasteCutSelection() {
+    if (cutItems_.empty()) {
+        showStatus(QStringLiteral("Nothing is cut. Select items and press Ctrl+X first."), false);
+        return;
+    }
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    const auto rows = cutItems_;
+    if (moveRowsToFolder(rows, currentFolderId_, cutFolderId_)) {
+        clearCut();
+    }
+}
+
+void MainWindow::clearCut() {
+    cutItems_.clear();
+    cutFolderId_ = 0;
+    applyCutDimming();
+}
+
+void MainWindow::applyCutDimming() {
+    const auto isCut = [this](const int kind, const qlonglong role) {
+        for (const auto& row : cutItems_) {
+            if (row.first == kind && row.second == role) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const QBrush dim(QColor(142, 142, 147));
+    if (detailsTree_ != nullptr) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            const bool cut = isCut(item->data(0, Qt::UserRole + 12).toInt(),
+                item->data(0, Qt::UserRole).toLongLong());
+            for (int column = 0; column < detailsTree_->columnCount(); ++column) {
+                item->setForeground(column, cut ? dim : QBrush());
+            }
+        }
+    }
+    if (iconList_ != nullptr) {
+        for (int index = 0; index < iconList_->count(); ++index) {
+            auto* item = iconList_->item(index);
+            const bool cut = isCut(item->data(Qt::UserRole + 12).toInt(),
+                item->data(Qt::UserRole).toLongLong());
+            item->setData(kCutDimRole, cut);
+        }
+    }
+}
+
+void MainWindow::goUpFolder() {
+    if (currentFolderId_ == 0) {
+        return;
+    }
+    std::int64_t parent = 0;
+    for (const auto& folder : folders_) {
+        if (folder.id == currentFolderId_) {
+            parent = folder.parent_id;
+            break;
+        }
+    }
+    openFolder(parent);
+}
+
+void MainWindow::rebuildFolderTree() {
+    if (folderTree_ == nullptr || folderPane_ == nullptr) {
+        return;
+    }
+    const bool unlocked = vault_ && vault_->is_unlocked();
+    folderTree_->blockSignals(true);
+    folderTree_->clear();
+    folderPane_->setVisible(unlocked);
+    if (!unlocked) {
+        folderTree_->blockSignals(false);
+        layoutLibraryChrome();
+        return;
+    }
+    // The path down to the open folder always stays expanded, as in Explorer.
+    expandedFolders_.insert(0);
+    for (std::int64_t id = currentFolderId_; id != 0; ) {
+        expandedFolders_.insert(id);
+        std::int64_t parent = 0;
+        bool found = false;
+        for (const auto& folder : folders_) {
+            if (folder.id == id) {
+                parent = folder.parent_id;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            break;
+        }
+        id = parent;
+    }
+    auto* root = new QTreeWidgetItem(folderTree_);
+    root->setText(0, QStringLiteral("Vault"));
+    root->setData(0, Qt::UserRole, static_cast<qlonglong>(0));
+    root->setToolTip(0, QStringLiteral("Vault"));
+    std::function<void(QTreeWidgetItem*, std::int64_t)> fill =
+        [this, &fill](QTreeWidgetItem* parentItem, const std::int64_t parentId) {
+        std::vector<const core::FolderInfo*> children;
+        for (const auto& folder : folders_) {
+            if (folder.parent_id == parentId) {
+                children.push_back(&folder);
+            }
+        }
+        std::sort(children.begin(), children.end(),
+            [](const core::FolderInfo* left, const core::FolderInfo* right) {
+                return QString::fromStdString(left->name)
+                    .compare(QString::fromStdString(right->name), Qt::CaseInsensitive) < 0;
+            });
+        for (const auto* folder : children) {
+            auto* item = new QTreeWidgetItem(parentItem);
+            const QString name = QString::fromStdString(folder->name);
+            item->setText(0, name);
+            item->setToolTip(0, name);
+            item->setData(0, Qt::UserRole, static_cast<qlonglong>(folder->id));
+            fill(item, folder->id);
+            item->setExpanded(expandedFolders_.count(folder->id) != 0);
+        }
+    };
+    fill(root, 0);
+    root->setExpanded(expandedFolders_.count(0) != 0);
+    QTreeWidgetItem* open = root;
+    if (currentFolderId_ != 0) {
+        std::function<QTreeWidgetItem*(QTreeWidgetItem*)> find =
+            [this, &find](QTreeWidgetItem* node) -> QTreeWidgetItem* {
+            for (int index = 0; index < node->childCount(); ++index) {
+                auto* child = node->child(index);
+                if (child->data(0, Qt::UserRole).toLongLong() == currentFolderId_) {
+                    return child;
+                }
+                if (auto* hit = find(child)) {
+                    return hit;
+                }
+            }
+            return nullptr;
+        };
+        if (auto* hit = find(root)) {
+            open = hit;
+        }
+    }
+    const QBrush mark(QColor(51, 144, 236, 70));
+    for (auto* item : {root, open}) {
+        if (item != nullptr && item->data(0, Qt::UserRole).toLongLong() == currentFolderId_) {
+            item->setBackground(0, mark);
+        }
+    }
+    if (open != nullptr) {
+        QFont font = open->font(0);
+        font.setBold(true);
+        open->setFont(0, font);
+        folderTree_->scrollToItem(open, QAbstractItemView::PositionAtCenter);
+    }
+    folderTree_->blockSignals(false);
+    layoutLibraryChrome();
+}
+
+void MainWindow::setFolderPaneCollapsed(const bool collapsed) {
+    folderPaneCollapsed_ = collapsed;
+    if (folderTree_ != nullptr) {
+        folderTree_->setVisible(!collapsed);
+    }
+    if (folderPaneLabel_ != nullptr) {
+        folderPaneLabel_->setVisible(!collapsed);
+    }
+    if (folderPaneToggle_ != nullptr) {
+        folderPaneToggle_->setText(collapsed ? QStringLiteral("›") : QStringLiteral("‹"));
+        folderPaneToggle_->setToolTip(collapsed
+            ? QStringLiteral("Show the folder pane")
+            : QStringLiteral("Collapse the folder pane"));
+    }
+    layoutLibraryChrome();
 }
 
 bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
@@ -4272,10 +5068,16 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         && (watched == iconList_ || watched == iconList_->viewport());
     auto* crumb = qobject_cast<QPushButton*>(watched);
     const bool on_crumb = crumb != nullptr && crumb->property("mvpDropFolder").isValid();
-    if (!on_details && !on_icons && !on_crumb) {
+    const bool on_tree = folderTree_ != nullptr
+        && (watched == folderTree_ || watched == folderTree_->viewport());
+    if (!on_details && !on_icons && !on_crumb && !on_tree) {
         return false;
     }
     if (event->type() == QEvent::DragLeave) {
+        if (dragExpandTimer_ != nullptr) {
+            dragExpandTimer_->stop();
+            dragExpandFolder_ = 0;
+        }
         highlightDropFolder(0, false);
         return false;
     }
@@ -4303,15 +5105,30 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
 
     std::int64_t destination = currentFolderId_;
     bool on_folder = false;
-    if (on_crumb) {
+    QTreeWidgetItem* treeTarget = nullptr;
+    // Drop events normally reach the viewport, where drop->pos() is already
+    // viewport-relative. Mapping from the view again shifted the hit test by the
+    // header/frame height, so a tree with a header only hit rows near the top:
+    // drops worked in the icon views and stopped working after a view switch.
+    // The cursor's own position is correct no matter which widget got the event.
+    const auto cursorIn = [](const QWidget* viewport) {
+        return viewport->mapFromGlobal(QCursor::pos());
+    };
+    if (on_tree) {
+        treeTarget = folderTree_->itemAt(cursorIn(folderTree_->viewport()));
+        if (treeTarget == nullptr) {
+            // Empty pane space is not a destination; only rows are.
+            highlightDropFolder(0, false);
+            drop->ignore();
+            return true;
+        }
+        destination = treeTarget->data(0, Qt::UserRole).toLongLong();
+        on_folder = true;
+    } else if (on_crumb) {
         destination = crumb->property("mvpDropFolder").toLongLong();
         on_folder = true;
     } else if (on_details) {
-        QPoint pos = drop->pos();
-        if (watched == detailsTree_) {
-            pos = detailsTree_->viewport()->mapFrom(detailsTree_, pos);
-        }
-        auto* item = detailsTree_->itemAt(pos);
+        auto* item = detailsTree_->itemAt(cursorIn(detailsTree_->viewport()));
         if (item != nullptr) {
             const int kind = item->data(0, Qt::UserRole + 12).toInt();
             const auto role = item->data(0, Qt::UserRole).toLongLong();
@@ -4327,11 +5144,7 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
             }
         }
     } else {
-        QPoint pos = drop->pos();
-        if (watched == iconList_) {
-            pos = iconList_->viewport()->mapFrom(iconList_, pos);
-        }
-        auto* item = iconList_->itemAt(pos);
+        auto* item = iconList_->itemAt(cursorIn(iconList_->viewport()));
         if (item != nullptr) {
             const int kind = item->data(Qt::UserRole + 12).toInt();
             const auto role = item->data(Qt::UserRole).toLongLong();
@@ -4348,21 +5161,36 @@ bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
         }
     }
 
-    const bool allow = external || (internal && on_folder && destination != currentFolderId_);
-    if (!allow) {
-        highlightDropFolder(0, false);
-        drop->ignore();
-        return true;
-    }
+    // Empty gallery space is a destination too: it means the current folder,
+    // which is a no-op for rows that already live here.
     // TargetMoveAction keeps the gallery rows in place. A plain MoveAction makes
     // Qt delete the dragged rows after the drop, which fights the refresh.
     drop->setDropAction(internal ? Qt::TargetMoveAction : Qt::CopyAction);
     if (event->type() != QEvent::Drop) {
         highlightDropFolder(on_folder ? destination : -1, on_folder);
+        // Hovering a closed folder in the pane opens it after a moment.
+        if (dragExpandTimer_ != nullptr) {
+            const bool closedTarget = on_tree && treeTarget != nullptr
+                && !treeTarget->isExpanded() && treeTarget->childCount() > 0;
+            if (closedTarget) {
+                const auto expand_id = treeTarget->data(0, Qt::UserRole).toLongLong();
+                if (dragExpandFolder_ != expand_id || !dragExpandTimer_->isActive()) {
+                    dragExpandFolder_ = expand_id;
+                    dragExpandTimer_->start(700);
+                }
+            } else {
+                dragExpandTimer_->stop();
+                dragExpandFolder_ = 0;
+            }
+        }
         drop->accept();
         return true;
     }
 
+    if (dragExpandTimer_ != nullptr) {
+        dragExpandTimer_->stop();
+        dragExpandFolder_ = 0;
+    }
     highlightDropFolder(0, false);
     if (internal) {
         moveItemsToFolder(destination);
@@ -4603,7 +5431,7 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
                 break;
             }
         }
-    } else if (auto* item = findListItemById(iconList_, video_id)) {
+    } else if (auto* item = galleryIconItem(video_id)) {
         current = item->data(Qt::UserRole + 1).toString();
     }
     InWindowSheet prompt(this);
@@ -4844,17 +5672,32 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
 }
 
 int MainWindow::selectedGalleryKind() const {
+    // The gallery keeps a current row that is not always the one the user
+    // clicked (selection can change without the current index following), so
+    // the selection wins whenever the current row is not part of it.
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         return item == nullptr ? -1 : item->data(0, Qt::UserRole + 12).toInt();
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     return item == nullptr ? -1 : item->data(Qt::UserRole + 12).toInt();
 }
 
 void MainWindow::activateCurrentItem() {
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         if (item == nullptr) {
             return;
         }
@@ -4872,6 +5715,10 @@ void MainWindow::activateCurrentItem() {
         return;
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     if (item == nullptr) {
         return;
     }
@@ -4972,7 +5819,7 @@ void MainWindow::revealVideo(const qlonglong id, const QString& name, const qlon
     if (!vault_ || !vault_->is_unlocked() || folderId != currentFolderId_) {
         return;
     }
-    if (!tagFilterName_.isEmpty()) {
+    if (!tagFilterNames_.isEmpty()) {
         return;
     }
     if (!searchText_.isEmpty() && !name.contains(searchText_, Qt::CaseInsensitive)) {
@@ -5006,8 +5853,8 @@ void MainWindow::revealFolder(const qlonglong id, const qlonglong parentId, cons
 void MainWindow::placeVideoRow(const qlonglong id, const QString& name, const qlonglong size,
     const qlonglong importedAt) {
     const int index = insertIndex(iconList_, 2, sortKey_, sortAscending_, id, name, size, importedAt);
-    const QString sizeText = QStringLiteral("%1 MB").arg(
-        static_cast<double>(size) / (1024.0 * 1024.0), 0, 'f', 2);
+    // Units step down to KB for small files; a 4 KB file used to read "0.00 MB".
+    const QString sizeText = compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, size)));
     auto* iconItem = new QListWidgetItem();
     iconItem->setData(Qt::UserRole, id);
     iconItem->setData(Qt::UserRole + 1, name);
@@ -5037,7 +5884,9 @@ void MainWindow::placeVideoRow(const qlonglong id, const QString& name, const ql
     treeItem->setData(0, Qt::UserRole + 12, 0);
     treeItem->setToolTip(0, iconItem->toolTip());
     detailsTree_->insertTopLevelItem(std::min(index, detailsTree_->topLevelItemCount()), treeItem);
-    decorateVideo(id, name, static_cast<quint64>(std::max<qlonglong>(0, size)));
+    galleryCache_->iconRows[id] = iconItem;
+    galleryCache_->treeRows[id] = treeItem;
+    decorateVisible();
     recountLibrary();
 }
 
@@ -5070,9 +5919,9 @@ void MainWindow::recountLibrary() {
             bytes += iconList_->item(i)->data(Qt::UserRole + 6).toLongLong();
         }
     }
-    statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
+    statusCountLabel_->setText(QStringLiteral("%1 items · %2")
         .arg(items)
-        .arg(static_cast<double>(bytes) / (1024.0 * 1024.0), 0, 'f', 1));
+        .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, bytes)))));
     if (emptyState_ != nullptr) {
         if (items == 0) {
             emptyState_->setText(currentFolderId_ == 0
@@ -5086,7 +5935,45 @@ void MainWindow::recountLibrary() {
     }
 }
 
-void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, const quint64 originalSize) {
+QListWidgetItem* MainWindow::galleryIconItem(const qlonglong id) const {
+    const auto found = galleryCache_->iconRows.find(id);
+    return found == galleryCache_->iconRows.end() ? nullptr : found->second;
+}
+
+QTreeWidgetItem* MainWindow::galleryTreeItem(const qlonglong id) const {
+    const auto found = galleryCache_->treeRows.find(id);
+    return found == galleryCache_->treeRows.end() ? nullptr : found->second;
+}
+
+void MainWindow::rememberGalleryThumbnail(const qlonglong id, const QPixmap& pixmap) {
+    // Row QVariant/QIcon copies also own the decoded pixels. Evict ALL owners,
+    // not just the map, or scrolling through a vault still retains every tile.
+    auto& cache = *galleryCache_;
+    const auto old = std::find(cache.thumbOrder.begin(), cache.thumbOrder.end(), id);
+    if (old != cache.thumbOrder.end()) cache.thumbOrder.erase(old);
+    cache.thumbs[id] = pixmap;
+    cache.thumbOrder.push_back(id);
+    while (cache.thumbOrder.size() > galleryResidentLimit_) {
+        const auto evicted = cache.thumbOrder.front();
+        cache.thumbOrder.pop_front();
+        cache.thumbs.erase(evicted);
+        cache.pdfThumbs.erase(evicted);
+        decoratedIds_.erase(evicted);
+        if (auto* item = galleryIconItem(evicted)) {
+            item->setData(Qt::UserRole + 4, QVariant());
+            item->setIcon(QIcon());
+        }
+        if (auto* item = galleryTreeItem(evicted)) item->setIcon(0, QIcon());
+    }
+}
+
+void MainWindow::galleryTaskFinished() {
+    --galleryTasksInFlight_;
+    QTimer::singleShot(0, this, [this] { decorateVisible(); });
+}
+
+void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, const quint64 originalSize,
+    const bool loadThumbnail) {
     auto applyThumb = [](QListWidgetItem* iconItem, QTreeWidgetItem* treeItem, const QPixmap& source) {
         if (source.isNull()) {
             return;
@@ -5105,13 +5992,13 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
     };
     const auto vault = vault_;
     const auto generation = galleryGeneration_;
-    auto presentIdentity = [this, vault, video_id, name, originalSize, applyThumb, generation](const FileIdentity& identity) {
+    auto presentIdentity = [this, vault, video_id, name, originalSize, applyThumb, generation, loadThumbnail](const FileIdentity& identity) {
         if (generation != galleryGeneration_) {
             return;
         }
         galleryCache_->kinds[video_id] = identity;
-        auto* iconItem = findListItemById(iconList_, video_id);
-        auto* treeItem = findTreeItemById(detailsTree_, video_id);
+        auto* iconItem = galleryIconItem(video_id);
+        auto* treeItem = galleryTreeItem(video_id);
         if (iconItem == nullptr && treeItem == nullptr) {
             return;
         }
@@ -5119,9 +6006,17 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             iconItem->setData(Qt::UserRole + 15, identity.label);
             iconItem->setData(Qt::UserRole + 16, identity.route);
         }
+        // Metadata sorts do not need off-screen decoded previews.
+        if (!loadThumbnail && identity.route != 1 && identity.route != 2) {
+            if (treeItem) {
+                treeItem->setText(2, QString());
+                treeItem->setText(4, identity.label);
+            }
+            return;
+        }
         if (identity.route == 0) {
             const QPixmap badge = kindBadge(identity.label, compactSize(originalSize), 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             if (treeItem != nullptr) {
                 treeItem->setText(2, QString());
@@ -5147,10 +6042,12 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             }
             galleryCache_->pdfThumbs.insert(video_id);
             auto* thumbWatcher = new QFutureWatcher<QByteArray>(this);
+            ++galleryTasksInFlight_;
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
                 [this, video_id, thumbWatcher, applyThumb, generation] {
                     const QByteArray jpeg = thumbWatcher->result();
                     thumbWatcher->deleteLater();
+                    galleryTaskFinished();
                     if (generation != galleryGeneration_ || jpeg.isEmpty()) {
                         return;
                     }
@@ -5161,12 +6058,12 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
                         ? pixmap
                         : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    galleryCache_->thumbs[video_id] = tile;
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    rememberGalleryThumbnail(video_id, tile);
+                    auto* iconItem = galleryIconItem(video_id);
+                    auto* treeItem = galleryTreeItem(video_id);
                     applyThumb(iconItem, treeItem, tile);
                 });
-            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+            thumbWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
                 auto stored = vault->thumbnail(video_id);
                 if (stored && stored.value().mime == "image/jpeg"
                     && stored.value().width >= 16U && !stored.value().bytes.empty()) {
@@ -5218,7 +6115,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                 treeItem->setText(4, identity.label);
             }
             const QPixmap badge = textDocumentPixmap(identity.label, 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             return;
         }
@@ -5235,25 +6132,34 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             }
             const QPixmap badge = recordBadge(
                 identity.label, name, compactSize(originalSize), 320);
-            galleryCache_->thumbs[video_id] = badge;
+            rememberGalleryThumbnail(video_id, badge);
             applyThumb(iconItem, treeItem, badge);
             return;
         }
+        if (loadThumbnail) {
         const auto cachedThumb = galleryCache_->thumbs.find(video_id);
         if (cachedThumb != galleryCache_->thumbs.end()) {
             applyThumb(iconItem, treeItem, cachedThumb->second);
         } else if (vault) {
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
+            ++galleryTasksInFlight_;
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, video_id, thumbWatcher, applyThumb, generation] {
+                [this, video_id, name, originalSize, thumbWatcher, applyThumb, generation] {
                     const auto outcome = *thumbWatcher->result();
                     thumbWatcher->deleteLater();
-                    if (generation != galleryGeneration_ || !outcome || outcome.value().bytes.empty()) {
+                    galleryTaskFinished();
+                    if (generation != galleryGeneration_) {
                         return;
                     }
-                    auto* iconItem = findListItemById(iconList_, video_id);
-                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    // Continue the same request chain, never fan one sniff
+                    // into concurrent thumbnail AND metadata jobs.
+                    decorateVideo(video_id, name, originalSize, false);
+                    if (!outcome || outcome.value().bytes.empty()) {
+                        return;
+                    }
+                    auto* iconItem = galleryIconItem(video_id);
+                    auto* treeItem = galleryTreeItem(video_id);
                     if (iconItem == nullptr && treeItem == nullptr) {
                         return;
                     }
@@ -5270,13 +6176,15 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     const QPixmap tile = pixmap.width() <= 320 && pixmap.height() <= 320
                         ? pixmap
                         : pixmap.scaled(320, 320, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    galleryCache_->thumbs[video_id] = tile;
+                    rememberGalleryThumbnail(video_id, tile);
                     applyThumb(iconItem, treeItem, tile);
                 });
-            thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+            thumbWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
                 auto stored = vault->display_thumbnail(video_id, 320U);
                 return std::make_shared<core::Result<core::ThumbnailInfo>>(std::move(stored));
             }));
+            return;
+        }
         }
         if (!vault) {
             return;
@@ -5326,16 +6234,18 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
             return;
         }
         auto* mediaWatcher = new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
+        ++galleryTasksInFlight_;
         connect(mediaWatcher, &QFutureWatcherBase::finished, this,
             [this, video_id, mediaWatcher, applyMedia, generation] {
                 const auto outcome = *mediaWatcher->result();
                 mediaWatcher->deleteLater();
+                galleryTaskFinished();
                 if (generation != galleryGeneration_ || !outcome) {
                     return;
                 }
                 galleryCache_->media[video_id] = outcome.value();
-                auto* iconItem = findListItemById(iconList_, video_id);
-                auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                auto* iconItem = galleryIconItem(video_id);
+                auto* treeItem = galleryTreeItem(video_id);
                 if (iconItem == nullptr && treeItem == nullptr) {
                     return;
                 }
@@ -5354,7 +6264,7 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
                     scheduleGallerySort();
                 }
             });
-        mediaWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+        mediaWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id] {
             return std::make_shared<core::Result<core::MediaInfo>>(vault->media_info(video_id));
         }));
     };
@@ -5364,12 +6274,14 @@ void MainWindow::decorateVideo(const qlonglong video_id, const QString& name, co
         return;
     }
     auto* sniffWatcher = new QFutureWatcher<FileIdentity>(this);
-    connect(sniffWatcher, &QFutureWatcherBase::finished, this, [sniffWatcher, presentIdentity] {
+    ++galleryTasksInFlight_;
+    connect(sniffWatcher, &QFutureWatcherBase::finished, this, [this, sniffWatcher, presentIdentity] {
         const FileIdentity identity = sniffWatcher->result();
         sniffWatcher->deleteLater();
+        galleryTaskFinished();
         presentIdentity(identity);
     });
-    sniffWatcher->setFuture(QtConcurrent::run([vault, video_id, name] {
+    sniffWatcher->setFuture(QtConcurrent::run(galleryPool_, [vault, video_id, name] {
         return identityForVideo(vault, video_id, name);
     }));
 }
@@ -5381,12 +6293,13 @@ void MainWindow::paintGalleryBatch() {
     }
     iconList_->setUpdatesEnabled(false);
     detailsTree_->setUpdatesEnabled(false);
-    constexpr int kBatch = 48;
+    // Paint the first screen promptly, then avoid hundreds of full relayouts.
+    const int kBatch = galleryQueueIndex_ == 0 ? 48 : 512;
     int made = 0;
     while (made < kBatch && galleryQueueIndex_ < galleryQueue_.size()) {
         const PendingGalleryVideo& video = galleryQueue_[galleryQueueIndex_++];
-        const QString sizeText = QStringLiteral("%1 MB").arg(
-            static_cast<double>(video.size) / (1024.0 * 1024.0), 0, 'f', 2);
+        const QString sizeText = compactSize(
+            static_cast<std::uint64_t>(std::max<qlonglong>(0, video.size)));
         const QString created = QDateTime::fromSecsSinceEpoch(video.importedAt)
             .toLocalTime()
             .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
@@ -5421,6 +6334,8 @@ void MainWindow::paintGalleryBatch() {
         treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video.id));
         treeItem->setData(0, Qt::UserRole + 12, 0);
         treeItem->setToolTip(0, tip);
+        galleryCache_->iconRows[video.id] = iconItem;
+        galleryCache_->treeRows[video.id] = treeItem;
         ++made;
     }
     const bool more = galleryQueueIndex_ < galleryQueue_.size();
@@ -5430,6 +6345,10 @@ void MainWindow::paintGalleryBatch() {
         sortGalleryItems();
         showGallerySortIndicator();
         galleryListing_ = false;
+        // Rows exist now, so a post-move selection and any pending cut can be
+        // drawn onto them.
+        applyPendingSelection();
+        applyCutDimming();
     }
     iconList_->setUpdatesEnabled(true);
     detailsTree_->setUpdatesEnabled(true);
@@ -5461,6 +6380,9 @@ void MainWindow::decorateVisible() {
     if (iconList_ == nullptr || detailsTree_ == nullptr || galleryStack_ == nullptr) {
         return;
     }
+    // Bound queued work too; completions pump the next visible rows.
+    if (galleryTasksInFlight_ >= 4 || !vault_ || !vault_->is_unlocked()) return;
+    if (contentStack_ && pages_ && contentStack_->currentWidget() != pages_) return;
     const bool details = galleryStack_->currentWidget() == detailsTree_;
     QAbstractItemView* view = details
         ? static_cast<QAbstractItemView*>(detailsTree_)
@@ -5504,16 +6426,22 @@ void MainWindow::decorateVisible() {
         last = std::min(count - 1, last + columns * 2);
     }
 
+    // Keep at least one viewport plus the prefetch rows on large/HiDPI
+    // monitors, otherwise visible rows continuously evict one another.
+    galleryResidentLimit_ = std::max<std::size_t>(128, static_cast<std::size_t>(last - first + 1));
     int started = 0;
     constexpr int kCap = 16;
-    auto consider = [&](const qlonglong id, const QString& name, const quint64 size, const int kind) {
-        if (started >= kCap || kind != 0 || id <= 0) {
+    auto consider = [&](const qlonglong id, const QString& name, const quint64 size, const int kind,
+        const bool thumbnail = true) {
+        if (started >= kCap || galleryTasksInFlight_ >= 4 || kind != 0 || id <= 0) {
             return;
         }
-        if (!decoratedIds_.insert(static_cast<std::int64_t>(id)).second) {
+        auto& requested = thumbnail ? decoratedIds_ : metadataRequested_;
+        if (!requested.insert(static_cast<std::int64_t>(id)).second) {
             return;
         }
-        decorateVideo(id, name, size);
+        metadataRequested_.insert(id);
+        decorateVideo(id, name, size, thumbnail);
         ++started;
     };
     for (int index = first; index <= last && started < kCap; ++index) {
@@ -5542,10 +6470,10 @@ void MainWindow::decorateVisible() {
     }
     const bool probeLibrary = sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4;
     const bool moreVisible = last > first && started >= kCap;
-    if (probeLibrary && started < kCap) {
+    if (probeLibrary && started < kCap && galleryTasksInFlight_ < 4) {
         const int libraryCount = iconList_->count();
         int scanned = 0;
-        while (started < kCap && libraryCount > 0 && scanned < libraryCount) {
+        while (started < kCap && galleryTasksInFlight_ < 4 && libraryCount > 0 && scanned < libraryCount) {
             const int index = sortProbeCursor_ % libraryCount;
             ++sortProbeCursor_;
             ++scanned;
@@ -5557,7 +6485,7 @@ void MainWindow::decorateVisible() {
                 item->data(Qt::UserRole).toLongLong(),
                 item->data(Qt::UserRole + 1).toString(),
                 static_cast<quint64>(item->data(Qt::UserRole + 6).toULongLong()),
-                item->data(Qt::UserRole + 12).toInt());
+                item->data(Qt::UserRole + 12).toInt(), false);
         }
     }
     if (moreVisible || (probeLibrary && started > 0)) {
@@ -5572,6 +6500,16 @@ void MainWindow::decorateVisible() {
 }
 
 void MainWindow::refreshGallery() {
+    // Invalidate callbacks before deleting any rows, including error paths.
+    const auto generation = ++galleryGeneration_;
+    galleryPaintGeneration_ = generation;
+    galleryCache_->iconRows.clear();
+    galleryCache_->treeRows.clear();
+    galleryCache_->thumbs.clear();
+    galleryCache_->thumbOrder.clear();
+    galleryCache_->pdfThumbs.clear();
+    decoratedIds_.clear();
+    metadataRequested_.clear();
     galleryListing_ = true;
     galleryQueue_.clear();
     galleryQueueIndex_ = 0;
@@ -5586,6 +6524,7 @@ void MainWindow::refreshGallery() {
     if (!vault_ || !vault_->is_unlocked()) {
         folders_.clear();
         rebuildBreadcrumb();
+        rebuildFolderTree();
         galleryListing_ = false;
         return;
     }
@@ -5593,6 +6532,7 @@ void MainWindow::refreshGallery() {
     if (!listed) {
         setError(galleryStatus_, vaultErrorText(listed.error()));
         galleryStatus_->setVisible(true);
+        pendingSelection_.clear();
         galleryListing_ = false;
         return;
     }
@@ -5611,6 +6551,7 @@ void MainWindow::refreshGallery() {
         parentOfOpen = 0;
     }
     rebuildBreadcrumb();
+    rebuildFolderTree();
     QVector<QPair<qlonglong, QString>> childFolders;
     for (const auto& folder : folders_) {
         if (folder.parent_id == currentFolderId_) {
@@ -5619,7 +6560,6 @@ void MainWindow::refreshGallery() {
         }
     }
     const auto openId = currentFolderId_;
-    const auto generation = ++galleryGeneration_;
     const auto vault = vault_;
     auto* watcher = new QFutureWatcher<std::vector<core::VideoInfo>>(this);
     connect(watcher, &QFutureWatcherBase::finished, this,
@@ -5689,10 +6629,10 @@ void MainWindow::refreshGallery() {
             if (video.folder_id != openId) {
                 continue;
             }
-            bool tag_matches = tagFilterName_.isEmpty();
+            bool tag_matches = tagFilterNames_.isEmpty();
             if (!tag_matches) {
                 for (const auto& tag : video.tags) {
-                    if (QString::fromStdString(tag).compare(tagFilterName_, Qt::CaseInsensitive) == 0) {
+                    if (tagFilterNames_.contains(QString::fromStdString(tag), Qt::CaseInsensitive)) {
                         tag_matches = true;
                         break;
                     }
@@ -5779,7 +6719,7 @@ void MainWindow::refreshGallery() {
         const bool libraryEmpty = visible.empty() && realFolders == 0;
         if (emptyState_ != nullptr) {
             if (libraryEmpty) {
-                if (!tagFilterName_.isEmpty() || !searchText_.isEmpty()) {
+                if (!tagFilterNames_.isEmpty() || !searchText_.isEmpty()) {
                     emptyState_->setText(QStringLiteral("Nothing matches this search."));
                 } else if (openId == 0) {
                     emptyState_->setText(QStringLiteral(
@@ -5793,11 +6733,22 @@ void MainWindow::refreshGallery() {
                 emptyState_->hide();
             }
         }
-        statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
+        statusCountLabel_->setText(QStringLiteral("%1 items · %2")
             .arg(visible.size() + realFolders)
-            .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
+            .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, total_bytes)))));
         watcher->deleteLater();
         paintGalleryBatch();
+        // The first layout after unlock could paint rows before their final
+        // geometry was known, so the opening screen stayed wrong until the first
+        // selection forced a repaint. Lay out and repaint once the batch lands.
+        if (iconList_ != nullptr) {
+            iconList_->doItemsLayout();
+            iconList_->viewport()->update();
+        }
+        if (detailsTree_ != nullptr) {
+            detailsTree_->doItemsLayout();
+            detailsTree_->viewport()->update();
+        }
     });
     watcher->setFuture(QtConcurrent::run([vault] {
         auto videos = vault->list_videos();
@@ -5809,14 +6760,24 @@ void MainWindow::refreshGallery() {
 }
 
 std::int64_t MainWindow::selectedVideoId() const {
+    // Same rule as selectedGalleryKind: the selection is the truth, the current
+    // row only when it is part of it. Enter/F2 used to act on a stale row.
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
+        if (item == nullptr || !item->isSelected()) {
+            const auto selected = detailsTree_->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.first();
+        }
         if (item == nullptr || item->data(0, Qt::UserRole + 12).toInt() != 0) {
             return -1;
         }
         return item->data(0, Qt::UserRole).toLongLong();
     }
     auto* item = iconList_->currentItem();
+    if (item == nullptr || !item->isSelected()) {
+        const auto selected = iconList_->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.first();
+    }
     if (item == nullptr || item->data(Qt::UserRole + 12).toInt() != 0) {
         return -1;
     }
@@ -5974,7 +6935,7 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
             }
             return;
         }
-        auto* window = new PlayerWindow(vault_, video_id, title, contentStack_);
+        auto* window = new PlayerWindow(vault_, video_id, title, contentStack_, true);
         window->setAttribute(Qt::WA_DeleteOnClose);
         connect(window, &QDialog::destroyed, this,
             [this, window] {
@@ -5997,7 +6958,6 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         connect(window, &PlayerWindow::previousRequested, this, [this] { stepPlayback(-1); });
         connect(window, &PlayerWindow::nextRequested, this, [this] { stepPlayback(1); });
         playerWindow_ = window;
-        window->playStill(vault_, video_id);
         applyClip(window);
         embedPlayer();
         return;
@@ -6352,6 +7312,19 @@ void MainWindow::beginChangePassword() {
     connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishChangePassword(); });
     adminWatcher_->setFuture(QtConcurrent::run([vault, current_text, next_text, parameters] {
         auto result = vault->change_password(*current_text, *next_text, parameters);
+        if (result.has_value()) {
+            // Re-seal the sync state under the new password but keep the package
+            // key, so packages already on the server stay readable.
+            const auto root = vault->root_path();
+            // Same conversion as the settings page: u8string() is char8_t
+            // under C++20 on GCC, so go through data()/size().
+            const auto utf8 = root.u8string();
+            const QString folder = QString::fromUtf8(
+                reinterpret_cast<const char*>(utf8.data()), int(utf8.size()));
+            sync::resealForPasswordChange(sync::stateDirectoryFor(folder),
+                                          QString::fromStdString(*current_text),
+                                          QString::fromStdString(*next_text));
+        }
         clearSecret(*current_text);
         clearSecret(*next_text);
         return std::make_shared<core::Result<bool>>(std::move(result));
@@ -6409,18 +7382,42 @@ void MainWindow::showUnlocked() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
+    // Show only the vault's folder name. The full path used to sit here and
+    // leaked the storage location in every screenshot and on a shared screen;
+    // it stays available as a tooltip for the person at the machine.
+    const auto rootText = textFromPath(vault_->root_path());
+    const auto leaf = QDir(rootText).dirName();
     unlockedLocation_->setText(
-        QStringLiteral("Vault location: %1").arg(textFromPath(vault_->root_path())));
+        QStringLiteral("Vault: %1").arg(leaf.isEmpty() ? rootText : leaf));
+    unlockedLocation_->setToolTip(rootText);
     fadeStack(pages_, unlockedPage_);
     resetAutoLock();
-    tagFilterId_ = -1;
-    tagFilterName_.clear();
+    tagFilterNames_.clear();
+    {
+        const QSignalBlocker blocker(tagFilterButton_);
+        tagFilterButton_->setTags({});
+    }
     searchText_.clear();
     searchEdit_->clear();
     refreshTagFilter();
     refreshGallery();
     flushExternalImports();
-    beginUpdateCheck();
+    // The first layout pass runs against the pre-show geometry and can inherit
+    // the icon-mode item sizes, which left the opening screen wrong until the
+    // user selected something. Re-run layout once the event loop has settled.
+    QTimer::singleShot(0, this, [this] {
+        layoutLibraryChrome();
+        if (iconList_ != nullptr) {
+            iconList_->doItemsLayout();
+            iconList_->viewport()->update();
+        }
+        if (detailsTree_ != nullptr) {
+            detailsTree_->doItemsLayout();
+            detailsTree_->viewport()->update();
+        }
+        update();
+    });
+    configureUpdateChecks();
 }
 
 void MainWindow::ensureShareServer() {
@@ -6538,6 +7535,7 @@ void MainWindow::peerChanged() {
         }
         vault_->lock();
         vault_.reset();
+        syncKeys_.wipe();
         return;
     }
     if (!vault_ || !vault_->is_unlocked()) {
@@ -7182,6 +8180,15 @@ void MainWindow::lockVault() {
         }
         return;
     }
+    if (settingsPage_) {
+        auto* page = settingsPage_;
+        settingsPage_ = nullptr;
+        contentStack_->setCurrentWidget(pages_);
+        contentStack_->removeWidget(page);
+        delete page;
+    }
+    closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
+    syncKeys_.wipe(); // The derived sync keys die with the unlock.
     // Sharing stays up until Stop sharing, including a swap. The lock screen
     // only hides this library; the other side can still look and copy.
     finishPeerApproval(false);
@@ -7211,6 +8218,9 @@ void MainWindow::lockVault() {
     // types kept from the one being locked would be drawn on the next one.
     if (galleryCache_ != nullptr) {
         galleryCache_->thumbs.clear();
+        galleryCache_->thumbOrder.clear();
+        galleryCache_->iconRows.clear();
+        galleryCache_->treeRows.clear();
         galleryCache_->media.clear();
         galleryCache_->kinds.clear();
         galleryCache_->pdfThumbs.clear();
@@ -7220,7 +8230,15 @@ void MainWindow::lockVault() {
     galleryQueueIndex_ = 0;
     decoratedIds_.clear();
     galleryListing_ = false;
+    metadataRequested_.clear();
+    cutItems_.clear();
+    dragPayload_.clear();
+    dragPayloadValid_ = false;
+    pendingSelection_.clear();
     ++galleryGeneration_;
+    if (folderPane_ != nullptr) {
+        folderPane_->hide();
+    }
     if (vault_) {
         root = vault_->root_path();
         if (peerLinked()) {
@@ -7229,8 +8247,11 @@ void MainWindow::lockVault() {
             settingsButton_->setEnabled(true);
             detailsTree_->clear();
             iconList_->clear();
-            tagFilterId_ = -1;
-            tagFilterName_.clear();
+            tagFilterNames_.clear();
+            {
+                const QSignalBlocker blocker(tagFilterButton_);
+                tagFilterButton_->setTags({});
+            }
             searchText_.clear();
             currentFolderId_ = 0;
             folders_.clear();
@@ -7248,8 +8269,11 @@ void MainWindow::lockVault() {
     settingsButton_->setEnabled(true);
     detailsTree_->clear();
     iconList_->clear();
-    tagFilterId_ = -1;
-    tagFilterName_.clear();
+    tagFilterNames_.clear();
+    {
+        const QSignalBlocker blocker(tagFilterButton_);
+        tagFilterButton_->setTags({});
+    }
     searchText_.clear();
     currentFolderId_ = 0;
     folders_.clear();

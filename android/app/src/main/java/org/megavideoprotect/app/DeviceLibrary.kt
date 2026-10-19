@@ -104,7 +104,7 @@ fun DeviceLibraryScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Mvp.window)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {

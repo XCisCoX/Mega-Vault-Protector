@@ -11,5 +11,6 @@
         <file>files_folder.png</file>
         <file>media_doc_blue.png</file>
         <file>nocover.png</file>
+        <file>chevron_down.png</file>
     </qresource>
 </RCC>
