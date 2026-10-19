@@ -1,5 +1,7 @@
 #include "videovault/app/record_window.hpp"
 
+#include "videovault/app/icons.hpp"
+
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -32,6 +34,9 @@
 namespace videovault::app {
 namespace {
 
+// Row action buttons, and the fixed-height column that holds them.
+constexpr int kRowActionSize = 26;
+
 QString recordErrorText(const core::VaultError& error) {
     const QString message =
         QString::fromStdString(std::string(core::user_message(error.code)));
@@ -59,6 +64,26 @@ QPushButton* quietButton(const QString& text, QWidget* parent) {
 
 // A button that only exists for its arrow: no padding, no minimum height, so a
 // disclosure control does not make every row tall.
+// Same affordances as quietButton(), but icon-only: the tooltip carries the label,
+// and the accessible name keeps screen readers honest.
+QPushButton* quietIconButton(const QString& icon, const QString& tip, QWidget* parent) {
+    auto* button = new QPushButton(parent);
+    button->setProperty("quiet", true);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setFocusPolicy(Qt::NoFocus);
+    button->setToolTip(tip);
+    button->setAccessibleName(tip);
+    button->setIconSize(QSize(16, 16));
+    // The app sheet sets a min-height on every QPushButton and QSS wins over
+    // setFixedSize, so the button's own sheet has to pin both dimensions.
+    button->setStyleSheet(QStringLiteral(
+        "QPushButton { padding: 0px; min-width: %1px; max-width: %1px;"
+        " min-height: %1px; max-height: %1px; }")
+            .arg(kRowActionSize));
+    icons::apply(button, icon, icons::Tone::Quiet);
+    return button;
+}
+
 QPushButton* disclosureButton(QWidget* parent, const QString& color) {
     auto* button = new QPushButton(parent);
     button->setCursor(Qt::PointingHandCursor);
@@ -160,14 +185,14 @@ public:
     QString hoverStyle;
 
     // Also the starting state, so it must not depend on having been hovered.
+    // The buttons are hidden rather than faded: an icon does not follow the text
+    // colour, and an invisible button you can still click is a trap. The action
+    // column keeps its width, so nothing shifts when they appear.
     void endHover() {
         hovered_ = false;
         setStyleSheet(QString());
         for (auto* button : actions) {
-            // Same specificity as the app sheet's quiet rule, or the colour wins
-            // and every action stays painted.
-            button->setStyleSheet(QStringLiteral(
-                "QPushButton[quiet=\"true\"] { color: transparent; background: transparent; }"));
+            button->setVisible(false);
         }
     }
 
@@ -196,7 +221,9 @@ private:
             setStyleSheet(hoverStyle);
         }
         for (auto* button : actions) {
-            button->setStyleSheet(QString());
+            // Only visibility changes here: clearing the stylesheet would also drop the
+            // size constraints that keep the button small.
+            button->setVisible(true);
         }
     }
 
@@ -288,11 +315,23 @@ void RecordWindow::buildInterface() {
     search_->setToolTip(QStringLiteral("Filter by record name, key or value"));
     header->addWidget(search_);
 
-    addRecordButton_ = quietButton(QStringLiteral("Add record"), this);
-    revertButton_ = quietButton(QStringLiteral("Revert"), this);
-    saveButton_ = new QPushButton(QStringLiteral("Save"), this);
+    addRecordButton_ = quietIconButton(
+        QStringLiteral("plus"), QStringLiteral("Add a record to this file"), this);
+    revertButton_ = quietIconButton(
+        QStringLiteral("undo-2"), QStringLiteral("Revert unsaved changes"), this);
+    saveButton_ = new QPushButton(this);
     saveButton_->setProperty("primary", true);
-    auto* closeButton = quietButton(QStringLiteral("Close"), this);
+    saveButton_->setIcon(icons::lucideSolid(QStringLiteral("check"), QColor(0xff, 0xff, 0xff)));
+    saveButton_->setIconSize(QSize(16, 16));
+    saveButton_->setFixedSize(30, 30);
+    saveButton_->setStyleSheet(QStringLiteral(
+        "QPushButton { padding: 0px; border-radius: 15px; min-width: 30px; max-width: 30px;"
+        " min-height: 30px; max-height: 30px; }"));
+    saveButton_->setCursor(Qt::PointingHandCursor);
+    saveButton_->setFocusPolicy(Qt::NoFocus);
+    saveButton_->setToolTip(QStringLiteral("Save changes"));
+    saveButton_->setAccessibleName(QStringLiteral("Save changes"));
+    auto* closeButton = quietIconButton(QStringLiteral("x"), QStringLiteral("Close"), this);
     header->addWidget(addRecordButton_);
     header->addWidget(revertButton_);
     header->addWidget(saveButton_);
@@ -311,6 +350,8 @@ void RecordWindow::buildInterface() {
     legacyLabel_->setWordWrap(true);
     migrateButton_ = new QPushButton(QStringLiteral("Migrate"), legacyBar_);
     migrateButton_->setProperty("primary", true);
+    migrateButton_->setIcon(icons::lucideSolid(QStringLiteral("refresh-cw"), QColor(0xff, 0xff, 0xff)));
+    migrateButton_->setToolTip(QStringLiteral("Convert this record to the current format"));
     legacyLayout->addWidget(legacyLabel_, 1);
     legacyLayout->addWidget(migrateButton_);
     legacyBar_->hide();
@@ -637,14 +678,15 @@ void RecordWindow::buildEntry(const int entryIndex, QVBoxLayout* layout) {
     title->onDoubleClick = [this, entryIndex] { renameEntry(entryIndex); };
     header->addWidget(title, 1);
 
-    auto* addField = quietButton(QStringLiteral("Add field"), card);
-    auto* rename = quietButton(QStringLiteral("Rename"), card);
-    auto* up = quietButton(QStringLiteral("Up"), card);
-    auto* down = quietButton(QStringLiteral("Down"), card);
-    auto* remove = quietButton(QStringLiteral("Delete"), card);
-    up->setToolTip(QStringLiteral("Move up"));
-    down->setToolTip(QStringLiteral("Move down"));
-    remove->setToolTip(QStringLiteral("Delete this record"));
+    auto* addField = quietIconButton(QStringLiteral("plus"), QStringLiteral("Add a field to this record"), card);
+    auto* rename = quietIconButton(
+        QStringLiteral("pencil"), QStringLiteral("Rename this record"), card);
+    auto* up = quietIconButton(
+        QStringLiteral("arrow-up"), QStringLiteral("Move this record up"), card);
+    auto* down = quietIconButton(
+        QStringLiteral("arrow-down"), QStringLiteral("Move this record down"), card);
+    auto* remove = quietIconButton(
+        QStringLiteral("trash"), QStringLiteral("Delete this record"), card);
     up->setEnabled(entryIndex > 0);
     down->setEnabled(entryIndex + 1 < document_.entries.size());
     header->addWidget(rename);
@@ -731,6 +773,7 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
 
     auto* row = new HoverRow(parent);
     row->setObjectName(QStringLiteral("recordRow"));
+
     row->setAttribute(Qt::WA_Hover, true);
     row->hoverStyle = rowHoverStyle_;
     auto* rowLayout = new QHBoxLayout(row);
@@ -755,7 +798,11 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
     toggleLayout->setSpacing(0);
     if (container) {
         auto* toggle = disclosureButton(toggleHost, disclosureColor_);
-        toggle->setText(open ? QString(QChar(0x25BE)) : QString(QChar(0x25B8)));
+        toggle->setIcon(icons::lucideSolid(
+            open ? QStringLiteral("chevron-down") : QStringLiteral("chevron-right"),
+            QColor(disclosureColor_)));
+        toggle->setIconSize(QSize(14, 14));
+        toggle->setToolTip(open ? QStringLiteral("Collapse") : QStringLiteral("Expand"));
         toggleLayout->addWidget(toggle, 0, Qt::AlignVCenter);
         connect(toggle, &QPushButton::clicked, this,
             [this, collapseKey, open] {
@@ -830,6 +877,9 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
     // gets exactly the space between the two fixed columns.
     auto* actionHost = new QWidget(row);
     actionHost->setFixedWidth(actionColumn_);
+    // Hidden action buttons take no space; without a floor on the column the row
+    // would shrink at rest and grow as soon as the pointer arrived.
+    actionHost->setFixedHeight(kRowActionSize);
     auto* actionLayout = new QHBoxLayout(actionHost);
     actionLayout->setContentsMargins(0, 0, 0, 0);
     actionLayout->setSpacing(2);
@@ -858,19 +908,29 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
 
     // Actions exist in the layout from the start (so nothing moves under the
     // pointer) but only paint while the row is hovered.
-    QVector<QPair<QString, std::function<void()>>> actions;
+    struct RowAction {
+        QString icon;
+        QString tip;
+        std::function<void()> run;
+    };
+    QVector<RowAction> actions;
     if (container) {
-        actions.append({node.type == ValueType::Object ? QStringLiteral("Add field")
-                                                       : QStringLiteral("Add value"),
+        actions.append({QStringLiteral("plus"),
+            node.type == ValueType::Object ? QStringLiteral("Add field")
+                                           : QStringLiteral("Add value"),
             [this, path] { addChild(path); }});
         if (named) {
-            actions.append({QStringLiteral("Rename"), [this, path] { renameNode(path); }});
+            actions.append({QStringLiteral("pencil"), QStringLiteral("Rename this key"),
+                [this, path] { renameNode(path); }});
         }
-        actions.append({QStringLiteral("Remove"), [this, path] { removeNode(path); }});
+        actions.append({QStringLiteral("trash"), QStringLiteral("Remove this key and its contents"),
+            [this, path] { removeNode(path); }});
     } else {
-        actions.append({QStringLiteral("Edit"), [this, path] { editNode(path); }});
+        actions.append({QStringLiteral("square-pen"), QStringLiteral("Edit key, value or type"),
+            [this, path] { editNode(path); }});
         if (secret) {
-            actions.append({masked ? QStringLiteral("Reveal") : QStringLiteral("Hide"),
+            actions.append({masked ? QStringLiteral("eye") : QStringLiteral("eye-off"),
+                masked ? QStringLiteral("Reveal this secret") : QStringLiteral("Hide this secret"),
                 [this, collapseKey, masked] {
                     if (masked) {
                         revealed_.insert(collapseKey);
@@ -880,12 +940,14 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
                     rebuild();
                 }});
         }
-        actions.append({QStringLiteral("Copy"), [this, path] { copyNode(path); }});
-        actions.append({QStringLiteral("Remove"), [this, path] { removeNode(path); }});
+        actions.append({QStringLiteral("copy"), QStringLiteral("Copy this value"),
+            [this, path] { copyNode(path); }});
+        actions.append({QStringLiteral("trash"), QStringLiteral("Remove this field"),
+            [this, path] { removeNode(path); }});
     }
     for (const auto& action : actions) {
-        auto* button = quietButton(action.first, actionHost);
-        connect(button, &QPushButton::clicked, this, action.second);
+        auto* button = quietIconButton(action.icon, action.tip, actionHost);
+        connect(button, &QPushButton::clicked, this, action.run);
         actionLayout->addWidget(button);
         row->actions.append(button);
     }
@@ -1021,8 +1083,8 @@ bool RecordWindow::promptNode(const QString& heading, const bool withKey, NodeDr
                 valueEdit->setVisible(picked != ValueType::Object && picked != ValueType::Array);
             });
 
-        sheet.addButton(QStringLiteral("Cancel"), 0, false);
-        sheet.addButton(QStringLiteral("Save"), 1, true);
+        sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        sheet.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
         if (sheet.run() != 1) {
             return false;
         }
@@ -1072,8 +1134,8 @@ bool RecordWindow::promptText(const QString& heading, const QString& message,
             sheet.setMessage(message);
         }
         sheet.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Name"));
-        sheet.addButton(QStringLiteral("Cancel"), 0, false);
-        sheet.addButton(QStringLiteral("Save"), 1, true);
+        sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        sheet.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
         if (sheet.run() != 1) {
             return false;
         }
@@ -1091,7 +1153,7 @@ bool RecordWindow::confirm(const QString& heading, const QString& message, const
     InWindowSheet sheet(this);
     sheet.setTitle(heading);
     sheet.setMessage(message);
-    sheet.addButton(QStringLiteral("Cancel"), 0, false);
+    sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     sheet.addButton(action, 1, true);
     return sheet.run() == 1;
 }
