@@ -54,6 +54,20 @@ class TapPathTests(unittest.TestCase):
         self.assertIn("fun looksLikeVideo(", kinds)
         self.assertIn("fun looksLikeAudio(", kinds)
 
+    def test_background_decodes_yield_to_playback(self):
+        work = read("VaultWork.kt")
+        self.assertIn("val thumbs = Semaphore(", work)
+        self.assertIn("var playback", work)
+        gallery = read("VaultScreen.kt")
+        # Every decode site must check the flag and share the permit.
+        self.assertEqual(gallery.count("VaultWork.playback"), 4,
+                         "a thumbnail decode site does not respect playback")
+        self.assertEqual(gallery.count("VaultWork.thumbs.withPermit"), 2,
+                         "a thumbnail decode site is not throttled")
+        player = read("PlayerScreen.kt")
+        self.assertIn("VaultWork.playback = true", player)
+        self.assertIn("onDispose { VaultWork.playback = false }", player)
+
 
 if __name__ == "__main__":
     unittest.main()

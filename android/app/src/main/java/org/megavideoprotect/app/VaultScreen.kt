@@ -3407,15 +3407,21 @@ private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = 
     LaunchedEffect(id) {
         if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
-            if (image && !RemoteVault.connected()) {
-                decodeVaultImage(id, 320)
-            } else {
-                val jpeg = if (RemoteVault.connected()) {
-                    RemoteVault.getBytes("/v1/thumbnail?id=$id&max=320")
+            // Background decodes must not crowd out playback: at most two at a
+            // time, and none at all while a player is on screen.
+            if (VaultWork.playback) return@withContext null
+            VaultWork.thumbs.withPermit {
+                if (VaultWork.playback) return@withPermit null
+                if (image && !RemoteVault.connected()) {
+                    decodeVaultImage(id, 320)
                 } else {
-                    CoreBridge.nativeThumbnail(id, 320)
+                    val jpeg = if (RemoteVault.connected()) {
+                        RemoteVault.getBytes("/v1/thumbnail?id=$id&max=320")
+                    } else {
+                        CoreBridge.nativeThumbnail(id, 320)
+                    }
+                    jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
                 }
-                jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             }
         }
         if (decoded != null) {
@@ -3506,15 +3512,20 @@ private fun SquareThumb(id: Long, audio: Boolean = false, image: Boolean = false
     LaunchedEffect(id) {
         if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
-            if (image && !RemoteVault.connected()) {
-                decodeVaultImage(id, 480)
-            } else {
-                val jpeg = if (RemoteVault.connected()) {
-                    RemoteVault.getBytes("/v1/thumbnail?id=$id&max=480")
+            // Same gate as the list rows: playback keeps the vault.
+            if (VaultWork.playback) return@withContext null
+            VaultWork.thumbs.withPermit {
+                if (VaultWork.playback) return@withPermit null
+                if (image && !RemoteVault.connected()) {
+                    decodeVaultImage(id, 480)
                 } else {
-                    CoreBridge.nativeThumbnail(id, 480)
+                    val jpeg = if (RemoteVault.connected()) {
+                        RemoteVault.getBytes("/v1/thumbnail?id=$id&max=480")
+                    } else {
+                        CoreBridge.nativeThumbnail(id, 480)
+                    }
+                    jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
                 }
-                jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             }
         }
         if (decoded != null) {
