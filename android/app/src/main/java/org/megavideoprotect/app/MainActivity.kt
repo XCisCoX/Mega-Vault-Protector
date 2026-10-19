@@ -224,10 +224,16 @@ class MainActivity : ComponentActivity() {
                                     FileKinds.isImage(known) -> show(Screen.Image(id, name))
                                     known.route == 4 -> show(Screen.Text(id, name))
                                     known.route == 3 -> show(Screen.Pdf(id, name))
+                                    // playlist holds library rows; the screens
+                                    // take PlayItem, so the filter maps too.
                                     known.route == 2 -> show(Screen.Music(
-                                        id, name, playlist.filter { FileKinds.looksLikeAudio(it.name) }))
+                                        id, name,
+                                        playlist.filter { FileKinds.looksLikeAudio(it.name) }
+                                            .map { PlayItem(it.id, it.name) }))
                                     known.route == 1 -> show(Screen.Player(
-                                        id, name, playlist.filter { FileKinds.looksLikeVideo(it.name) }))
+                                        id, name,
+                                        playlist.filter { FileKinds.looksLikeVideo(it.name) }
+                                            .map { PlayItem(it.id, it.name) }))
                                     else -> lifecycleScope.launch {
                                         // No extension and nothing cached: one
                                         // read is unavoidable, and only for the
