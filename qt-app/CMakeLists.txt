@@ -233,6 +233,25 @@ if(MVP_BUILD_TESTS)
     # Sync protocol 4: the state file, key derivation and validation run without
     # a server; the engine test runs against a real sync_server through
     # tests/run_sync_live.py and skips when it is started without one.
+    # Optional offscreen screenshot harness (tools/screenshots.cpp). Off by default so
+    # CI does not build a second copy of every app source; enable it locally with
+    # -DMVP_SCREENSHOT_HARNESS=ON when reviewing icon or layout work.
+    option(MVP_SCREENSHOT_HARNESS "Build the offscreen screenshot harness" OFF)
+    if(MVP_SCREENSHOT_HARNESS)
+    set(_shot_sources ${MVP_APP_SOURCES})
+    list(REMOVE_ITEM _shot_sources src/main.cpp)
+    add_executable(MvpScreenshotHarness tools/screenshots.cpp ${_shot_sources})
+    get_target_property(_shot_links VideoVaultApp LINK_LIBRARIES)
+    get_target_property(_shot_includes VideoVaultApp INCLUDE_DIRECTORIES)
+    target_link_libraries(MvpScreenshotHarness PRIVATE ${_shot_links})
+    if(WIN32 OR MINGW)
+        target_link_libraries(MvpScreenshotHarness PRIVATE crypt32 secur32 winhttp dwmapi)
+    endif()
+    target_include_directories(MvpScreenshotHarness PRIVATE ${_shot_includes})
+    target_compile_features(MvpScreenshotHarness PRIVATE cxx_std_20)
+    set_target_properties(MvpScreenshotHarness PROPERTIES AUTOMOC ON AUTORCC ON FOLDER "Tools")
+    endif()
+
     # Exercise the production gallery, not a separate model of its cache.
     set(_gallery_sources ${MVP_APP_SOURCES})
     list(REMOVE_ITEM _gallery_sources src/main.cpp)

@@ -31,6 +31,6 @@ void apply(QAbstractButton* button, const QString& name, Tone tone = Tone::Norma
 
 // Adds an icon *beside* the label. Primary and destructive actions keep their
 // words: a glyph alone is not enough for "Delete permanently" or "Create a vault".
-void withText(QAbstractButton* button, const QString& name, int size = 15);
+void withText(QAbstractButton* button, const QString& name, int size = 16);
 
 } // namespace videovault::app::icons

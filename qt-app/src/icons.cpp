@@ -95,9 +95,14 @@ void withText(QAbstractButton* button, const QString& name, const int size) {
     }
     button->setIconSize(QSize(size, size));
     const auto repaint = [button, name, size](const QPalette& palette) {
+        // A primary button sits on the accent fill, so its glyph has to be the
+        // highlighted text colour: ButtonText on blue is barely legible.
+        const QColor ink = button->property("primary").toBool()
+            ? palette.color(QPalette::HighlightedText)
+            : palette.color(QPalette::ButtonText);
         QIcon icon;
         for (const int step : kSizes) {
-            QPixmap pixmap = tinted(step, palette.color(QPalette::ButtonText), name);
+            QPixmap pixmap = tinted(step, ink, name);
             if (pixmap.isNull()) {
                 continue;
             }
