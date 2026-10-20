@@ -451,4 +451,27 @@ if(MVP_BUILD_TESTS)
     set_target_properties(VideoVaultRecordFormatTests PROPERTIES FOLDER "Tests")
 
     mvp_copy_runtime_dlls(VideoVaultRecordFormatTests)
+
+    # Templates are the record container plus generators, so this links the same
+    # record_document.cpp and the resources that carry the built-in templates.
+    add_executable(VideoVaultTemplateFormatTests
+        tests/template_format.cpp
+        src/record_document.cpp
+        resources/resources.qrc
+        include/videovault/app/record_document.hpp
+    )
+    target_link_libraries(VideoVaultTemplateFormatTests
+        PRIVATE
+            Qt5::Core
+    )
+    target_include_directories(VideoVaultTemplateFormatTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_features(VideoVaultTemplateFormatTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultTemplateFormatTests PROPERTIES
+        AUTORCC ON
+        FOLDER "Tests"
+    )
+    add_test(NAME template_format COMMAND VideoVaultTemplateFormatTests)
+    mvp_copy_runtime_dlls(VideoVaultTemplateFormatTests)
 endif()
