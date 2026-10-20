@@ -1,5 +1,6 @@
 // Opt-in real-service integration test. Only generated vaults; no audio files.
 #include "videovault/app/plugin_audio.hpp"
+#include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
@@ -37,6 +38,11 @@ bool waitFor(const std::function<bool()> &predicate, int ms = 45000) {
 }
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
+    // Same identity as the app: the proxy store is sealed per QSettings file.
+    QCoreApplication::setOrganizationName(QStringLiteral("Mega Vault Protect"));
+    QCoreApplication::setApplicationName(QStringLiteral("Mega Vault Protect"));
+    // Apply the same saved proxy the shipped app uses, so a live run tests that route.
+    initializeProxySettings();
     if (!qEnvironmentVariableIsSet("MVP_PLUGIN_LIVE")) {
         std::cout << "SKIP: set MVP_PLUGIN_LIVE=1 for real provider requests\n";
         return 77;

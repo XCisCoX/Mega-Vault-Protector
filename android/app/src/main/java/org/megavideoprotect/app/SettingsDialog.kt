@@ -10,6 +10,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -74,6 +75,7 @@ private const val TAB_APPEARANCE = 1
 private const val TAB_PLUGINS = 2
 private const val TAB_SECURITY = 3
 private const val TAB_LIBRARY = 4
+private const val TAB_PROXY = 5
 
 /**
  * Phone settings. Same shape as the desktop build: grouped cards, one section
@@ -458,6 +460,8 @@ fun SettingsDialog(
                             }
                         }
 
+                        TAB_PROXY -> ProxySettingsContent()
+
                         else -> {
                             Text(
                                 "Organize tags used by the library filter.",
@@ -570,11 +574,12 @@ fun SettingsDialog(
 
 @Composable
 private fun SettingsTabs(selected: Int, onSelect: (Int) -> Unit) {
-    val labels = listOf("Updates", "Appearance", "Plugins", "Security", "Library")
+    val labels = listOf("Updates", "Appearance", "Plugins", "Security", "Library", "Proxy")
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp)
+            .horizontalScroll(rememberScrollState())
             .heightIn(min = 42.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -26,13 +26,10 @@ class PluginHttp(private val manifest: PluginManifest) : Closeable {
                 ip.isAnyLocalAddress || ip.isLoopbackAddress || ip.isLinkLocalAddress || ip.isSiteLocalAddress || ip.isMulticastAddress ||
                     (ip.address.size == 16 && (ip.address[0].toInt() and 0xfe) == 0xfc)
             }) { "Local/private plugin network destinations are forbidden" }
-            val c = at.toURL().openConnection() as HttpsURLConnection
+            val c = AppProxy.open(at.toURL()) as HttpsURLConnection
             connection = c
             c.sslSocketFactory = tls
-            // Use the platform's default hostname verifier, not a process-global override.
-            c.hostnameVerifier = javax.net.ssl.HostnameVerifier { hostname, session ->
-                javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)
-            }
+            // ProxyTransport uses normal hostname verification, not a process-global override.
             c.instanceFollowRedirects = false; c.useCaches = false
             c.connectTimeout = 15000; c.readTimeout = 20000
             c.setRequestProperty("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)")

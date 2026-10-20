@@ -51,7 +51,7 @@ class SyncHttp(private val server: String, private val libraryKey: String) {
         headers: Map<String, String> = emptyMap(),
     ): Response {
         require(path == "/healthz" || path.startsWith("/v3/")) { "Unexpected sync path" }
-        val connection = URL(server.trimEnd('/') + path).openConnection() as HttpURLConnection
+        val connection = AppProxy.open(URL(server.trimEnd('/') + path))
         try {
             if (connection is HttpsURLConnection) connection.sslSocketFactory = socketFactory
             connection.instanceFollowRedirects = false

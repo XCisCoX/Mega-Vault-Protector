@@ -86,9 +86,9 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
                                     }) { Text(if (settings.enabled) "Disable" else "Enable…") }
                                     TextButton(onClick = { configure = manifest }) { Text("Settings") }
                                     if (settings.enabled) TextButton(onClick = {
-                                        if(PluginProviderRegistry.protocol(manifest.protocol).music) browser = PluginSession(context.applicationContext,manifest,vaultRoot,settings)
+                                        if(PluginProviderRegistry.protocol(manifest.protocol).music) onClose()
                                         else actionBrowser = manifest
-                                    }) { Text(if(PluginProviderRegistry.protocol(manifest.protocol).music) "Search music" else "Open extension") }
+                                    }) { Text(if(PluginProviderRegistry.protocol(manifest.protocol).music) "Search in Library" else "Open extension") }
                                 }
                                 if (!manager.isBundled(manifest)) TextButton(onClick = {
                                     runCatching { manager.remove(manifest) }.onFailure { error = it.message.orEmpty() }
@@ -230,7 +230,7 @@ private fun ColumnScope.PluginBrowser(session: PluginSession) {
 }
 
 @Composable
-private fun PluginArtwork(session: PluginSession, url: String, semaphore: Semaphore) {
+internal fun PluginArtwork(session: PluginSession, url: String, semaphore: Semaphore) {
     var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(url,session) {
         if(url.isNotBlank()) semaphore.withPermit {

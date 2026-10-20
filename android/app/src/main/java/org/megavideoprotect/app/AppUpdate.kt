@@ -26,7 +26,7 @@ fun installedVersion(context: Context): String {
 }
 
 private fun fetchText(target: String): Pair<String, Int>? {
-    val connection = (URL(target).openConnection() as HttpURLConnection).apply {
+    val connection = AppProxy.open(URL(target)).apply {
         connectTimeout = 8000
         readTimeout = 8000
         setRequestProperty("Accept", "application/vnd.github+json")
@@ -166,7 +166,7 @@ fun isNewerVersion(latest: String, current: String): Boolean {
 }
 
 fun downloadRelease(release: AppRelease, dest: File, onProgress: (Float) -> Unit) {
-    val connection = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
+    val connection = AppProxy.open(URL(release.apkUrl)).apply {
         instanceFollowRedirects = true
         connectTimeout = 15000
         readTimeout = 30000

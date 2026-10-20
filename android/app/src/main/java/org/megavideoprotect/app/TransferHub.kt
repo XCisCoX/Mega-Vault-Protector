@@ -216,7 +216,7 @@ fun TransferBar(onOpen: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(Color(0xFF16324F))
+            .background(Mvp.progressTrack)
             .clickable(onClick = onOpen)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -316,7 +316,7 @@ private fun TransferRow(item: TransferItem) {
     Column(
         Modifier
             .fillMaxWidth()
-            .background(Color(0xFF161618), RoundedCornerShape(12.dp))
+            .background(Mvp.tileBg, RoundedCornerShape(12.dp))
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -328,7 +328,7 @@ private fun TransferRow(item: TransferItem) {
             if (alive) {
                 Text(
                     "Cancel",
-                    color = Color(0xFFFF6B6B),
+                    color = Mvp.errorText,
                     fontSize = 14.sp,
                     modifier = Modifier.clickable { TransferHub.cancel(item.id) }.padding(start = 10.dp),
                 )

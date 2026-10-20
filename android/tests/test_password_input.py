@@ -24,15 +24,25 @@ class PasswordKeyboardGuards(unittest.TestCase):
                     code,
                 )
                 if mask is None:
-                    self.fail("Review the new password masking path")
-                flag = mask.group(1)
-                self.assertRegex(
-                    code,
-                    rf"keyboardOptions\s*=\s*if\s*\({flag}\)\s*KeyboardOptions\("
-                    r"\s*keyboardType\s*=\s*KeyboardType\.Password,"
-                    r"\s*autoCorrectEnabled\s*=\s*false,?\s*\)\s*else\s*KeyboardOptions\.Default",
-                    "Masking alone does not identify a password field to the keyboard",
-                )
+                    # Dedicated password fields need no conditional wrapper, but
+                    # must configure the same field's IME rather than just mask it.
+                    self.assertRegex(
+                        code,
+                        r"visualTransformation\s*=\s*PasswordVisualTransformation\(\),\s*"
+                        r"keyboardOptions\s*=\s*KeyboardOptions\(\s*"
+                        r"keyboardType\s*=\s*KeyboardType\.Password,\s*"
+                        r"autoCorrectEnabled\s*=\s*false,?\s*\)",
+                        "Dedicated password inputs must suppress keyboard suggestions too",
+                    )
+                else:
+                    flag = mask.group(1)
+                    self.assertRegex(
+                        code,
+                        rf"keyboardOptions\s*=\s*if\s*\({flag}\)\s*KeyboardOptions\("
+                        r"\s*keyboardType\s*=\s*KeyboardType\.Password,"
+                        r"\s*autoCorrectEnabled\s*=\s*false,?\s*\)\s*else\s*KeyboardOptions\.Default",
+                        "Masking alone does not identify a password field to the keyboard",
+                    )
                 self.assertIn("import androidx.compose.foundation.text.KeyboardOptions", code)
                 self.assertIn("import androidx.compose.ui.text.input.KeyboardType", code)
         self.assertGreater(masked_inputs, 0, "No password fields checked")

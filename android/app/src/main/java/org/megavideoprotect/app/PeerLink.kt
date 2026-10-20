@@ -99,7 +99,7 @@ object PeerLink {
         val factory = RemoteVault.pinnedFactory(fingerprint)
         val verifier = HostnameVerifier { hostname, _ -> hostname == host }
         val name = URLEncoder.encode(deviceName.take(48), "UTF-8")
-        val conn = (URL("$base/v1/link?k=$key&name=$name").openConnection() as HttpsURLConnection).apply {
+        val conn = (AppProxy.open(URL("$base/v1/link?k=$key&name=$name")) as HttpsURLConnection).apply {
             sslSocketFactory = factory
             hostnameVerifier = verifier
             requestMethod = "POST"
@@ -289,7 +289,7 @@ object PeerLink {
 
     private fun send(current: Session, method: String, path: String, body: ByteArray?, readTimeoutMs: Int): Answer {
         val conn = try {
-            (URL(current.base + path).openConnection() as HttpsURLConnection).apply {
+            (AppProxy.open(URL(current.base + path)) as HttpsURLConnection).apply {
                 sslSocketFactory = current.factory
                 hostnameVerifier = current.verifier
                 requestMethod = method

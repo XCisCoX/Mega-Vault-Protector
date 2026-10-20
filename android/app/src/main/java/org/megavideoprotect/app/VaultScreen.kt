@@ -331,6 +331,7 @@ fun VaultScreen(
     onOpenPeer: () -> Unit = {},
     onOpenSync: () -> Unit = {},
     onOpenPlugins: () -> Unit = {},
+    onPlayPlugin: (PluginSession) -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
@@ -364,6 +365,20 @@ fun VaultScreen(
     val incomingFolders = remember { mutableStateListOf<Long>() }
     var showTags by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    val pluginManager = remember(vaultLocation) { PluginManager(context.applicationContext, vaultLocation) }
+    var providerSearch by remember(vaultLocation) { mutableStateOf<List<PluginManifest>>(emptyList()) }
+    LaunchedEffect(vaultLocation, showSettings) {
+        if (!showSettings) {
+            providerSearch = if (RemoteVault.connected()) emptyList() else withContext(Dispatchers.IO) {
+                pluginManager.manifests().filter {
+                    PluginProviderRegistry.protocol(it.protocol).music && pluginManager.options(it).enabled
+                }
+            }
+            if (PluginLibrary.session?.manifest?.id?.let { id -> providerSearch.none { it.id == id } } == true) {
+                PluginLibrary.close()
+            }
+        }
+    }
     var showTransfers by remember { mutableStateOf(false) }
     // Batch import progress: fraction of the bytes of the whole selection.
     var importProgress by remember { mutableStateOf<Float?>(null) }
@@ -945,7 +960,7 @@ fun VaultScreen(
         bottom = with(density) { bottomInset.toDp() },
     )
     val glass = HazeStyle(
-        backgroundColor = Color(0xC4101014),
+        backgroundColor = Mvp.scrim,
         tints = listOf(HazeTint(Color.Black.copy(alpha = 0.28f))),
         blurRadius = 32.dp,
         noiseFactor = 0.03f,
@@ -999,6 +1014,10 @@ fun VaultScreen(
         }
         if (showSettings) {
             showSettings = false
+            return@BackHandler
+        }
+        if (PluginLibrary.folderOpen) {
+            PluginLibrary.back()
             return@BackHandler
         }
         if (selectedIds.isNotEmpty()) {
@@ -1330,6 +1349,11 @@ fun VaultScreen(
         val pressItem: (VideoEntry) -> Unit = { v ->
             selectedIds = if (v.id in selectedIds) selectedIds - v.id else selectedIds + v.id
         }
+        val discoverProviders = if (search.isNotBlank()) providerSearch else emptyList()
+        val searchProvider: (PluginManifest) -> Unit = { manifest ->
+            selectedIds = emptySet()
+            PluginLibrary.open(context, manifest, vaultLocation, pluginManager.options(manifest), search)
+        }
 
         val upParentId = if (currentFolderId == 0L) {
             null
@@ -1395,13 +1419,16 @@ fun VaultScreen(
                 }
                 .hazeSource(state = haze),
         ) {
-            when (viewMode) {
+            if (PluginLibrary.folderOpen) {
+                PluginLibraryView(viewMode, contentPad, onPlayPlugin)
+            } else when (viewMode) {
                 0 -> DetailsView(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
                 1 -> IconGridView(
                     shown, orderedFolders, upParentId, selectedIds,
@@ -1409,6 +1436,7 @@ fun VaultScreen(
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
                 else -> ListView(
                     shown, orderedFolders, upParentId, selectedIds,
@@ -1416,6 +1444,7 @@ fun VaultScreen(
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
             }
         }
@@ -1452,6 +1481,7 @@ fun VaultScreen(
                     GalleryCache.filterTagIds = emptySet()
                 },
                 onSearch = { text ->
+                    if (PluginLibrary.folderOpen) PluginLibrary.leave()
                     search = text
                     GalleryCache.search = text
                 },
@@ -1491,7 +1521,7 @@ fun VaultScreen(
             )
             CloudBar()
             TelegramMusicBar(onOpen = onOpenMusic)
-            FolderBar(
+            if (PluginLibrary.folderOpen) PluginLibraryBar() else FolderBar(
                 folders = folders,
                 currentFolderId = currentFolderId,
                 onOpen = { openFolder(it) },
@@ -1532,7 +1562,9 @@ fun VaultScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("${childFolders.size + filtered.size} items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
+            val itemCount = if (PluginLibrary.folderOpen) PluginLibrary.target?.visibleRows(PluginLibrary.session?.rows.orEmpty())?.size ?: 0
+                else childFolders.size + filtered.size + discoverProviders.size
+            Text("$itemCount items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
         }
         }
 
@@ -2895,7 +2927,7 @@ private fun Modifier.explorerItem(
     transfer: () -> DragAndDropTransferData,
 ): Modifier = this.dragAndDropSource(
     drawDragDecoration = {
-        drawRoundRect(color = Color(0xCC3390EC), cornerRadius = CornerRadius(24f, 24f))
+        drawRoundRect(color = Mvp.accent.copy(alpha = 0.8f), cornerRadius = CornerRadius(24f, 24f))
     },
     block = {
     val source = this
@@ -3028,7 +3060,7 @@ private fun FolderGlyph(modifier: Modifier = Modifier) {
     Icon(
         painterResource(R.drawable.files_folder),
         contentDescription = null,
-        tint = Color(0xFF4FA6F7),
+        tint = Mvp.accent,
         modifier = modifier,
     )
 }
@@ -3050,7 +3082,7 @@ private fun folderModifier(
 }
 
 @Composable
-private fun FolderDetailRow(
+internal fun FolderDetailRow(
     name: String,
     meta: String,
     onClick: () -> Unit,
@@ -3098,7 +3130,7 @@ private fun FolderDetailRow(
 }
 
 @Composable
-private fun FolderListRow(
+internal fun FolderListRow(
     name: String,
     meta: String,
     onClick: () -> Unit,
@@ -3145,7 +3177,7 @@ private fun FolderListRow(
 }
 
 @Composable
-private fun FolderTile(
+internal fun FolderTile(
     name: String,
     onClick: () -> Unit,
     transfer: (() -> DragAndDropTransferData)?,
@@ -3165,7 +3197,7 @@ private fun FolderTile(
                 when {
                     refused != null -> Mvp.errorBg
                     hint.hot -> Mvp.accent.copy(alpha = 0.35f)
-                    else -> Color(0xFF161618)
+                    else -> Mvp.tileBg
                 },
             )
             .then(
@@ -3195,7 +3227,7 @@ private fun FolderTile(
             if (place.isNotEmpty()) {
                 Text(
                     place,
-                    color = Color(0xFFDCDCE0),
+                    color = Mvp.tileText,
                     fontSize = 10.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3346,7 +3378,7 @@ private fun FileTile(video: VideoEntry, edge: Int, square: Boolean) {
                     .align(Alignment.BottomEnd)
                     .padding(2.dp)
                     .size(14.dp)
-                    .background(Color(0xFF107C10), CircleShape),
+                    .background(Mvp.primary, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("✓", color = Color.White, fontSize = 9.sp)
@@ -3462,7 +3494,7 @@ private fun MusicNote(modifier: Modifier) {
 @Composable
 private fun TextBadge(label: String, modifier: Modifier) {
     val badge = label.uppercase().take(5)
-    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+    Box(modifier.background(Mvp.tileBg), contentAlignment = Alignment.Center) {
         Box(Modifier.fillMaxSize(0.72f), contentAlignment = Alignment.Center) {
             Image(
                 painterResource(R.drawable.media_doc_blue),
@@ -3483,7 +3515,7 @@ private fun TextBadge(label: String, modifier: Modifier) {
 
 @Composable
 private fun PdfBadge(modifier: Modifier, large: Boolean) {
-    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+    Box(modifier.background(Mvp.tileBg), contentAlignment = Alignment.Center) {
         Box(
             Modifier.fillMaxSize(if (large) 0.56f else 0.82f),
             contentAlignment = Alignment.Center,
@@ -3636,6 +3668,9 @@ private fun DetailsView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyColumn(
         state = GalleryCache.listScroll("details:$scrollKey"),
@@ -3643,6 +3678,9 @@ private fun DetailsView(
         modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         stickyHeader { DetailSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 0) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderDetailRow(
@@ -3764,6 +3802,9 @@ private fun IconGridView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
@@ -3774,6 +3815,9 @@ private fun IconGridView(
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         item(span = { GridItemSpan(3) }) { ListSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }, span = { GridItemSpan(3) }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 2) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderTile(
@@ -3906,7 +3950,7 @@ private fun IconGridView(
                         if (artist.isNotBlank()) {
                             Text(
                                 artist,
-                                color = Color(0xFFDCDCE0),
+                                color = Mvp.tileText,
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -3985,6 +4029,9 @@ private fun ListView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyColumn(
         state = GalleryCache.listScroll("list:$scrollKey"),
@@ -3992,6 +4039,9 @@ private fun ListView(
         modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         item { ListSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 2) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderListRow(

@@ -90,6 +90,8 @@
 #include <QPointer>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QToolButton>
+#include <QScrollBar>
 #include <QSet>
 #include <QSettings>
 #include <QStackedWidget>
@@ -152,8 +154,20 @@ constexpr int kKindPhone = 3;
 // opens the music provider with those results.
 constexpr int kKindPluginSearch = 4;
 constexpr int kKindPluginBack = 5;
-constexpr int kKindPluginCategory = 6;
+// A song from the provider: the library's own music row plus a Download button.
 constexpr int kKindPluginEntry = 7;
+// An album from the provider: a folder row that opens like any other folder.
+constexpr int kKindPluginAlbum = 8;
+// Provider rows carry three extra roles: the row's download state (0 = the row
+// is not a track), the artist · duration line, and the provider track id.
+constexpr int kRowStateRole = Qt::UserRole + 18;
+constexpr int kRowSubtitleRole = Qt::UserRole + 19;
+constexpr int kRowTrackIdRole = Qt::UserRole + 20;
+// The Download button the provider folder pins over each track row's right
+// edge, and the room the row delegate leaves for it.
+constexpr int kRowButtonWidth = 104;
+constexpr int kRowButtonHeight = 24;
+constexpr int kRowButtonReserve = kRowButtonWidth + 22;
 // Set on a gallery row while it is cut (Ctrl+X). The delegate fades the row.
 constexpr int kCutDimRole = Qt::UserRole + 17;
 // 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
@@ -635,6 +649,68 @@ QPair<QString, QString> songLabel(const QString& fileName) {
     return {{}, base};
 }
 
+// One provider catalogue array, whichever key this provider uses for it.
+QJsonArray pluginArray(const QJsonObject& catalogue, const QStringList& keys) {
+    for (const QString& key : keys) {
+        const QJsonArray array = catalogue.value(key).toArray();
+        if (!array.isEmpty()) {
+            return array;
+        }
+    }
+    return {};
+}
+
+// "3:07" for a provider track: milliseconds when the provider says so, and
+// seconds when the value is too small to be milliseconds.
+QString pluginDurationText(const QJsonObject& item) {
+    qint64 ms = 0;
+    for (const QString& key : {QStringLiteral("durationMs"), QStringLiteral("duration_ms"),
+             QStringLiteral("durationMS")}) {
+        const QJsonValue value = item.value(key);
+        if (value.isDouble() && value.toDouble() > 0) {
+            ms = static_cast<qint64>(value.toDouble());
+            break;
+        }
+    }
+    if (ms <= 0) {
+        const QJsonValue value = item.value(QStringLiteral("duration"));
+        if (value.isDouble() && value.toDouble() > 0) {
+            const double raw = value.toDouble();
+            ms = static_cast<qint64>(raw > 36000.0 ? raw : raw * 1000.0);
+        }
+    }
+    if (ms <= 0) {
+        return {};
+    }
+    const qint64 seconds = ms / 1000;
+    return QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+// The row button's four looks: ready, busy, saved and retry. Small and quiet so
+// a list of songs still reads as a list, not as a wall of buttons.
+QString pluginRowButtonStyle(const QString& look, const bool dark) {
+    const QString muted = dark ? QStringLiteral("#a8a8ae") : QStringLiteral("#63636a");
+    const QString accent = QStringLiteral("#3390ec");
+    QString border = dark ? QStringLiteral("rgba(255,255,255,64)") : QStringLiteral("rgba(0,0,0,48)");
+    QString fill = dark ? QStringLiteral("rgba(255,255,255,14)") : QStringLiteral("rgba(0,0,0,8)");
+    QString ink = muted;
+    if (look == QLatin1String("ready") || look == QLatin1String("retry")) {
+        border = accent;
+        fill = dark ? QStringLiteral("rgba(51,144,236,56)") : QStringLiteral("rgba(51,144,236,34)");
+        ink = dark ? QStringLiteral("#9ccbf7") : QStringLiteral("#1f6fbf");
+    } else if (look == QLatin1String("saved")) {
+        border = dark ? QStringLiteral("rgba(94,196,132,150)") : QStringLiteral("rgba(38,138,84,150)");
+        fill = QStringLiteral("transparent");
+        ink = dark ? QStringLiteral("#7fd6a2") : QStringLiteral("#1f7a4d");
+    }
+    return QStringLiteral(
+        "QToolButton { border: 1px solid %1; border-radius: %2px; background: %3; color: %4;"
+        " font-family: \"Segoe UI\"; font-size: 11px; padding: 0 6px; }")
+        .arg(border)
+        .arg(kRowButtonHeight / 2)
+        .arg(fill, ink);
+}
+
 bool isPdfFileName(const QString& name) {
     return QFileInfo(name).suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0;
 }
@@ -897,6 +973,37 @@ public:
             const QString name = index.data(Qt::UserRole + 1).toString();
             const QString sizeText = index.data(Qt::UserRole + 5).toString();
             const QString tags = index.data(Qt::UserRole + 2).toString();
+            // A provider track is the library's normal music row: the title on
+            // top and the artist · duration line under it. The row's Download
+            // button is a widget pinned over the right edge, so the text stops
+            // short of it instead of running underneath.
+            if (index.data(kRowStateRole).toInt() != 0) {
+                const QString subtitle = index.data(kRowSubtitleRole).toString();
+                const int textWidth =
+                    std::max(24, row.right() - 16 - kRowButtonReserve - textLeft);
+                QFont titleFont(QStringLiteral("Segoe UI"));
+                titleFont.setPointSize(10);
+                const QFontMetrics titleMetrics(titleFont);
+                painter->setFont(titleFont);
+                painter->setPen(option.palette.color(QPalette::Text));
+                painter->drawText(QRect(textLeft, row.top() + 12, textWidth, 18),
+                    Qt::AlignLeft | Qt::AlignVCenter,
+                    titleMetrics.elidedText(name, Qt::ElideRight, textWidth));
+                if (!subtitle.isEmpty()) {
+                    QFont detailFont(QStringLiteral("Segoe UI"));
+                    detailFont.setPointSize(9);
+                    const QFontMetrics detailMetrics(detailFont);
+                    painter->setFont(detailFont);
+                    painter->setPen(isDarkTheme() ? QColor(168, 168, 174) : QColor(99, 99, 104));
+                    painter->drawText(QRect(textLeft, row.top() + 31, textWidth, 16),
+                        Qt::AlignLeft | Qt::AlignVCenter,
+                        detailMetrics.elidedText(subtitle, Qt::ElideRight, textWidth));
+                }
+                painter->setPen(isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 20));
+                painter->drawLine(row.left() + 14, row.bottom(), row.right() - 14, row.bottom());
+                painter->restore();
+                return;
+            }
             // One line per row: icon, name, then the meta pinned right. Folders
             // carry no meta at all - the stacked "Folder" caption is what made
             // list rows look like a broken table.
@@ -1685,6 +1792,18 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
             }
             if (inGallery) {
                 const int kind = selectedGalleryKind();
+                if (pluginFolder_) {
+                    // Enter is the keyboard's double-click, including inside the
+                    // provider folder's albums and song rows.
+                    int entry = -1;
+                    QListWidgetItem* current = iconList_ != nullptr ? iconList_->currentItem() : nullptr;
+                    if (current != nullptr && current->isSelected()) {
+                        entry = current->data(Qt::UserRole + 21).toInt();
+                    }
+                    if (handlePluginRow(kind, entry)) {
+                        return true;
+                    }
+                }
                 if (kind == 1 || kind == 2 || kind == kKindPhone) {
                     activateCurrentItem();
                     return true;
@@ -2420,6 +2539,10 @@ QWidget* MainWindow::buildUnlockedPage() {
     static_cast<IconGrid*>(iconList_)->onDragStart = [this] { captureDragPayload(false); };
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setItemDelegate(new InstagramDelegate(iconList_));
+    // The provider folder's Download buttons are widgets over rows: keep them on
+    // their rows when the list scrolls.
+    connect(iconList_->verticalScrollBar(), &QScrollBar::valueChanged, this,
+        [this] { syncPluginRowButtons(); });
     iconList_->setViewMode(QListView::IconMode);
     iconList_->setSpacing(0);
     iconList_->setWordWrap(false);
@@ -2671,18 +2794,7 @@ QWidget* MainWindow::buildUnlockedPage() {
             const int kind = item->data(0, Qt::UserRole + 12).toInt();
             const auto id = item->data(0, Qt::UserRole).toLongLong();
                         if (pluginFolder_) {
-                if (kind == kKindPluginBack) {
-                    leavePluginFolder();
-                } else if (kind == kKindPluginCategory) {
-                    pluginCategory_ = item->data(0, Qt::UserRole + 21).toInt();
-                    rebuildPluginFolder();
-                } else if (kind == kKindPluginEntry) {
-                    const int entry = item->data(0, Qt::UserRole + 21).toInt();
-                    if (entry >= 0 && entry < static_cast<int>(pluginRows_.size())) {
-                        ensurePluginPage();
-                        pluginMusic_->activateItem(pluginRows_[static_cast<std::size_t>(entry)]);
-                    }
-                }
+                handlePluginRow(kind, item->data(0, Qt::UserRole + 21).toInt());
                 return;
             }
             if (kind == 1) {
@@ -2702,18 +2814,7 @@ QWidget* MainWindow::buildUnlockedPage() {
             const int kind = item->data(Qt::UserRole + 12).toInt();
             const auto id = item->data(Qt::UserRole).toLongLong();
                         if (pluginFolder_) {
-                if (kind == kKindPluginBack) {
-                    leavePluginFolder();
-                } else if (kind == kKindPluginCategory) {
-                    pluginCategory_ = item->data(Qt::UserRole + 21).toInt();
-                    rebuildPluginFolder();
-                } else if (kind == kKindPluginEntry) {
-                    const int entry = item->data(Qt::UserRole + 21).toInt();
-                    if (entry >= 0 && entry < static_cast<int>(pluginRows_.size())) {
-                        ensurePluginPage();
-                        pluginMusic_->activateItem(pluginRows_[static_cast<std::size_t>(entry)]);
-                    }
-                }
+                handlePluginRow(kind, item->data(Qt::UserRole + 21).toInt());
                 return;
             }
             if (kind == 1) {
@@ -2799,6 +2900,8 @@ void MainWindow::layoutLibraryChrome() {
     auto* area = qobject_cast<QAbstractScrollArea*>(galleryStack_->currentWidget());
     libraryTop_->follow(area);
     libraryBottom_->follow(area);
+    // Row buttons sit over rows, so they follow every layout change.
+    syncPluginRowButtons();
 }
 
 void MainWindow::setViewMode(const int index) {
@@ -3370,6 +3473,12 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     }
 
     CommandPopup menu(this);
+    // Provider rows are not vault items: rename/move/delete would act on a
+    // synthetic id. Their own rows carry open and download instead.
+    if (pluginFolder_ && (kind == kKindPluginBack || kind == kKindPluginAlbum
+            || kind == kKindPluginEntry)) {
+        return;
+    }
     if (on_item && kind == kKindPhone) {
         menu.addCommand(QStringLiteral("Open"), 1);
         menu.addCommand(QStringLiteral("Disconnect phone"), 2, true);
@@ -3947,10 +4056,38 @@ void MainWindow::ensurePluginPage() {
             pluginCatalogue_ = results;
             rebuildPluginFolder();
         });
+    // The album folder's track list. Opening it is a library folder open, not a
+    // jump to the music page: the rows land in the same gallery.
+    connect(pluginMusic_, &MusicPluginPage::albumTracksReady, this,
+        [this](const QString& releaseId, const QJsonArray& tracks) {
+            if (!pluginFolder_ || !pluginAlbumPending_ || releaseId != pluginAlbumId_) {
+                return;
+            }
+            pluginAlbumPending_ = false;
+            pluginAlbumTracks_ = tracks;
+            if (pluginDeadline_ != nullptr) {
+                pluginDeadline_->stop();
+            }
+            rebuildPluginFolder();
+        });
+    connect(pluginMusic_, &MusicPluginPage::albumTracksFailed, this,
+        [this](const QString& releaseId, const QString& message) {
+            if (!pluginFolder_ || !pluginAlbumPending_ || releaseId != pluginAlbumId_) {
+                return;
+            }
+            pluginAlbumPending_ = false;
+            pluginAlbumProblem_ = message;
+            if (pluginDeadline_ != nullptr) {
+                pluginDeadline_->stop();
+            }
+            rebuildPluginFolder();
+        });
 }
 
-// A provider entry is a folder like any other, so the library's own rows,
-// sorting and Back behaviour carry it: no separate browsing surface.
+// A provider entry is a folder like any other, so the library's own chrome,
+// rows and Back behaviour carry it: no separate browsing surface. The root is
+// one mixed list - albums as folder rows, songs as music rows - and opening an
+// album is just another folder inside the library.
 void MainWindow::enterPluginFolder(const QString& term) {
     if (!vault_ || !vault_->is_unlocked() || iconList_ == nullptr) {
         return;
@@ -3958,26 +4095,23 @@ void MainWindow::enterPluginFolder(const QString& term) {
     ensurePluginPage();
     pluginFolder_ = true;
     pluginQuery_ = term;
-    pluginCategory_ = 0;
     pluginCatalogue_ = QJsonObject();
     pluginRows_.clear();
+    pluginTrackItems_.clear();
+    pluginAlbumId_.clear();
+    pluginAlbumName_.clear();
+    pluginAlbumTracks_ = QJsonArray();
+    pluginAlbumProblem_.clear();
+    pluginAlbumPending_ = false;
+    // Rows, not tiles: this folder lists music the way the library lists it,
+    // and every song row carries its own Download button.
+    enterPluginListView();
     pluginMusic_->setVault(vault_);
     iconList_->clear();
     detailsTree_->clear();
 
     rebuildPluginFolder();
-    if (pluginDeadline_ == nullptr) {
-        pluginDeadline_ = new QTimer(this);
-        pluginDeadline_->setSingleShot(true);
-    }
-    pluginDeadline_->disconnect();
-    connect(pluginDeadline_, &QTimer::timeout, this, [this] {
-        if (pluginFolder_ && pluginCatalogue_.isEmpty()) {
-
-            rebuildPluginFolder(QStringLiteral("no answer within 12 s"));
-        }
-    });
-    pluginDeadline_->start(12000);
+    armPluginDeadline(QStringLiteral("no answer within 12 s"));
     pluginMusic_->searchFor(term);
 }
 
@@ -3988,7 +4122,369 @@ void MainWindow::leavePluginFolder() {
     pluginFolder_ = false;
     pluginCatalogue_ = QJsonObject();
     pluginRows_.clear();
+    pluginTrackItems_.clear();
+    pluginAlbumId_.clear();
+    pluginAlbumName_.clear();
+    pluginAlbumTracks_ = QJsonArray();
+    pluginAlbumProblem_.clear();
+    pluginAlbumPending_ = false;
+    syncPluginRowButtons();
+    restorePluginViewMode();
     refreshGallery();
+}
+
+// The folder's own deadline: a provider that never answers must not leave the
+// row at "Waiting" for the rest of the session. It covers the search and the
+// album track list that replaces it once an album is opened.
+void MainWindow::armPluginDeadline(const QString& message) {
+    if (pluginDeadline_ == nullptr) {
+        pluginDeadline_ = new QTimer(this);
+        pluginDeadline_->setSingleShot(true);
+    }
+    pluginDeadline_->stop();
+    pluginDeadline_->disconnect();
+    connect(pluginDeadline_, &QTimer::timeout, this, [this, message] {
+        if (!pluginFolder_) {
+            return;
+        }
+        if (pluginAlbumPending_) {
+            pluginAlbumPending_ = false;
+            pluginAlbumProblem_ = message;
+            rebuildPluginFolder();
+        } else if (pluginCatalogue_.isEmpty()) {
+            rebuildPluginFolder(message);
+        }
+    });
+    pluginDeadline_->start(12000);
+}
+
+void MainWindow::openPluginAlbum(const int entry) {
+    if (entry < 0 || entry >= static_cast<int>(pluginAlbumItems_.size())) {
+        return;
+    }
+    const QJsonObject album = pluginAlbumItems_[static_cast<std::size_t>(entry)];
+    const QString id = album.value(QStringLiteral("_id")).toString();
+    if (id.isEmpty()) {
+        return;
+    }
+    pluginAlbumId_ = id;
+    pluginAlbumName_ = album.value(QStringLiteral("title")).toString();
+    if (pluginAlbumName_.isEmpty()) {
+        pluginAlbumName_ = QStringLiteral("this album");
+    }
+    pluginAlbumTracks_ = QJsonArray();
+    pluginAlbumProblem_.clear();
+    pluginAlbumPending_ = true;
+    rebuildPluginFolder();
+    ensurePluginPage();
+    pluginMusic_->setVault(vault_);
+    pluginMusic_->requestAlbumTracks(id);
+    armPluginDeadline(QStringLiteral("no answer within 12 s"));
+}
+
+// One place for row activation, so double-click and Enter behave the same.
+bool MainWindow::handlePluginRow(const int kind, const int entry) {
+    if (!pluginFolder_) {
+        return false;
+    }
+    if (kind == kKindPluginBack) {
+        if (pluginAlbumId_.isEmpty()) {
+            leavePluginFolder();
+        } else {
+            // Back from an album returns to the provider's mixed root list.
+            pluginAlbumId_.clear();
+            pluginAlbumName_.clear();
+            pluginAlbumTracks_ = QJsonArray();
+            pluginAlbumProblem_.clear();
+            pluginAlbumPending_ = false;
+            if (pluginDeadline_ != nullptr) {
+                pluginDeadline_->stop();
+            }
+            rebuildPluginFolder();
+        }
+        return true;
+    }
+    if (kind == kKindPluginAlbum) {
+        openPluginAlbum(entry);
+        return true;
+    }
+    if (kind == kKindPluginEntry) {
+        if (entry >= 0 && entry < static_cast<int>(pluginRows_.size())) {
+            ensurePluginPage();
+            pluginMusic_->activateItem(pluginRows_[static_cast<std::size_t>(entry)]);
+        }
+        return true;
+    }
+    return false;
+}
+
+// The provider folder is a list of rows even when the rest of the library is
+// showing tiles. The saved view mode is restored on the way out.
+void MainWindow::enterPluginListView() {
+    if (galleryStack_ == nullptr || iconList_ == nullptr) {
+        return;
+    }
+    if (!pluginViewModeSaved_) {
+        pluginViewModeSaved_ = true;
+        pluginSavedViewMode_ = viewModeCombo_ != nullptr ? viewModeCombo_->currentIndex() : 1;
+    }
+    if (viewModeCombo_ != nullptr) {
+        QSignalBlocker blocker(viewModeCombo_);
+        viewModeCombo_->setCurrentIndex(2);
+        // The folder is a list of rows; a tile mode would hide the row buttons.
+        viewModeCombo_->setEnabled(false);
+    }
+    if (viewModeGroup_ != nullptr) {
+        if (QAbstractButton* button = viewModeGroup_->button(2)) {
+            button->setChecked(true);
+        }
+        for (QAbstractButton* button : viewModeGroup_->buttons()) {
+            button->setEnabled(false);
+        }
+    }
+    iconList_->setViewMode(QListView::ListMode);
+    iconList_->setIconSize(QSize(44, 44));
+    iconList_->setGridSize(QSize());
+    iconList_->setSpacing(0);
+    iconList_->setUniformItemSizes(true);
+    galleryStack_->setCurrentWidget(iconList_);
+    layoutLibraryChrome();
+}
+
+void MainWindow::restorePluginViewMode() {
+    if (!pluginViewModeSaved_) {
+        return;
+    }
+    pluginViewModeSaved_ = false;
+    if (viewModeCombo_ != nullptr) {
+        viewModeCombo_->setEnabled(true);
+    }
+    if (viewModeGroup_ != nullptr) {
+        for (QAbstractButton* button : viewModeGroup_->buttons()) {
+            button->setEnabled(true);
+        }
+    }
+    setViewMode(pluginSavedViewMode_);
+}
+
+// 1 ready, 2 busy (queued, downloading or encrypting), 3 saved, 4 failed.
+int MainWindow::pluginRowState(const QString& trackId) const {
+    if (pluginDownloads_ == nullptr) {
+        return 1;
+    }
+    switch (pluginDownloads_->state(trackId)) {
+    case PluginTrackDownloader::Saved:
+        return 3;
+    case PluginTrackDownloader::Failed:
+        return 4;
+    case PluginTrackDownloader::Queued:
+    case PluginTrackDownloader::Fetching:
+    case PluginTrackDownloader::Encrypting:
+        return 2;
+    default:
+        return 1;
+    }
+}
+
+void MainWindow::applyPluginRowState(const QString& trackId) {
+    const int state = pluginRowState(trackId);
+    bool changed = false;
+    if (iconList_ != nullptr) {
+        for (int i = 0; i < iconList_->count(); ++i) {
+            QListWidgetItem* item = iconList_->item(i);
+            if (item->data(kRowTrackIdRole).toString() != trackId) {
+                continue;
+            }
+            if (item->data(kRowStateRole).toInt() != state) {
+                item->setData(kRowStateRole, state);
+                changed = true;
+            }
+        }
+    }
+    if (detailsTree_ != nullptr) {
+        for (int i = 0; i < detailsTree_->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* item = detailsTree_->topLevelItem(i);
+            if (item->data(0, kRowTrackIdRole).toString() != trackId) {
+                continue;
+            }
+            if (item->data(0, kRowStateRole).toInt() != state) {
+                item->setData(0, kRowStateRole, state);
+                changed = true;
+            }
+        }
+    }
+    if (changed && iconList_ != nullptr) {
+        iconList_->viewport()->update();
+    }
+    syncPluginRowButtons();
+}
+
+void MainWindow::ensurePluginDownloads() {
+    if (pluginDownloads_ != nullptr) {
+        return;
+    }
+    pluginDownloads_ = new PluginTrackDownloader(pluginHost_, this);
+    connect(pluginDownloads_, &PluginTrackDownloader::stateChanged, this,
+        [this](const QString& id, int, int percent) {
+            pluginRowPercent_[id] = percent;
+            applyPluginRowState(id);
+        });
+    connect(pluginDownloads_, &PluginTrackDownloader::finished, this,
+        [this](const QString& id, const bool ok, const QString& message) {
+            applyPluginRowState(id);
+            if (ok) {
+                // The vault changed; the library lists it again after Back.
+                refreshGallery();
+            } else if (!message.isEmpty()) {
+                showStatus(QStringLiteral("Download failed: ") + message, true);
+            }
+        });
+}
+
+void MainWindow::startPluginDownload(const QString& trackId) {
+    if (!pluginFolder_ || trackId.isEmpty() || !vault_ || !vault_->is_unlocked()
+        || pluginHost_ == nullptr) {
+        return;
+    }
+    const auto track = pluginTrackItems_.constFind(trackId);
+    if (track == pluginTrackItems_.constEnd()) {
+        return;
+    }
+    ensurePluginDownloads();
+    pluginDownloads_->setVault(vault_);
+    pluginDownloads_->enqueue(track.value());
+    applyPluginRowState(trackId);
+}
+
+// The Download button is a widget over the row, so it follows the row's own
+// rect. Rows that scrolled away -- or a view mode that has no rows -- release
+// their button instead of leaving it floating over the wrong track.
+void MainWindow::syncPluginRowButtons() {
+    if (iconList_ == nullptr) {
+        return;
+    }
+    struct Slot {
+        QString trackId;
+        QRect rect;
+    };
+    std::vector<Slot> rows;
+    const bool listMode = pluginFolder_ && galleryStack_ != nullptr
+        && galleryStack_->currentWidget() == iconList_
+        && iconList_->viewMode() == QListView::ListMode;
+    if (listMode) {
+        const QRect area = iconList_->viewport()->rect();
+        for (int i = 0; i < iconList_->count(); ++i) {
+            QListWidgetItem* item = iconList_->item(i);
+            const QString trackId = item->data(kRowTrackIdRole).toString();
+            if (trackId.isEmpty()) {
+                continue;
+            }
+            const QRect rect = iconList_->visualItemRect(item);
+            if (!rect.isValid() || rect.height() < kRowButtonHeight || !rect.intersects(area)) {
+                continue;
+            }
+            Slot slot;
+            slot.trackId = trackId;
+            slot.rect = rect;
+            rows.push_back(slot);
+        }
+    }
+    while (static_cast<int>(pluginRowButtons_.size()) < static_cast<int>(rows.size())) {
+        auto* button = new QToolButton(iconList_->viewport());
+        button->setObjectName(QStringLiteral("pluginRowDownload"));
+        button->setCursor(Qt::PointingHandCursor);
+        // Focus stays in the gallery, so Enter keeps activating the selected row.
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setFixedSize(kRowButtonWidth, kRowButtonHeight);
+        button->hide();
+        connect(button, &QToolButton::clicked, this, [this, button] {
+            startPluginDownload(button->property("trackId").toString());
+        });
+        pluginRowButtons_.push_back(button);
+    }
+    const bool dark = isDarkTheme();
+    for (int i = 0; i < static_cast<int>(pluginRowButtons_.size()); ++i) {
+        QToolButton* button = pluginRowButtons_[static_cast<std::size_t>(i)];
+        if (i >= static_cast<int>(rows.size())) {
+            button->hide();
+            continue;
+        }
+        const Slot& slot = rows[static_cast<std::size_t>(i)];
+        const int state = pluginDownloads_ != nullptr
+            ? pluginDownloads_->state(slot.trackId)
+            : PluginTrackDownloader::Idle;
+        const int percent = pluginRowPercent_.value(slot.trackId, -1);
+        QString text;
+        QString look;
+        switch (state) {
+        case PluginTrackDownloader::Saved:
+            text = QStringLiteral("Saved");
+            look = QStringLiteral("saved");
+            break;
+        case PluginTrackDownloader::Failed:
+            text = QStringLiteral("Retry");
+            look = QStringLiteral("retry");
+            break;
+        case PluginTrackDownloader::Fetching:
+            text = percent >= 0 ? QStringLiteral("Downloading… %1%").arg(percent)
+                                : QStringLiteral("Downloading…");
+            look = QStringLiteral("busy");
+            break;
+        case PluginTrackDownloader::Queued:
+            text = QStringLiteral("Queued");
+            look = QStringLiteral("busy");
+            break;
+        case PluginTrackDownloader::Encrypting:
+            text = QStringLiteral("Saving…");
+            look = QStringLiteral("busy");
+            break;
+        default:
+            text = QStringLiteral("Download");
+            look = QStringLiteral("ready");
+            break;
+        }
+        if (button->property("trackId").toString() != slot.trackId) {
+            button->setProperty("trackId", slot.trackId);
+        }
+        if (button->text() != text) {
+            button->setText(text);
+        }
+        button->setEnabled(look == QStringLiteral("ready") || look == QStringLiteral("retry"));
+        if (button->property("rowLook").toString() != look) {
+            button->setProperty("rowLook", look);
+            button->setStyleSheet(pluginRowButtonStyle(look, dark));
+        }
+        button->setGeometry(slot.rect.right() - kRowButtonReserve + 8,
+            slot.rect.center().y() - kRowButtonHeight / 2, kRowButtonWidth, kRowButtonHeight);
+        button->show();
+        button->raise();
+    }
+}
+
+void MainWindow::updatePluginFolderStatus(const int songs, const int albums) {
+    if (statusCountLabel_ == nullptr) {
+        return;
+    }
+    if (pluginAlbumId_.isEmpty()) {
+        statusCountLabel_->setText(QStringLiteral("%1 items · %2 songs · %3 albums")
+            .arg(songs + albums)
+            .arg(songs)
+            .arg(albums));
+    } else {
+        statusCountLabel_->setText(
+            QStringLiteral("%1 tracks · %2").arg(songs).arg(pluginAlbumName_));
+    }
+    if (emptyState_ != nullptr) {
+        if (songs + albums == 0) {
+            emptyState_->setText(pluginAlbumId_.isEmpty()
+                ? QStringLiteral("Nothing here for this search.")
+                : QStringLiteral("This album listed no tracks."));
+            emptyState_->show();
+            layoutLibraryChrome();
+        } else {
+            emptyState_->hide();
+        }
+    }
 }
 
 void MainWindow::rebuildPluginFolder(const QString& problem) {
@@ -3998,11 +4494,14 @@ void MainWindow::rebuildPluginFolder(const QString& problem) {
     iconList_->clear();
     detailsTree_->clear();
     pluginRows_.clear();
+    pluginTrackItems_.clear();
+    pluginAlbumItems_.clear();
     constexpr qlonglong kSynthetic = -910000;
 
     auto addRow = [&](const int kind, const qlonglong id, const QString& label,
-                      const QString& note, const int entry) {
-        addLibraryEntry(iconList_, detailsTree_, id, kind, label, note);
+                      const QString& note, const int entry,
+                      const QPixmap& pixmap = QPixmap(folderPixmap())) {
+        addLibraryEntry(iconList_, detailsTree_, id, kind, label, note, pixmap);
         QListWidgetItem* iconRow = iconList_->item(iconList_->count() - 1);
         QTreeWidgetItem* treeRow = detailsTree_->topLevelItem(detailsTree_->topLevelItemCount() - 1);
         if (iconRow != nullptr) {
@@ -4015,6 +4514,58 @@ void MainWindow::rebuildPluginFolder(const QString& problem) {
         }
     };
 
+    // A provider song is the library's normal music row: the title, then the
+    // artist · duration line, with its Download button on the right.
+    auto addTrackRow = [&](const QJsonObject& value) {
+        QJsonObject item = value;
+        QString id = item.value(QStringLiteral("trackId")).toString(
+            item.value(QStringLiteral("_id")).toString());
+        if (id.isEmpty()) {
+            id = item.value(QStringLiteral("id")).toString();
+        }
+        if (id.isEmpty()) {
+            return;
+        }
+        item.insert(QStringLiteral("_id"), id);
+        item.insert(QStringLiteral("_kind"), 1);
+        QString title = item.value(QStringLiteral("title")).toString();
+        if (title.isEmpty()) {
+            title = item.value(QStringLiteral("name")).toString();
+        }
+        if (title.isEmpty()) {
+            title = QStringLiteral("Untitled");
+        }
+        const QString artists = pluginArtistNames(item);
+        const QString duration = pluginDurationText(item);
+        QString detail = artists;
+        if (!duration.isEmpty()) {
+            detail = artists.isEmpty() ? duration
+                                       : artists + QStringLiteral(" · ") + duration;
+        }
+        if (detail.isEmpty()) {
+            detail = QStringLiteral("Song");
+        }
+        pluginRows_.push_back(item);
+        pluginTrackItems_.insert(id, item);
+        const int state = pluginRowState(id);
+        addRow(kKindPluginEntry, kSynthetic - 100 - static_cast<qlonglong>(pluginRows_.size()),
+               title, detail, static_cast<int>(pluginRows_.size() - 1), musicPlaceholder(96));
+        QListWidgetItem* iconRow = iconList_->item(iconList_->count() - 1);
+        if (iconRow != nullptr) {
+            iconRow->setData(kRowSubtitleRole, detail);
+            iconRow->setData(kRowTrackIdRole, id);
+            iconRow->setData(kRowStateRole, state);
+            iconRow->setToolTip(detail.isEmpty() ? title : title + QStringLiteral("\n") + detail);
+        }
+        QTreeWidgetItem* treeRow = detailsTree_->topLevelItem(detailsTree_->topLevelItemCount() - 1);
+        if (treeRow != nullptr) {
+            treeRow->setText(2, duration);
+            treeRow->setData(0, kRowSubtitleRole, detail);
+            treeRow->setData(0, kRowTrackIdRole, id);
+            treeRow->setData(0, kRowStateRole, state);
+        }
+    };
+
     QString provider = QStringLiteral("the provider");
     for (const auto& manifest : pluginHost_->manifests()) {
         if (manifest.protocol == "monochrome-tracks-v1" && pluginHost_->enabled(manifest.id)) {
@@ -4023,78 +4574,85 @@ void MainWindow::rebuildPluginFolder(const QString& problem) {
         }
     }
 
-    addRow(kKindPluginBack, kSynthetic, QStringLiteral("\u2039 Back to library"),
+    const bool albumOpen = !pluginAlbumId_.isEmpty();
+    addRow(kKindPluginBack, kSynthetic,
+           albumOpen ? QStringLiteral("\u2039 Back to ") + provider
+                     : QStringLiteral("\u2039 Back to library"),
            QStringLiteral("Folder"), -1);
 
-    const QJsonArray songs = pluginCatalogue_.value(QStringLiteral("tracks")).toArray();
-    const QJsonArray albums = pluginCatalogue_.value(QStringLiteral("releases")).toArray();
-    const QJsonArray artists = pluginCatalogue_.value(QStringLiteral("artists")).toArray();
-    if (pluginCatalogue_.isEmpty()) {
-        addRow(kKindPluginEntry, kSynthetic - 1,
-               QStringLiteral("Searching %1 for \u201C%2\u201D\u2026").arg(provider, pluginQuery_),
-               QStringLiteral("Waiting"), -1);
-        recountLibrary();
-        return;
-    }
-    if (pluginCategory_ == 0) {
-        addRow(kKindPluginCategory, kSynthetic - 10, QStringLiteral("Songs"),
-               QStringLiteral("%1 results").arg(songs.size()), 1);
-        addRow(kKindPluginCategory, kSynthetic - 11, QStringLiteral("Albums"),
-               QStringLiteral("%1 results").arg(albums.size()), 2);
-        addRow(kKindPluginCategory, kSynthetic - 12, QStringLiteral("Artists"),
-               QStringLiteral("%1 results").arg(artists.size()), 3);
-        recountLibrary();
+    if (!albumOpen) {
+        if (pluginCatalogue_.isEmpty()) {
+            addRow(kKindPluginEntry, kSynthetic - 1,
+                   problem.isEmpty()
+                       ? QStringLiteral("Searching %1 for \u201C%2\u201D\u2026")
+                             .arg(provider, pluginQuery_)
+                       : QStringLiteral("Could not reach %1 · %2").arg(provider, problem),
+                   QStringLiteral("Waiting"), -1);
+            updatePluginFolderStatus(0, 0);
+            iconList_->doItemsLayout();
+            syncPluginRowButtons();
+            return;
+        }
+        // Albums, then songs, in one list: an album is a folder inside the
+        // provider, a song is a track that saves from its own row.
+        const QJsonArray albums = pluginArray(pluginCatalogue_,
+            {QStringLiteral("releases"), QStringLiteral("albums"), QStringLiteral("singles"),
+                QStringLiteral("compilations")});
+        for (const auto& value : albums) {
+            QJsonObject item = value.toObject();
+            QString id = item.value(QStringLiteral("releaseId")).toString(
+                item.value(QStringLiteral("id")).toString());
+            if (id.isEmpty()) {
+                continue;
+            }
+            item.insert(QStringLiteral("_id"), id);
+            item.insert(QStringLiteral("_kind"), 3);
+            QString title = item.value(QStringLiteral("title")).toString();
+            if (title.isEmpty()) {
+                title = item.value(QStringLiteral("name")).toString();
+            }
+            if (title.isEmpty()) {
+                title = QStringLiteral("Untitled album");
+            }
+            const QString artists = pluginArtistNames(item);
+            pluginAlbumItems_.push_back(item);
+            addRow(kKindPluginAlbum,
+                   kSynthetic - 300 - static_cast<qlonglong>(pluginAlbumItems_.size()), title,
+                   artists.isEmpty() ? QStringLiteral("Album")
+                                     : artists + QStringLiteral(" · Album"),
+                   static_cast<int>(pluginAlbumItems_.size() - 1));
+        }
+        const QJsonArray songs = pluginArray(pluginCatalogue_,
+            {QStringLiteral("tracks"), QStringLiteral("topTracks")});
+        for (const auto& value : songs) {
+            addTrackRow(value.toObject());
+        }
+        updatePluginFolderStatus(static_cast<int>(pluginRows_.size()),
+                                 static_cast<int>(pluginAlbumItems_.size()));
+        iconList_->doItemsLayout();
+        syncPluginRowButtons();
         return;
     }
 
-    const QJsonArray list = pluginCategory_ == 1 ? songs : pluginCategory_ == 2 ? albums : artists;
-    const int kind = pluginCategory_ == 1 ? 1 : pluginCategory_ == 2 ? 3 : 2;
-    for (const auto& value : list) {
-        QJsonObject item = value.toObject();
-        QString id;
-        if (pluginCategory_ == 1) {
-            id = item.value(QStringLiteral("trackId")).toString();
-        } else if (pluginCategory_ == 2) {
-            id = item.value(QStringLiteral("releaseId")).toString();
-        } else {
-            id = item.value(QStringLiteral("artistId")).toString();
+    // An album folder: only its tracks, in the same music rows as the root.
+    if (pluginAlbumPending_) {
+        addRow(kKindPluginEntry, kSynthetic - 2,
+               QStringLiteral("Loading %1\u2026").arg(pluginAlbumName_),
+               QStringLiteral("Waiting"), -1);
+    } else if (pluginAlbumTracks_.isEmpty()) {
+        addRow(kKindPluginEntry, kSynthetic - 2,
+               pluginAlbumProblem_.isEmpty()
+                   ? QStringLiteral("%1 listed no tracks").arg(pluginAlbumName_)
+                   : QStringLiteral("%1 · %2").arg(pluginAlbumName_, pluginAlbumProblem_),
+               QStringLiteral("Album"), -1);
+    } else {
+        for (const auto& value : pluginAlbumTracks_) {
+            addTrackRow(value.toObject());
         }
-        if (id.isEmpty()) {
-            id = item.value(QStringLiteral("id")).toString();
-        }
-        if (id.isEmpty()) {
-            continue;
-        }
-        item.insert(QStringLiteral("_id"), id);
-        item.insert(QStringLiteral("_kind"), kind);
-        QString name = pluginCategory_ == 3
-            ? item.value(QStringLiteral("name")).toString(
-                  item.value(QStringLiteral("displayName")).toString())
-            : item.value(QStringLiteral("title")).toString();
-        if (name.isEmpty()) {
-            name = QStringLiteral("Untitled");
-        }
-        QString note = pluginCategory_ == 1 ? QStringLiteral("Song")
-                      : pluginCategory_ == 2 ? QStringLiteral("Album")
-                                             : QStringLiteral("Artist");
-        const QJsonArray artistList = item.value(QStringLiteral("artists")).toArray();
-        QStringList names;
-        for (const auto& artist : artistList) {
-            const QJsonObject entry = artist.toObject();
-            const QString label = entry.value(QStringLiteral("name")).toString(
-                entry.value(QStringLiteral("displayName")).toString());
-            if (!label.isEmpty()) {
-                names << label;
-            }
-        }
-        if (!names.isEmpty()) {
-            note = names.join(QStringLiteral(", ")) + QStringLiteral(" \u00B7 ") + note;
-        }
-        pluginRows_.push_back(item);
-        addRow(kKindPluginEntry, kSynthetic - 100 - pluginRows_.size(), name, note,
-               static_cast<int>(pluginRows_.size() - 1));
     }
-    recountLibrary();
+    updatePluginFolderStatus(static_cast<int>(pluginRows_.size()), 0);
+    iconList_->doItemsLayout();
+    syncPluginRowButtons();
 }
 
 // Searching the library also asks the enabled provider whether it has
@@ -8100,6 +8658,7 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
         approvalVeil_->setGeometry(rect());
         approvalVeil_->raise();
     }
+    syncPluginRowButtons();
 }
 
 void MainWindow::beginNewNote() {

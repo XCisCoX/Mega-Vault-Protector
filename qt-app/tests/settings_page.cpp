@@ -68,7 +68,8 @@ int main(int argc, char** argv) {
         };
         auto* tabs = child.operator()<QTabBar>("settingsNavigation");
         auto* sections = child.operator()<QStackedWidget>("settingsSections");
-        check(tabs->count() == 5 && sections->count() == 5, "five settings sections");
+        check(page.findChild<QCheckBox*>("useProxy") != nullptr, "proxy settings switch must be reachable");
+        check(tabs->count() == 6 && sections->count() == 6, "six settings sections");
         check(tabs->tabText(0) == "Updates" && tabs->tabText(4) == "Library", "section order");
         page.resize(480, 640); page.show(); app.processEvents();
         int preferences = 0, libraryChanges = 0, appearanceChanges = 0, checks = 0, closes = 0;
@@ -210,6 +211,45 @@ int main(int argc, char** argv) {
             page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/settings-dark-480.png");
             tabs->setCurrentIndex(3); app.processEvents(); page.grab().save(folder + "/settings-security-480.png");
         }
+        tabs->setCurrentIndex(5); app.processEvents();
+        auto* proxySwitch = child.operator()<QCheckBox>("useProxy");
+        auto* proxyList = child.operator()<QListWidget>("proxyList");
+        check(proxyList->count() == 0 && !proxySwitch->isChecked(), "empty proxies start disabled");
+        child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
+        auto* proxyEditor = child.operator()<QDialog>("proxyEditor");
+        check(proxyEditor->isVisible(), "Telegram-style add proxy editor opens from settings");
+        auto editorField = [proxyEditor](const char* name) { auto* field = proxyEditor->findChild<QLineEdit*>(name); check(field, name); return field; };
+        proxyEditor->findChild<QPushButton*>("saveProxy")->click();
+        check(proxyEditor->isVisible() && !proxyEditor->findChild<QLabel*>("proxyEditorError")->text().isEmpty(), "invalid proxy stays in editor with error");
+        editorField("proxyServer")->setText("proxy.example.test"); editorField("proxyPort")->setText("1080");
+        editorField("proxyUsername")->setText("test-only-user"); editorField("proxyPassword")->setText("test-only-secret");
+        check(editorField("proxyPassword")->echoMode() == QLineEdit::Password, "proxy password is masked");
+        if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
+            const auto folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
+            proxyEditor->grab().save(folder + "/proxy-editor-dark.png");
+        }
+#ifdef Q_OS_WIN
+        proxyEditor->findChild<QPushButton*>("saveProxy")->click(); app.processEvents();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        check(proxyList->count() == 1, "proxy saved to list");
+        proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
+        if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
+            const auto folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
+            page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/proxy-list-dark-480.png");
+        }
+        child.operator()<QPushButton>("editProxy")->click(); app.processEvents();
+        proxyEditor = child.operator()<QDialog>("proxyEditor");
+        check(proxyEditor->findChild<QLineEdit*>("proxyServer")->text() == "proxy.example.test", "edit restores server");
+        check(proxyEditor->findChild<QLineEdit*>("proxyPassword")->text() == "test-only-secret", "edit restores securely stored password");
+        proxyEditor->findChild<QPushButton*>("proxyHttp")->click();
+        proxyEditor->findChild<QLineEdit*>("proxyPort")->setText("8080");
+        proxyEditor->findChild<QPushButton*>("saveProxy")->click(); app.processEvents();
+        check(proxyList->item(0)->text().contains("8080") && proxyList->item(0)->text().contains("HTTP"), "edit updates protocol and port");
+        child.operator()<QPushButton>("deleteProxy")->click();
+        check(proxyList->count() == 0 && !proxySwitch->isChecked(), "deleting active proxy disables use");
+#else
+        proxyEditor->reject();
+#endif
         page.reject(); check(closes == 1 && page.isVisible(), "reject requests host navigation without destroying or hiding page");
         std::cout << "Settings page tests passed: switches, accessibility, updates, appearance, navigation, security, tags, thumbnails, persistence, responsive layout, live palette\n";
     } catch (const std::exception& error) {

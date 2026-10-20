@@ -56,7 +56,9 @@ class MainActivity : ComponentActivity() {
     private var shareHoldsVault = false
 
     private fun show(next: Screen) {
-        if (next !is Screen.Plugins) PluginRuntime.close()
+        // The library and its provider player share the same RAM-only session.
+        if (next !is Screen.Vault && next !is Screen.PluginMusic) PluginLibrary.close()
+        if (next !is Screen.Plugins && next !is Screen.Vault && next !is Screen.PluginMusic) PluginRuntime.close()
         screen = next
         AppSession.screen = next
     }
@@ -71,6 +73,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lockNow() {
+        PluginLibrary.close()
         PluginRuntime.close()
         if (MusicHub.active) {
             startService(
@@ -102,6 +105,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppProxy.initialize(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         // The saved appearance is read once, before the first frame.
         MvpThemeState.loadOnce(this)
@@ -130,7 +134,7 @@ class MainActivity : ComponentActivity() {
                 // Login leaves on one press. Setup has nowhere to go back to.
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync, is Screen.Plugins -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.PluginMusic, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync, is Screen.Plugins -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -199,6 +203,7 @@ class MainActivity : ComponentActivity() {
                             onOpenPeer = { show(Screen.Peer) },
                             onOpenSync = { show(Screen.Sync) },
                             onOpenPlugins = { show(Screen.Plugins) },
+                            onPlayPlugin = { show(Screen.PluginMusic) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
                             onOpenMusic = {
@@ -257,6 +262,19 @@ class MainActivity : ComponentActivity() {
                             vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
                             onClose = { show(Screen.Vault) },
                         )
+                        is Screen.PluginMusic -> {
+                            val session = PluginLibrary.session
+                            if (session == null) {
+                                LaunchedEffect(Unit) { show(Screen.Vault) }
+                            } else MusicScreen(
+                                videoId = 0L,
+                                name = session.selected?.title ?: session.manifest.name,
+                                playlist = emptyList(),
+                                startFresh = false,
+                                onBack = { show(Screen.Vault) },
+                                pluginSession = session,
+                            )
+                        }
                         is Screen.Sync -> SyncScreen(
                             vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
                             onClose = { show(Screen.Vault) },
@@ -304,7 +322,7 @@ class MainActivity : ComponentActivity() {
                             fontSize = 13.sp,
                             modifier = Modifier
                                 .padding(bottom = 72.dp)
-                                .background(Color(0xFFC62828), RoundedCornerShape(8.dp))
+                                .background(Mvp.destructive, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 14.dp, vertical = 8.dp),
                         )
                     }
@@ -327,7 +345,7 @@ class MainActivity : ComponentActivity() {
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
+            || screen is Screen.Music || screen is Screen.PluginMusic || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && unlocked()) show(Screen.Vault)
     }
 
@@ -335,7 +353,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
+            || screen is Screen.Music || screen is Screen.PluginMusic || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }

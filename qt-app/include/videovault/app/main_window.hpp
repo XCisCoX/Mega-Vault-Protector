@@ -1,11 +1,14 @@
 #pragma once
 
+#include <QJsonArray>
 #include <QJsonObject>
 
 #include "videovault/app/sync_state.hpp"
 
+#include <QHash>
 #include <QMainWindow>
 #include <QStringList>
+#include <QVector>
 
 #include <atomic>
 #include <cstdint>
@@ -41,6 +44,7 @@ class QLocalServer;
 class QObject;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QToolButton;
 
 template <typename T>
 class QFutureWatcher;
@@ -67,6 +71,7 @@ class TagFilterButton;
 class SettingsDialog;
 class PluginHost;
 class MusicPluginPage;
+class PluginTrackDownloader;
 class ExtensionToolsPage;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
@@ -177,23 +182,50 @@ private:
     void openSettings();
     void openPluginMusic(const QString& query = QString());
     void offerPluginSearchRow();
-    // The provider shown as a folder of the library: the root lists the
-    // categories, a category lists its entries, Back returns to the real folder.
+    // The provider shown as a folder of the library: one mixed root list of
+    // album folders and song rows, an album opening as a folder of its tracks,
+    // and Back walking one level at a time.
     void ensurePluginPage();
     void enterPluginFolder(const QString& term);
     void leavePluginFolder();
     void rebuildPluginFolder(const QString& problem = QString());
+    void armPluginDeadline(const QString& message);
+    void openPluginAlbum(int entry);
+    bool handlePluginRow(int kind, int entry);
+    void enterPluginListView();
+    void restorePluginViewMode();
+    void ensurePluginDownloads();
+    int pluginRowState(const QString& trackId) const;
+    void applyPluginRowState(const QString& trackId);
+    void syncPluginRowButtons();
+    void startPluginDownload(const QString& trackId);
+    void updatePluginFolderStatus(int songs, int albums);
     bool pluginFolder_{false};
     QString pluginQuery_;
     QJsonObject pluginCatalogue_;
-    int pluginCategory_{0};
+    // The song rows currently listed, in row order, so a row can be activated.
     std::vector<QJsonObject> pluginRows_;
+    // Albums of the root list, and the open album's own state.
+    std::vector<QJsonObject> pluginAlbumItems_;
+    QJsonArray pluginAlbumTracks_;
+    QString pluginAlbumId_;
+    QString pluginAlbumName_;
+    QString pluginAlbumProblem_;
+    bool pluginAlbumPending_{false};
+    // Track id -> catalogue object, and the row's download state and progress.
+    QHash<QString, QJsonObject> pluginTrackItems_;
+    QHash<QString, int> pluginRowPercent_;
+    // Download buttons pinned over the visible track rows.
+    QVector<QToolButton*> pluginRowButtons_;
+    bool pluginViewModeSaved_{false};
+    int pluginSavedViewMode_{1};
     // The folder's own deadline: a provider that never answers must not leave
     // the row at "Waiting" for the rest of the session.
     QTimer* pluginDeadline_{nullptr};
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};
+    PluginTrackDownloader* pluginDownloads_{nullptr};
     QPushButton* pluginMusicButton_{nullptr};
     ExtensionToolsPage* extensionTools_{nullptr};
     QPushButton* extensionToolsButton_{nullptr};

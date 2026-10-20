@@ -100,7 +100,7 @@ object RemoteVault {
         val factory = pinnedFactory(fingerprint)
         val verifier = HostnameVerifier { hostname, _ -> hostname == host }
         val body = password.toByteArray(Charsets.UTF_8)
-        val conn = (URL("$base/v1/login").openConnection() as HttpsURLConnection).apply {
+        val conn = (AppProxy.open(URL("$base/v1/login")) as HttpsURLConnection).apply {
             sslSocketFactory = factory
             hostnameVerifier = verifier
             requestMethod = "POST"
@@ -185,7 +185,7 @@ object RemoteVault {
     }
 
     private fun get(base: String, secret: String, path: String): ByteArray? {
-        val conn = (URL(base + path).openConnection() as HttpsURLConnection).apply {
+        val conn = (AppProxy.open(URL(base + path)) as HttpsURLConnection).apply {
             sslFactory?.let { sslSocketFactory = it }
             hostVerifier?.let { hostnameVerifier = it }
             requestMethod = "GET"
@@ -223,7 +223,7 @@ object RemoteVault {
     fun remove(path: String): String? {
         val base = baseUrl ?: return "Not signed in."
         val secret = token ?: return "Not signed in."
-        val conn = (URL(base + path).openConnection() as HttpsURLConnection).apply {
+        val conn = (AppProxy.open(URL(base + path)) as HttpsURLConnection).apply {
             sslFactory?.let { sslSocketFactory = it }
             hostVerifier?.let { hostnameVerifier = it }
             requestMethod = "POST"

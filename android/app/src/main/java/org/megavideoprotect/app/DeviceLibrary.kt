@@ -236,7 +236,7 @@ private fun PickMark(on: Boolean) {
         Modifier
             .size(22.dp)
             .clip(CircleShape)
-            .background(if (on) Mvp.primary else Color(0x33FFFFFF)),
+            .background(if (on) Mvp.primary else Mvp.inputBorder),
         contentAlignment = Alignment.Center,
     ) {
         if (on) {
@@ -261,7 +261,7 @@ private fun GalleryCell(file: PhoneFile, on: Boolean, onClick: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .background(Color(0xFF161618))
+            .background(Mvp.tileBg)
             .clickable(onClick = onClick),
     ) {
         val image = thumb

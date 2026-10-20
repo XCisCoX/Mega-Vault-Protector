@@ -102,6 +102,8 @@ sealed interface Screen {
     data object Vault : Screen
     data object Sync : Screen
     data object Plugins : Screen
+    /** Existing music player UI with a RAM-only provider source rather than vault IDs. */
+    data object PluginMusic : Screen
     /** The swapped PC's library: read-only, copy only. */
     data object Peer : Screen
     data class Player(

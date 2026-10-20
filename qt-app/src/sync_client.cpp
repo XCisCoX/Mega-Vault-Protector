@@ -1,4 +1,5 @@
 #include "videovault/app/sync_client.hpp"
+#include "videovault/app/proxy_settings.hpp"
 
 #include <QEventLoop>
 #include <QFile>
@@ -91,6 +92,7 @@ Client::Response Client::send(const QByteArray& method, const QString& target, c
     else if (method == "PUT" || method == "POST" || method == "PATCH") request.setRawHeader("Content-Type", "application/json");
     for (const auto& header : extra) request.setRawHeader(header.first, header.second);
 
+    configureNetworkProxy(manager_);
     QNetworkReply* reply = nullptr;
     if (method == "HEAD") reply = manager_->head(request);
     else if (method == "GET") reply = manager_->get(request);

@@ -619,7 +619,7 @@ private fun ConnectedCard(
             Text(
                 if (picked.size == 1) "Delete 1 item permanently? It cannot be restored."
                 else "Delete ${picked.size} items permanently? They cannot be restored.",
-                color = Color(0xFFFF6B6B),
+                color = Mvp.errorText,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 10.dp),
             )

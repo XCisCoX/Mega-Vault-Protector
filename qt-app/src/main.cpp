@@ -1,4 +1,5 @@
 #include "videovault/app/main_window.hpp"
+#include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/version.hpp"
 
@@ -204,6 +205,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    videovault::app::initializeProxySettings();
     videovault::app::MainWindow window;
     if (!incoming.isEmpty()) {
         window.acceptExternalPaths(incoming);

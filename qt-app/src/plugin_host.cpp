@@ -1,3 +1,4 @@
+#include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/plugin_audio.hpp"
 #include "videovault/core/vault.hpp"
@@ -32,6 +33,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTimer>
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
@@ -833,8 +835,7 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
         return;
     }
     const auto generation = generation_;
-    QHostInfo::lookupHost(
-        url.host(), this, [this, url, limit, done, redirects, generation](const QHostInfo &info) {
+    const auto resolved = [this, url, limit, done, redirects, generation](const QHostInfo &info) {
             if (generation != generation_ || !vault_ || !vault_->is_unlocked())
                 return;
             // A resolver that answers nothing (filtered DNS is common) must not
@@ -871,6 +872,7 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                 return;
             }
 #ifdef Q_OS_WIN
+            if (!proxyEnabled()) {
             QPointer<MusicPluginPage> self(this);
             auto deliver = [self, url, limit, done, redirects, generation](
                                      QByteArray body, int status, QUrl location, QString error) mutable {
@@ -915,7 +917,9 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                     Qt::QueuedConnection);
             });
             return;
+            }
 #endif
+            configureNetworkProxy(network_);
             QNetworkRequest req(url);
             req.setRawHeader("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)");
             req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
@@ -976,7 +980,11 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
                                                                      : reply->errorString(),
                             limit, done, redirects, generation);
                     });
-        });
+        };
+    // Proxy DNS is authoritative; never leak destination lookups locally.
+    // HTTPS manifest allowlists and literal/private destination checks remain.
+    if (proxyEnabled()) resolved(QHostInfo());
+    else QHostInfo::lookupHost(url.host(), this, resolved);
 }
 void MusicPluginPage::completeRequest(const QUrl &url, QByteArray bytes, const int code,
                                       const QUrl &redirect, const QString &error, const qint64 limit,
@@ -1028,6 +1036,47 @@ void MusicPluginPage::activateItem(const QJsonObject &item) {
     row->setData(Qt::UserRole, item);
     activate(row);
     delete row;
+}
+
+// The library's album folder asks for one release's tracks. This deliberately
+// does not touch the results list or the player: browsing an album is a folder
+// open in the library, and only playback goes through this page.
+void MusicPluginPage::requestAlbumTracks(const QString &releaseId) {
+    if (!vault_ || !vault_->is_unlocked() || !validId(releaseId))
+        return;
+    auto m = manifest();
+    if (m.id.isEmpty()) {
+        for (const auto &candidate : host_->manifests())
+            if (candidate.protocol == "monochrome-tracks-v1" && host_->enabled(candidate.id)) {
+                m = candidate;
+                break;
+            }
+    }
+    if (m.id.isEmpty()) {
+        emit albumTracksFailed(releaseId, QStringLiteral("no enabled provider"));
+        return;
+    }
+    auto u = m.baseUrl;
+    u.setPath("/releases/" + releaseId);
+    status_->setText("Opening catalogue…");
+    request(u, metadataLimit, [this, releaseId](QByteArray b) {
+        QJsonParseError e;
+        const auto doc = QJsonDocument::fromJson(b, &e);
+        if (e.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit albumTracksFailed(releaseId, QStringLiteral("invalid detail response"));
+            return;
+        }
+        const auto object = doc.object();
+        QJsonArray tracks = object.value("tracks").toArray();
+        if (tracks.isEmpty())
+            tracks = object.value("topTracks").toArray();
+        if (tracks.isEmpty()) {
+            emit albumTracksFailed(releaseId, QStringLiteral("the provider listed no tracks"));
+            return;
+        }
+        status_->setText(QString::number(tracks.size()) + " tracks in this album.");
+        emit albumTracksReady(releaseId, tracks);
+    });
 }
 
 void MusicPluginPage::search() {
@@ -1266,5 +1315,289 @@ void MusicPluginPage::saveAudio() {
         wipe(*bytes);
         return error;
     }));
+}
+
+namespace {
+// Rows downloading at once: enough that a user's clicks run in parallel, few
+// enough that a list of rows never turns into a burst of connections.
+constexpr int kDownloadConcurrency = 2;
+
+// The same allowlisted HTTPS route the search uses, with the downloader's own
+// buffer and callbacks. Progress may arrive on a worker thread; completion is
+// always delivered on the thread that owns the network manager.
+void fetchTrackBytes(QNetworkAccessManager *network, const QUrl &url, const qint64 limit,
+                     const std::function<void(qint64, qint64)> &progress,
+                     const std::function<void(QByteArray, QString)> &done,
+                     const int redirects = 0) {
+    if (redirects > 4 || !url.isValid() || url.host().isEmpty()) {
+        done(QByteArray(), QStringLiteral("Invalid provider URL."));
+        return;
+    }
+#ifdef Q_OS_WIN
+    if (!proxyEnabled()) {
+        auto deliver = [network, url, limit, progress, done, redirects](
+                           QByteArray body, int status, QUrl location, QString error) mutable {
+            if (error.isEmpty() && status >= 300 && status < 400 && location.isValid()) {
+                fetchTrackBytes(network, url.resolved(location), limit, progress, done,
+                                redirects + 1);
+                return;
+            }
+            if (error.isEmpty() && (status < 200 || status >= 300))
+                error = QStringLiteral("HTTP %1").arg(status);
+            if (!error.isEmpty()) {
+                wipe(body);
+                done(QByteArray(), error);
+                return;
+            }
+            if (body.size() > limit) {
+                wipe(body);
+                done(QByteArray(),
+                     QStringLiteral("The track is larger than the configured audio memory limit."));
+                return;
+            }
+            done(std::move(body), QString());
+        };
+        QtConcurrent::run([url, limit, progress, deliver]() mutable {
+            QByteArray body;
+            int status = 0;
+            QUrl location;
+            QString error;
+            const bool ok = winHttpGet(url, limit, progress, &body, &status, &location, &error);
+            const QString failure = ok ? QString() : error;
+            QMetaObject::invokeMethod(
+                qApp,
+                [deliver, body = std::move(body), status, location, failure]() mutable {
+                    deliver(std::move(body), status, location, failure);
+                },
+                Qt::QueuedConnection);
+        });
+        return;
+    }
+#endif
+    configureNetworkProxy(network);
+    QNetworkRequest req(url);
+    req.setRawHeader("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)");
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
+    auto *reply = network->get(req);
+    auto bytes = std::make_shared<QByteArray>();
+    auto exceeded = std::make_shared<bool>(false);
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    timer->start(180000);
+    QObject::connect(timer, &QTimer::timeout, reply, &QNetworkReply::abort);
+    QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                     [progress](qint64 received, qint64 total) { progress(received, total); });
+    QObject::connect(reply, &QNetworkReply::metaDataChanged, reply, [reply, limit, exceeded] {
+        if (reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > limit) {
+            *exceeded = true;
+            reply->abort();
+        }
+    });
+    QObject::connect(reply, &QNetworkReply::readyRead, reply,
+                     [reply, bytes, limit, exceeded] {
+                         const qint64 remaining = limit - bytes->size();
+                         if (remaining <= 0 || reply->bytesAvailable() > remaining) {
+                             *exceeded = true;
+                             reply->abort();
+                             return;
+                         }
+                         bytes->append(reply->read(remaining));
+                     });
+    QObject::connect(reply, &QNetworkReply::finished, reply,
+                     [network, reply, bytes, exceeded, limit, progress, done, url, redirects] {
+                         reply->deleteLater();
+                         if (*exceeded) {
+                             wipe(*bytes);
+                             done(QByteArray(),
+                                  QStringLiteral(
+                                      "The track is larger than the configured audio memory limit."));
+                             return;
+                         }
+                         bytes->append(reply->readAll());
+                         const int status =
+                             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                         const QUrl location =
+                             reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
+                         if (reply->error() == QNetworkReply::NoError && status >= 300 &&
+                             status < 400 && location.isValid()) {
+                             wipe(*bytes);
+                             fetchTrackBytes(network, url.resolved(location), limit, progress, done,
+                                             redirects + 1);
+                             return;
+                         }
+                         if (reply->error() != QNetworkReply::NoError) {
+                             const QString failure = reply->errorString();
+                             wipe(*bytes);
+                             done(QByteArray(), failure);
+                             return;
+                         }
+                         if (status < 200 || status >= 300) {
+                             wipe(*bytes);
+                             done(QByteArray(), QStringLiteral("HTTP %1").arg(status));
+                             return;
+                         }
+                         done(std::move(*bytes), QString());
+                     });
+}
+} // namespace
+
+PluginTrackDownloader::PluginTrackDownloader(PluginHost *host, QObject *parent)
+    : QObject(parent), host_(host), network_(new QNetworkAccessManager(this)) {}
+void PluginTrackDownloader::setVault(std::shared_ptr<core::Vault> vault) {
+    vault_ = std::move(vault);
+}
+PluginManifest PluginTrackDownloader::manifest() const {
+    if (host_ == nullptr)
+        return {};
+    for (const auto &m : host_->manifests())
+        if (m.protocol == "monochrome-tracks-v1" && host_->enabled(m.id))
+            return m;
+    return {};
+}
+void PluginTrackDownloader::enqueue(const QJsonObject &track) {
+    if (host_ == nullptr || !vault_ || !vault_->is_unlocked())
+        return;
+    QString id = track.value("_id").toString(track.value("trackId").toString());
+    if (!validId(id))
+        return;
+    const int current = state(id);
+    if (current == Queued || current == Fetching || current == Encrypting || current == Saved)
+        return;
+    Job job;
+    job.id = id;
+    job.item = track;
+    QString name = track.value("title").toString();
+    if (name.isEmpty())
+        name = track.value("name").toString();
+    name.replace(QRegularExpression("[\\\\/:*?\"<>|\\x00-\\x1f]"), "_");
+    name = name.left(110).trimmed();
+    job.name = (name.isEmpty() ? QStringLiteral("Track") : name) + ".flac";
+    states_[id] = Queued;
+    percent_[id] = -1;
+    queue_.append(job);
+    emit stateChanged(id, Queued, -1);
+    pump();
+}
+void PluginTrackDownloader::pump() {
+    while (active_ < kDownloadConcurrency && !queue_.isEmpty()) {
+        const Job job = queue_.takeFirst();
+        start(job);
+    }
+}
+void PluginTrackDownloader::start(const Job &job) {
+    auto fail = [this](const QString &id, const QString &message) {
+        states_[id] = Failed;
+        emit stateChanged(id, Failed, -1);
+        emit finished(id, false, message);
+    };
+    const auto m = manifest();
+    if (m.id.isEmpty() || !vault_ || !vault_->is_unlocked()) {
+        fail(job.id, QStringLiteral("No enabled music provider for this vault."));
+        return;
+    }
+    QUrl url = m.baseUrl;
+    url.setPath("/track/" + job.id);
+    if (!m.allows(url)) {
+        fail(job.id, QStringLiteral("The provider URL is not approved."));
+        return;
+    }
+    const auto key = host_->settingKey(m.id);
+    const auto vaultKey = host_->settingKey(m.id, identity(vault_));
+    // The destination folder belongs to this vault, exactly like the settings
+    // the page uses; a locked or different vault simply fails the import.
+    const qlonglong folder = QSettings().value(vaultKey + "folder", qlonglong(0)).toLongLong();
+    int capMiB = QSettings().value(key + "memoryMiB", 32).toInt();
+    if (capMiB != 32 && capMiB != 64 && capMiB != 128)
+        capMiB = 32;
+
+    ++active_;
+    states_[job.id] = Fetching;
+    percent_[job.id] = -1;
+    emit stateChanged(job.id, Fetching, -1);
+
+    const QString trackId = job.id;
+    const auto progress = [this, trackId](qint64 received, qint64 total) {
+        const int value =
+            total > 0 ? int(std::min<qint64>(100, received * 100 / total)) : -1;
+        // WinHTTP reports from its worker thread; rows are updated on the UI one.
+        // On the owning thread (Qt transport) the row is updated right away.
+        const auto apply = [this, trackId, value] {
+            if (states_.value(trackId) != Fetching)
+                return;
+            percent_[trackId] = value;
+            emit stateChanged(trackId, Fetching, value);
+        };
+        if (QThread::currentThread() == thread())
+            apply();
+        else
+            QMetaObject::invokeMethod(this, apply, Qt::QueuedConnection);
+    };
+    const auto done = [this, job, folder](QByteArray bytes, QString error) mutable {
+        if (!error.isEmpty()) {
+            wipe(bytes);
+            states_[job.id] = Failed;
+            --active_;
+            emit stateChanged(job.id, Failed, -1);
+            emit finished(job.id, false, error);
+            pump();
+            return;
+        }
+        if (!pluginFlac(bytes)) {
+            wipe(bytes);
+            states_[job.id] = Failed;
+            --active_;
+            emit stateChanged(job.id, Failed, -1);
+            emit finished(job.id, false,
+                          QStringLiteral("The provider did not return a valid FLAC stream."));
+            pump();
+            return;
+        }
+        if (!vault_ || !vault_->is_unlocked()) {
+            wipe(bytes);
+            states_[job.id] = Failed;
+            --active_;
+            emit stateChanged(job.id, Failed, -1);
+            emit finished(job.id, false, QStringLiteral("The vault locked during the download."));
+            pump();
+            return;
+        }
+        states_[job.id] = Encrypting;
+        percent_[job.id] = 100;
+        emit stateChanged(job.id, Encrypting, 100);
+        auto vault = vault_;
+        auto payload = std::make_shared<QByteArray>(std::move(bytes));
+        auto *watcher = new QFutureWatcher<QString>(this);
+        connect(watcher, &QFutureWatcher<QString>::finished, this,
+                [this, watcher, payload, id = job.id] {
+                    const QString failure = watcher->result();
+                    watcher->deleteLater();
+                    wipe(*payload);
+                    --active_;
+                    states_[id] = failure.isEmpty() ? Saved : Failed;
+                    emit stateChanged(id, states_.value(id), failure.isEmpty() ? 100 : -1);
+                    emit finished(id, failure.isEmpty(), failure);
+                    pump();
+                });
+        watcher->setFuture(QtConcurrent::run([vault, folder, name = job.name, payload] {
+            if (!vault->is_unlocked())
+                return QStringLiteral("The vault locked during the download.");
+            const auto utf8 = name.toUtf8();
+            auto result = vault->import_bytes(
+                std::span<const unsigned char>(
+                    reinterpret_cast<const unsigned char *>(payload->constData()),
+                    std::size_t(payload->size())),
+                std::string_view(utf8.constData(), std::size_t(utf8.size())), folder);
+            if (!result)
+                return QString::fromUtf8(core::user_message(result.error().code).data());
+            return QString();
+        }));
+    };
+    if (fetcher_) {
+        fetcher_(job.id, progress, done);
+        return;
+    }
+    fetchTrackBytes(network_, url, qint64(capMiB) * 1024 * 1024, progress, done);
 }
 } // namespace videovault::app
