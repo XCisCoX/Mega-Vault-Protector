@@ -77,6 +77,9 @@ struct RecordEntry {
 struct RecordDocument {
     QVector<RecordEntry> entries;
     bool isTemplate{false};
+    // What the template is called in the picker ("Website login"). Separate from the
+    // entry's title, which is the placeholder name the created record starts with.
+    QString templateName;
 };
 
 // Every serialized record starts with this marker, so the gallery can route an
@@ -86,6 +89,11 @@ inline constexpr char kRecordMarker[] = "{\"mvp_record\":";
 // True when `head` (the first bytes of an item's plaintext) begins a record.
 // Tolerates a UTF-8 BOM and leading whitespace.
 bool looksLikeRecord(const QByteArray& head);
+
+// True when those bytes begin a *template*: a record file flagged `"template":true`.
+// The flag sits right after the version, so a gallery can classify an item from a
+// 64-byte read instead of decrypting it in full.
+bool looksLikeTemplate(const QByteArray& head);
 
 // The stored format version, or 0 when the bytes are not a record at all.
 // 1 and 2 mean "a pre-v3 record the editor can migrate"; 3 is the only version

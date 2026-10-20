@@ -172,6 +172,39 @@ int main() {
             "an ordinary record has no generators");
     }
 
+    // --- the template's own name -------------------------------------------
+    if (website != nullptr) {
+        app::RecordDocument named = templateDocument(*website);
+        named.templateName = QStringLiteral("Website login");
+        const QByteArray bytes = app::serializeRecord(named);
+        check(QString::fromUtf8(bytes).contains(QStringLiteral("\"name\":\"Website login\"")),
+            "the template's own name is written");
+        app::RecordDocument reparsed;
+        check(app::parseRecord(bytes, &reparsed)
+                && reparsed.templateName == QStringLiteral("Website login"),
+            "the template's own name survives a round trip");
+        check(!QString::fromUtf8(app::serializeRecord(app::cloneTemplate(*website)))
+                   .contains(QStringLiteral("\"name\"")),
+            "an ordinary record carries no template name");
+        for (const auto& document : builtins) {
+            check(!document.templateName.isEmpty(), "every built-in names itself in the picker");
+        }
+    }
+
+    // --- classifying an item from its first bytes --------------------------
+    if (website != nullptr) {
+        const QByteArray templateBytes = app::serializeRecord(templateDocument(*website));
+        check(app::looksLikeTemplate(templateBytes.left(64)),
+            "a template is recognised from 64 bytes, without decrypting the rest");
+        check(app::looksLikeRecord(templateBytes.left(64)), "a template is also a record");
+        const QByteArray recordBytes = app::serializeRecord(app::cloneTemplate(*website));
+        check(!app::looksLikeTemplate(recordBytes.left(64)),
+            "a record's first bytes are not mistaken for a template");
+        check(app::looksLikeTemplate(QByteArray("\xEF\xBB\xBF  ") + templateBytes.left(64)),
+            "a BOM and leading whitespace are tolerated");
+        check(!app::looksLikeTemplate(QByteArray()), "empty content is not a template");
+    }
+
     // --- broken templates are refused --------------------------------------
     {
         const QByteArray badKind = R"({"mvp_record":3,"template":true,"entries":[{"title":"x",)"

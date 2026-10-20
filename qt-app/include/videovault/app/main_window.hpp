@@ -7,6 +7,8 @@
 
 #include <QHash>
 #include <QMainWindow>
+
+#include "videovault/app/record_document.hpp"
 #include <QStringList>
 #include <QVector>
 
@@ -252,6 +254,11 @@ private:
     void placeTransferPanel();
     // A record is a key/value item, edited in its own window.
     void beginNewRecord();
+    // "New from template": the same entry point as New record, with the structure
+    // filled in. The templates are the built-ins plus the user's own template items.
+    void beginNewRecordFromTemplate();
+    void showTemplateChooser(const QVector<QPair<QString, RecordEntry>>& choices);
+    void createRecordItem(const QString& title, const QByteArray& bytes);
     void beginRecord(std::int64_t video_id, const QString& title);
     void closeRecord();
     void stepPlayback(int delta);

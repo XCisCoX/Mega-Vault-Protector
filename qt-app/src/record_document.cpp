@@ -441,6 +441,11 @@ bool looksLikeRecord(const QByteArray& head) {
     return head.mid(start, marker.size()) == marker;
 }
 
+bool looksLikeTemplate(const QByteArray& head) {
+    // The name is optional and may follow, so only the flag is required here.
+    return looksLikeRecord(head) && head.contains("\"template\":true");
+}
+
 int recordFormatVersion(const QByteArray& bytes) {
     QJsonObject root;
     int version = 0;
@@ -512,6 +517,11 @@ QByteArray serializeRecord(const RecordDocument& document) {
     json += QString::number(kRecordFormatVersion);
     if (sorted.isTemplate) {
         json += QStringLiteral(",\"template\":true");
+        if (!sorted.templateName.trimmed().isEmpty()) {
+            json += QStringLiteral(",\"name\":\"");
+            json += escapeJson(sorted.templateName.trimmed());
+            json += QLatin1Char('"');
+        }
     }
     json += QStringLiteral(",\"entries\":[");
     for (int index = 0; index < sorted.entries.size(); ++index) {
@@ -587,6 +597,13 @@ bool parseRecord(const QByteArray& bytes, RecordDocument* document) {
             return false;
         }
         parsed.isTemplate = templateValue.toBool();
+    }
+    const QJsonValue nameValue = root.value(QStringLiteral("name"));
+    if (!nameValue.isUndefined()) {
+        if (!nameValue.isString()) {
+            return false;
+        }
+        parsed.templateName = nameValue.toString();
     }
     const QJsonArray entries = entriesValue.toArray();
     parsed.entries.reserve(entries.size());
