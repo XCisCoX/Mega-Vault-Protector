@@ -1541,6 +1541,7 @@ public:
         column->setSpacing(10);
         auto* bar = new QHBoxLayout();
         back_ = new QPushButton(QStringLiteral("Back"), this);
+        icons::withText(back_, QStringLiteral("arrow-left"));
         back_->setCursor(Qt::PointingHandCursor);
         back_->setStyleSheet(QStringLiteral(
             "QPushButton { color: #3390ec; background: transparent; border: none;"
@@ -1552,6 +1553,7 @@ public:
         bar->addSpacing(8);
         bar->addWidget(title_, 1);
         save_ = new QPushButton(QStringLiteral("Save"), this);
+        icons::withText(save_, QStringLiteral("check"));
         save_->setCursor(Qt::PointingHandCursor);
         save_->setStyleSheet(QStringLiteral(
             "QPushButton { color: white; background: #3390ec; border: none; border-radius: 8px;"
@@ -2249,15 +2251,8 @@ QWidget* MainWindow::buildSetupPage() {
     setupLocation_->setTextMargins(10, 0, 8, 0);
     setupLocation_->setMinimumHeight(38);
     setupLocation_->setCursorPosition(0);
-    // Icon-only: "Browse…" cost the path field enough width to cut its last
-    // characters off, which is what made the field look clipped.
-    auto* browse = new QPushButton(card);
-    browse->setObjectName(QStringLiteral("browseButton"));
-    browse->setFixedSize(38, 38);
-    browse->setIconSize(QSize(16, 16));
-    browse->setToolTip(QStringLiteral("Choose the vault folder"));
-    browse->setAccessibleName(QStringLiteral("Choose the vault folder"));
-    icons::apply(browse, QStringLiteral("folder-open"));
+    auto* browse = new QPushButton(QStringLiteral("Browse…"), card);
+    icons::withText(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(setupLocation_, 1);
     locationRow->addWidget(browse);
     layout->addLayout(locationRow);
@@ -2282,8 +2277,10 @@ QWidget* MainWindow::buildSetupPage() {
     layout->addWidget(setupError_);
 
     createButton_ = new QPushButton(QStringLiteral("Create vault"), card);
+    icons::withText(createButton_, QStringLiteral("plus"));
     createButton_->setProperty("primary", true);
     auto* existingButton = new QPushButton(QStringLiteral("Open an existing vault"), card);
+    icons::withText(existingButton, QStringLiteral("folder-open"));
     layout->addWidget(createButton_);
     layout->addWidget(existingButton);
 
@@ -2314,13 +2311,8 @@ QWidget* MainWindow::buildLoginPage() {
     loginLocation_->setTextMargins(10, 0, 8, 0);
     loginLocation_->setMinimumHeight(38);
     loginLocation_->setCursorPosition(0);
-    auto* browse = new QPushButton(loginLocationRow_);
-    browse->setObjectName(QStringLiteral("browseButton"));
-    browse->setFixedSize(38, 38);
-    browse->setIconSize(QSize(16, 16));
-    browse->setToolTip(QStringLiteral("Choose the vault folder"));
-    browse->setAccessibleName(QStringLiteral("Choose the vault folder"));
-    icons::apply(browse, QStringLiteral("folder-open"));
+    auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
+    icons::withText(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
     // The remembered vault path is longer than this field, and a line edit that
@@ -2377,8 +2369,10 @@ QWidget* MainWindow::buildLoginPage() {
     layout->addWidget(loginError_);
 
     unlockButton_ = new QPushButton(QStringLiteral("Unlock vault"), card);
+    icons::withText(unlockButton_, QStringLiteral("lock-open"));
     unlockButton_->setProperty("primary", true);
     auto* newVaultButton = new QPushButton(QStringLiteral("Create a new vault"), card);
+    icons::withText(newVaultButton, QStringLiteral("plus"));
     layout->addWidget(unlockButton_);
     layout->addWidget(newVaultButton);
 
@@ -2471,6 +2465,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addWidget(importButton_);
     titleRow->addWidget(shareButton_);
     auto* syncButton = new QPushButton(QStringLiteral("Sync"), toolbar);
+    icons::withText(syncButton, QStringLiteral("refresh-cw"));
     syncButton->setObjectName(QStringLiteral("syncSection"));
     syncButton->setCursor(Qt::PointingHandCursor);
     syncButton->setFocusPolicy(Qt::NoFocus);
@@ -2663,11 +2658,13 @@ QWidget* MainWindow::buildUnlockedPage() {
     folderPaneLabel_ = new QLabel(QStringLiteral("Folders"), folderPane_);
     folderPaneLabel_->setObjectName(QStringLiteral("folderPaneTitle"));
     folderPaneToggle_ = new QPushButton(folderPane_);
+    // The glyph is set from the collapsed state elsewhere; start collapsed-to-open.
+    icons::apply(folderPaneToggle_, QStringLiteral("chevron-left"));
+    folderPaneToggle_->setIconSize(QSize(14, 14));
     folderPaneToggle_->setObjectName(QStringLiteral("folderPaneToggle"));
     folderPaneToggle_->setAccessibleName(QStringLiteral("Collapse the folder pane"));
     folderPaneToggle_->setToolTip(QStringLiteral("Collapse the folder pane"));
     folderPaneToggle_->setFixedSize(22, 22);
-    folderPaneToggle_->setIconSize(QSize(16, 16));
     // icons::apply re-tints on a theme change, so the chevron follows both themes.
     icons::apply(folderPaneToggle_, QStringLiteral("chevron-left"));
     folderPaneToggle_->setFocusPolicy(Qt::NoFocus);
@@ -2752,6 +2749,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     statusCountLabel_ = new QLabel(statusBar);
     statusCountLabel_->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 180);"));
     transfersButton_ = new QPushButton(QStringLiteral("Transfers"), statusBar);
+    icons::withText(transfersButton_, QStringLiteral("arrow-up-down"));
     transfersButton_->setFlat(true);
     transfersButton_->setCursor(Qt::PointingHandCursor);
     transfersButton_->setStyleSheet(QStringLiteral(
@@ -3425,6 +3423,7 @@ void MainWindow::finishEditTags() {
     auto* input = new QLineEdit();
     input->setPlaceholderText(QStringLiteral("New tag…"));
     auto* addButton = new QPushButton(QStringLiteral("Add"));
+    icons::withText(addButton, QStringLiteral("plus"));
     inputRow->addWidget(input, 1);
     inputRow->addWidget(addButton);
 
@@ -8462,9 +8461,11 @@ void MainWindow::approvePeer(const QString& phone, std::function<void(bool)> ans
     body->setWordWrap(true);
     auto* row = new QHBoxLayout();
     auto* decline = new QPushButton(QStringLiteral("Decline"), card);
+    icons::withText(decline, QStringLiteral("x"));
     decline->setObjectName(QStringLiteral("approvalDecline"));
     decline->setCursor(Qt::PointingHandCursor);
     auto* allow = new QPushButton(QStringLiteral("Allow"), card);
+    icons::withText(allow, QStringLiteral("check"));
     allow->setObjectName(QStringLiteral("approvalAllow"));
     allow->setCursor(Qt::PointingHandCursor);
     row->addStretch(1);
@@ -8691,6 +8692,7 @@ void MainWindow::showTransfers() {
         auto* heading = new QLabel(QStringLiteral("Transfers"), panel);
         heading->setStyleSheet(QStringLiteral("font: 600 16px \"Segoe UI\";"));
         auto* close = new QPushButton(QStringLiteral("Close"), panel);
+        icons::withText(close, QStringLiteral("x"));
         close->setObjectName(QStringLiteral("transferClose"));
         close->setCursor(Qt::PointingHandCursor);
         titleRow->addWidget(heading);
@@ -8708,6 +8710,7 @@ void MainWindow::showTransfers() {
         list->setSpacing(8);
         layout->addWidget(transferHost_, 1);
         auto* clear = new QPushButton(QStringLiteral("Clear finished"), panel);
+        icons::withText(clear, QStringLiteral("trash"));
         clear->setObjectName(QStringLiteral("clearDone"));
         clear->setCursor(Qt::PointingHandCursor);
         connect(clear, &QPushButton::clicked, this, [this] {
@@ -9086,6 +9089,7 @@ void MainWindow::refreshTransfers() {
         const bool alive = job.state == PeerTransfer::Waiting || job.state == PeerTransfer::Running;
         if (alive) {
             auto* cancel = new QPushButton(QStringLiteral("Cancel"), row);
+            icons::withText(cancel, QStringLiteral("x"));
             const auto id = job.id;
             connect(cancel, &QPushButton::clicked, this, [this, id] {
                 for (auto& item : transfers_) {

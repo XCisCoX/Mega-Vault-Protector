@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -49,6 +50,8 @@ signals:
 
 protected:
     void changeEvent(QEvent* event) override;
+    // Escape clears the filter when there is one, otherwise it closes the page.
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     // A position inside the document: the record, then the member/element index at
@@ -107,6 +110,12 @@ private:
     void refreshDirty();
     void save();
     void revert();
+    // True when the document differs from what was last read or saved.
+    [[nodiscard]] bool isDirty() const;
+    // Closes, asking first if there are unsaved edits.
+    void requestClose();
+    // Reorders the records by title; the old order comes back through Revert.
+    void sortEntries(bool ascending);
     void writeContent(const QByteArray& bytes, const QString& success,
         const std::function<void()>& after);
 

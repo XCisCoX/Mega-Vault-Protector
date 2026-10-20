@@ -120,7 +120,7 @@ elseif(ANDROID)
 endif()
 
 add_library(MegaVaultSync STATIC
-    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp
+    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp src/icons.cpp
     include/videovault/app/sync_state.hpp
     include/videovault/app/sync_client.hpp
     include/videovault/app/sync_engine.hpp
@@ -272,6 +272,25 @@ if(MVP_BUILD_TESTS)
     # Sync protocol 4: the state file, key derivation and validation run without
     # a server; the engine test runs against a real sync_server through
     # tests/run_sync_live.py and skips when it is started without one.
+    # Optional offscreen screenshot harness (tools/screenshots.cpp). Off by default so
+    # CI does not build a second copy of every app source; enable it locally with
+    # -DMVP_SCREENSHOT_HARNESS=ON when reviewing icon or layout work.
+    option(MVP_SCREENSHOT_HARNESS "Build the offscreen screenshot harness" OFF)
+    if(MVP_SCREENSHOT_HARNESS)
+    set(_shot_sources ${MVP_APP_SOURCES})
+    list(REMOVE_ITEM _shot_sources src/main.cpp)
+    add_executable(MvpScreenshotHarness tools/screenshots.cpp ${_shot_sources})
+    get_target_property(_shot_links VideoVaultApp LINK_LIBRARIES)
+    get_target_property(_shot_includes VideoVaultApp INCLUDE_DIRECTORIES)
+    target_link_libraries(MvpScreenshotHarness PRIVATE ${_shot_links})
+    if(WIN32 OR MINGW)
+        target_link_libraries(MvpScreenshotHarness PRIVATE crypt32 secur32 winhttp dwmapi)
+    endif()
+    target_include_directories(MvpScreenshotHarness PRIVATE ${_shot_includes})
+    target_compile_features(MvpScreenshotHarness PRIVATE cxx_std_20)
+    set_target_properties(MvpScreenshotHarness PROPERTIES AUTOMOC ON AUTORCC ON FOLDER "Tools")
+    endif()
+
     # Exercise the production gallery, not a separate model of its cache.
     set(_gallery_sources ${MVP_APP_SOURCES})
     list(REMOVE_ITEM _gallery_sources src/main.cpp)
@@ -362,18 +381,27 @@ if(MVP_BUILD_TESTS)
     add_test(NAME sync_state COMMAND VideoVaultSyncStateTests)
     add_test(NAME sync_engine COMMAND VideoVaultSyncEngineTests)
     set_tests_properties(sync_engine PROPERTIES SKIP_RETURN_CODE 77)
+    # The page draws Lucide glyphs, and resources from a static library are not
+    # carried into the binary: the qrc has to be compiled into the test itself.
+    target_sources(VideoVaultSyncDialogTests PRIVATE resources/icons.qrc)
+    set_target_properties(VideoVaultSyncDialogTests PROPERTIES AUTORCC ON)
     add_test(NAME sync_page COMMAND VideoVaultSyncDialogTests)
     set_tests_properties(sync_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    # player_window.cpp draws Lucide glyphs, so the test compiles the helper and the
+    # resources itself: a static library does not carry its qrc into the binary.
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp
         src/player_window.cpp
+        src/icons.cpp
+        resources/icons.qrc
         include/videovault/app/media_decoder.hpp
         include/videovault/app/player_window.hpp
     )
     set_target_properties(VideoVaultPlaybackTests PROPERTIES
         AUTOMOC ON
+        AUTORCC ON
     )
     target_link_libraries(VideoVaultPlaybackTests
         PRIVATE

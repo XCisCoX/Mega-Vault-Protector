@@ -51,10 +51,12 @@ protected:
 
 private:
     void captureBackdrop();
-    void clampCardHeight();
-    bool clamping_{false};
-    bool clampPending_{false};
+    bool fitting_{false};
+    bool fitPending_{false};
     static std::function<void(InWindowSheet*)> testDriver_;
+    // The card has a fixed width, so its height has to come from the layout's
+    // heightForWidth at that width: a word-wrapped message is otherwise cut off.
+    void fitCard();
     QFrame* card_{nullptr};
     QLabel* title_{nullptr};
     QLabel* message_{nullptr};

@@ -9,6 +9,7 @@
 #include <QComboBox>
 #include <QCursor>
 #include <QEvent>
+#include <QKeyEvent>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
@@ -17,11 +18,13 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QPalette>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -70,7 +73,7 @@ QPushButton* quietIconButton(const QString& icon, const QString& tip, QWidget* p
     auto* button = new QPushButton(parent);
     button->setProperty("quiet", true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setFocusPolicy(Qt::NoFocus);
+    button->setFocusPolicy(Qt::TabFocus);
     button->setToolTip(tip);
     button->setAccessibleName(tip);
     button->setIconSize(QSize(16, 16));
@@ -87,7 +90,7 @@ QPushButton* quietIconButton(const QString& icon, const QString& tip, QWidget* p
 QPushButton* disclosureButton(QWidget* parent, const QString& color) {
     auto* button = new QPushButton(parent);
     button->setCursor(Qt::PointingHandCursor);
-    button->setFocusPolicy(Qt::NoFocus);
+    button->setFocusPolicy(Qt::TabFocus);
     button->setFixedSize(20, 20);
     button->setStyleSheet(QStringLiteral(
         "QPushButton { border: none; background: transparent; color: %1;"
@@ -315,6 +318,17 @@ void RecordWindow::buildInterface() {
     search_->setToolTip(QStringLiteral("Filter by record name, key or value"));
     header->addWidget(search_);
 
+    auto* sortButton = quietIconButton(
+        QStringLiteral("chevrons-up-down"), QStringLiteral("Sort records by title"), this);
+    auto* sortMenu = new QMenu(sortButton);
+    sortMenu->addAction(QStringLiteral("Sort by title, A to Z"), this,
+        [this] { sortEntries(true); });
+    sortMenu->addAction(QStringLiteral("Sort by title, Z to A"), this,
+        [this] { sortEntries(false); });
+    connect(sortButton, &QPushButton::clicked, this, [sortButton, sortMenu] {
+        sortMenu->exec(sortButton->mapToGlobal(QPoint(0, sortButton->height())));
+    });
+
     addRecordButton_ = quietIconButton(
         QStringLiteral("plus"), QStringLiteral("Add a record to this file"), this);
     revertButton_ = quietIconButton(
@@ -328,10 +342,11 @@ void RecordWindow::buildInterface() {
         "QPushButton { padding: 0px; border-radius: 15px; min-width: 30px; max-width: 30px;"
         " min-height: 30px; max-height: 30px; }"));
     saveButton_->setCursor(Qt::PointingHandCursor);
-    saveButton_->setFocusPolicy(Qt::NoFocus);
+    saveButton_->setFocusPolicy(Qt::TabFocus);
     saveButton_->setToolTip(QStringLiteral("Save changes"));
     saveButton_->setAccessibleName(QStringLiteral("Save changes"));
     auto* closeButton = quietIconButton(QStringLiteral("x"), QStringLiteral("Close"), this);
+    header->addWidget(sortButton);
     header->addWidget(addRecordButton_);
     header->addWidget(revertButton_);
     header->addWidget(saveButton_);
@@ -385,7 +400,23 @@ void RecordWindow::buildInterface() {
     status_->setWordWrap(true);
     layout->addWidget(status_);
 
-    connect(closeButton, &QPushButton::clicked, this, [this] { emit closeRequested(); });
+    connect(closeButton, &QPushButton::clicked, this, [this] { requestClose(); });
+
+    // Ctrl+S saves, Ctrl+F jumps to the filter. Escape is handled in keyPressEvent so
+    // it can defer to an open sheet.
+    auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
+    connect(saveShortcut, &QShortcut::activated, this, [this] {
+        if (saveButton_ != nullptr && saveButton_->isEnabled()) {
+            save();
+        }
+    });
+    auto* findShortcut = new QShortcut(QKeySequence::Find, this);
+    connect(findShortcut, &QShortcut::activated, this, [this] {
+        if (search_ != nullptr) {
+            search_->setFocus();
+            search_->selectAll();
+        }
+    });
     connect(addRecordButton_, &QPushButton::clicked, this, [this] { addEntry(); });
     connect(saveButton_, &QPushButton::clicked, this, [this] { save(); });
     connect(revertButton_, &QPushButton::clicked, this, [this] { revert(); });
@@ -443,6 +474,7 @@ void RecordWindow::applyStyle() {
             min-height: 30px; border-radius: 10px; padding: 0 10px;
         }
         QLineEdit#recordSearch:focus { border: 1px solid #3390ec; }
+        QPushButton[quiet="true"]:focus { border: 1px solid #3390ec; border-radius: 7px; }
         QFrame#recordLegacyBar { background: %8; border: 1px solid %5; border-radius: 14px; }
         QLabel#recordLegacyLabel { color: %2; font-size: 13px; }
 
@@ -1386,6 +1418,62 @@ void RecordWindow::refreshDirty() {
     const bool dirty = serializeRecord(document_) != loaded_;
     saveButton_->setEnabled(dirty);
     revertButton_->setEnabled(dirty);
+}
+
+bool RecordWindow::isDirty() const {
+    return editable_ && serializeRecord(document_) != loaded_;
+}
+
+void RecordWindow::sortEntries(const bool ascending) {
+    if (!editable_) {
+        return;
+    }
+    std::stable_sort(document_.entries.begin(), document_.entries.end(),
+        [ascending](const RecordEntry& left, const RecordEntry& right) {
+            const int order = QString::compare(left.title, right.title, Qt::CaseInsensitive);
+            return ascending ? order < 0 : order > 0;
+        });
+    rebuild();
+    refreshDirty();
+    setStatus(QStringLiteral("Sorted by title."), false);
+}
+
+void RecordWindow::requestClose() {
+    if (isDirty()) {
+        InWindowSheet sheet(this);
+        sheet.setTitle(QStringLiteral("Discard changes?"));
+        sheet.setMessage(QStringLiteral(
+            "This record has edits that have not been saved. Closing now loses them."));
+        sheet.addButton(QStringLiteral("Keep editing"), 0, false, QStringLiteral("x"));
+        sheet.addButton(QStringLiteral("Discard changes"), 1, true, QStringLiteral("trash"));
+        if (sheet.run() != 1) {
+            return;
+        }
+    }
+    emit closeRequested();
+}
+
+void RecordWindow::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape) {
+        // A sheet runs its own nested loop and handles its own Escape; don't close the
+        // page out from under it. The sheet has no Q_OBJECT (its backdrop is painted),
+        // so findChildren<InWindowSheet*>() cannot be trusted here - the card it owns
+        // is the reliable handle.
+        for (auto* card : findChildren<QWidget*>(QStringLiteral("inWindowCard"))) {
+            QWidget* sheet = card->parentWidget();
+            if (sheet != nullptr && sheet->isVisible()) {
+                QWidget::keyPressEvent(event);
+                return;
+            }
+        }
+        if (search_ != nullptr && !query_.isEmpty()) {
+            search_->clear();
+            return;
+        }
+        requestClose();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void RecordWindow::save() {

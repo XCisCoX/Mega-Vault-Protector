@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -642,6 +643,21 @@ PlayerWindow::PlayerWindow(
     zoomInButton_->setToolTip(QStringLiteral("Zoom in (+)"));
     fitButton_ = new QPushButton(QStringLiteral("Fit"), controlsOverlay_);
     fitButton_->setToolTip(QStringLiteral("Fit to window (0)"));
+    // Compact overlay controls: the glyph carries the meaning, the tooltip the words.
+    // The overlay sits on video, so the ink stays light regardless of the app palette.
+    struct OverlayControl {
+        QPushButton* button;
+        const char* icon;
+    };
+    for (const auto& control : {OverlayControl{zoomOutButton_, "minus"},
+             OverlayControl{zoomInButton_, "plus"}, OverlayControl{fitButton_, "maximize"}}) {
+        control.button->setText(QString());
+        control.button->setMinimumWidth(34);
+        control.button->setIconSize(QSize(16, 16));
+        control.button->setIcon(icons::lucideSolid(
+            QString::fromLatin1(control.icon), QColor(255, 255, 255, 230)));
+        control.button->setAccessibleName(control.button->toolTip());
+    }
     for (auto* button : {zoomOutButton_, zoomInButton_, fitButton_}) {
         button->setCursor(Qt::PointingHandCursor);
         button->setFocusPolicy(Qt::NoFocus);

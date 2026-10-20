@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QTimer>
+#include <cstdio>
 #include <QScopedValueRollback>
 #include <QLayout>
 #include <QLabel>
@@ -131,24 +132,6 @@ void InWindowSheet::paintEvent(QPaintEvent* event) {
     painter.fillRect(rect(), QColor(0, 0, 0, dark ? 118 : 58));
 }
 
-void InWindowSheet::clampCardHeight() {
-    QWidget* host = parentWidget();
-    if (host == nullptr || card_ == nullptr || clamping_) {
-        return;
-    }
-    const QScopedValueRollback<bool> guard(clamping_, true);
-    const int needed = card_->sizeHint().height();
-    const int room = std::max(220, host->height() - 48);
-    if (needed <= room) {
-        // The card fits: leave it to size itself. Pinning it here re-ran the
-        // layout on every resize, which is what hung the offscreen platform.
-        return;
-    }
-    if (card_->height() != room) {
-        card_->setFixedHeight(room);
-    }
-}
-
 void InWindowSheet::captureBackdrop() {
     QWidget* host = parentWidget();
     if (host == nullptr || host->size().isEmpty()) {
@@ -210,7 +193,9 @@ QPushButton* InWindowSheet::addButton(const QString& label, const int result, co
             // in both themes rather than following ButtonText.
             button->setIcon(icons::lucideSolid(icon, QColor(0xff, 0xff, 0xff)));
         } else {
-            icons::apply(button, icon, icons::Tone::Quiet);
+            // The sheet paints a dark card in both themes, so a palette-tinted icon
+            // would go invisible in the light theme.
+            button->setIcon(icons::lucideSolid(icon, QColor(0xf2, 0xf2, 0xf7)));
         }
     }
     buttons_->addWidget(button);
@@ -224,6 +209,27 @@ void InWindowSheet::setTestDriver(std::function<void(InWindowSheet*)> driver) {
     testDriver_ = std::move(driver);
 }
 
+void InWindowSheet::fitCard() {
+    if (card_ == nullptr || card_->layout() == nullptr || fitting_) {
+        return;
+    }
+    const QScopedValueRollback<bool> guard(fitting_, true);
+    QLayout* layout = card_->layout();
+    layout->activate();
+    const int width = card_->width() > 0 ? card_->width() : 420;
+    const int height = layout->hasHeightForWidth() ? layout->heightForWidth(width)
+                                                   : layout->sizeHint().height();
+    int target = qMax(height, layout->minimumSize().height());
+    // Never taller than the window: past that the body scrolls instead of the
+    // buttons falling off the bottom.
+    if (QWidget* host = parentWidget()) {
+        target = qMin(target, qMax(220, host->height() - 48));
+    }
+    if (card_->height() != target) {
+        card_->setFixedHeight(target);
+    }
+}
+
 int InWindowSheet::run() {
     QWidget* host = parentWidget();
     if (host == nullptr) {
@@ -234,10 +240,11 @@ int InWindowSheet::run() {
     // Captured before the sheet is shown, so the backdrop is the window itself.
     backdrop_ = QPixmap();
     captureBackdrop();
-    // Hug the content, but never exceed the window: past that the body scrolls.
-    clampCardHeight();
+    fitCard();
     show();
     raise();
+    // Showing polishes the layout; fit once more so the card is not a line short.
+    fitCard();
     if (entry_ != nullptr) {
         entry_->setFocus();
         entry_->selectAll();
@@ -251,7 +258,20 @@ int InWindowSheet::run() {
         }
         return 1;
     }
+    // A modal sheet that never finishes must not hang a headless run forever;
+    // the trace names it so a CI log is diagnosable.
+    const QString sheetTitle = title_ != nullptr ? title_->text() : QString();
+    std::fprintf(stderr, "[sheet] open '%s'\n", qPrintable(sheetTitle));
+    std::fflush(stderr);
+    QTimer::singleShot(300000, this, [this] {
+        std::fprintf(stderr, "[sheet] watchdog closed '%s'\n",
+            qPrintable(title_ != nullptr ? title_->text() : QString()));
+        std::fflush(stderr);
+        loop_.quit();
+    });
     loop_.exec();
+    std::fprintf(stderr, "[sheet] closed '%s'\n", qPrintable(sheetTitle));
+    std::fflush(stderr);
     hide();
     if (parentWidget() != nullptr) {
         parentWidget()->removeEventFilter(this);
@@ -290,11 +310,11 @@ bool InWindowSheet::eventFilter(QObject* watched, QEvent* event) {
         // A shorter window must shrink the card too, or its buttons fall off the
         // bottom while the body keeps the old height. Deferred: querying the card
         // size hint inside the resize event re-entered the layout synchronously.
-        if (!clampPending_) {
-            clampPending_ = true;
+        if (!fitPending_) {
+            fitPending_ = true;
             QTimer::singleShot(0, this, [this] {
-                clampPending_ = false;
-                clampCardHeight();
+                fitPending_ = false;
+                fitCard();
             });
         }
         raise();
