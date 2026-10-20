@@ -89,6 +89,35 @@ QIcon lucideSolid(const QString& name, const QColor& color) {
     return icon;
 }
 
+void withText(QAbstractButton* button, const QString& name, const int size) {
+    if (button == nullptr) {
+        return;
+    }
+    button->setIconSize(QSize(size, size));
+    const auto repaint = [button, name, size](const QPalette& palette) {
+        // A primary button sits on the accent fill, so its glyph has to be the
+        // highlighted text colour: ButtonText on blue is barely legible.
+        const QColor ink = button->property("primary").toBool()
+            ? palette.color(QPalette::HighlightedText)
+            : palette.color(QPalette::ButtonText);
+        QIcon icon;
+        for (const int step : kSizes) {
+            QPixmap pixmap = tinted(step, ink, name);
+            if (pixmap.isNull()) {
+                continue;
+            }
+            if (step > size) {
+                pixmap = pixmap.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            }
+            icon.addPixmap(pixmap, QIcon::Normal);
+            icon.addPixmap(tinted(step, disabledColor(palette), name), QIcon::Disabled);
+        }
+        button->setIcon(icon);
+    };
+    repaint(QApplication::palette());
+    QObject::connect(qApp, &QApplication::paletteChanged, button, repaint);
+}
+
 void apply(QAbstractButton* button, const QString& name, const Tone tone) {
     if (button == nullptr) {
         return;

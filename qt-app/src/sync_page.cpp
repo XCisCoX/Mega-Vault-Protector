@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/sync_page.hpp"
 
 #include "videovault/app/sync_engine.hpp"
@@ -168,6 +169,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     barLayout->setSpacing(10);
 
     back_ = new QPushButton(QStringLiteral("Back"), bar);
+    icons::withText(back_, QStringLiteral("arrow-left"));
     back_->setObjectName(QStringLiteral("syncBack"));
     back_->setCursor(Qt::PointingHandCursor);
     back_->setFocusPolicy(Qt::NoFocus);
@@ -182,6 +184,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     account_->setObjectName(QStringLiteral("syncAccount"));
     account_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     signOutButton_ = new QPushButton(QStringLiteral("Sign out"), bar);
+    icons::withText(signOutButton_, QStringLiteral("log-out"));
     signOutButton_->setObjectName(QStringLiteral("syncSignOut"));
     signOutButton_->setCursor(Qt::PointingHandCursor);
     signOutButton_->setFocusPolicy(Qt::NoFocus);
@@ -280,6 +283,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     password_->setMinimumHeight(38);
 
     signInButton_ = new QPushButton(QStringLiteral("Sign in"), signInCard_);
+    icons::withText(signInButton_, QStringLiteral("log-in"));
     signInButton_->setObjectName(QStringLiteral("syncSignIn"));
     signInButton_->setCursor(Qt::PointingHandCursor);
     signInButton_->setAutoDefault(false);
@@ -329,6 +333,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     workLayout->addWidget(vaultBox_);
 
     chooseFolder_ = new QPushButton(QStringLiteral("Choose folder"), work_);
+    icons::withText(chooseFolder_, QStringLiteral("folder-open"));
     chooseFolder_->setObjectName(QStringLiteral("syncChooseFolder"));
     chooseFolder_->setCursor(Qt::PointingHandCursor);
     chooseFolder_->setMinimumHeight(44);
@@ -342,6 +347,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     workLayout->addWidget(chooseFolder_);
 
     run_ = new QPushButton(QStringLiteral("Sync now"), work_);
+    icons::withText(run_, QStringLiteral("refresh-cw"));
     run_->setObjectName(QStringLiteral("syncRun"));
     run_->setCursor(Qt::PointingHandCursor);
     run_->setMinimumHeight(40);
@@ -379,6 +385,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     progressText_ = quietLabel(progressRow_);
     progressText_->setObjectName(QStringLiteral("syncProgressText"));
     stop_ = new QPushButton(QStringLiteral("Stop"), progressRow_);
+    icons::withText(stop_, QStringLiteral("square"));
     stop_->setObjectName(QStringLiteral("syncStop"));
     stop_->setCursor(Qt::PointingHandCursor);
     stop_->setFocusPolicy(Qt::NoFocus);
@@ -878,11 +885,13 @@ QWidget* SyncPage::debrisRow(const QJsonObject& item) {
 
     if (confirming) {
         auto* cancel = new QPushButton(QStringLiteral("Cancel"), parts.row);
+        icons::withText(cancel, QStringLiteral("x"));
         cancel->setObjectName(QStringLiteral("syncDebrisCancel"));
         cancel->setCursor(Qt::PointingHandCursor);
         cancel->setFocusPolicy(Qt::NoFocus);
         cancel->setStyleSheet(actionStyle);
         auto* remove = new QPushButton(QStringLiteral("Delete"), parts.row);
+        icons::withText(remove, QStringLiteral("trash"));
         remove->setObjectName(QStringLiteral("syncDebrisConfirm"));
         remove->setCursor(Qt::PointingHandCursor);
         remove->setFocusPolicy(Qt::NoFocus);
@@ -900,11 +909,13 @@ QWidget* SyncPage::debrisRow(const QJsonObject& item) {
         });
     } else {
         auto* restore = new QPushButton(QStringLiteral("Restore"), parts.row);
+        icons::withText(restore, QStringLiteral("rotate-ccw"));
         restore->setObjectName(QStringLiteral("syncRestore"));
         restore->setCursor(Qt::PointingHandCursor);
         restore->setFocusPolicy(Qt::NoFocus);
         restore->setStyleSheet(actionStyle);
         auto* purge = new QPushButton(QStringLiteral("Delete permanently"), parts.row);
+        icons::withText(purge, QStringLiteral("trash"));
         purge->setObjectName(QStringLiteral("syncPurge"));
         purge->setCursor(Qt::PointingHandCursor);
         purge->setFocusPolicy(Qt::NoFocus);

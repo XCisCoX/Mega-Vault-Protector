@@ -41,6 +41,10 @@
         <file alias="chevrons-up-down-20.png">icons/lucide/chevrons-up-down-20.png</file>
         <file alias="chevrons-up-down-32.png">icons/lucide/chevrons-up-down-32.png</file>
         <file alias="chevrons-up-down-64.png">icons/lucide/chevrons-up-down-64.png</file>
+        <file alias="clock-16.png">icons/lucide/clock-16.png</file>
+        <file alias="clock-20.png">icons/lucide/clock-20.png</file>
+        <file alias="clock-32.png">icons/lucide/clock-32.png</file>
+        <file alias="clock-64.png">icons/lucide/clock-64.png</file>
         <file alias="copy-16.png">icons/lucide/copy-16.png</file>
         <file alias="copy-20.png">icons/lucide/copy-20.png</file>
         <file alias="copy-32.png">icons/lucide/copy-32.png</file>
@@ -69,6 +73,10 @@
         <file alias="folder-open-20.png">icons/lucide/folder-open-20.png</file>
         <file alias="folder-open-32.png">icons/lucide/folder-open-32.png</file>
         <file alias="folder-open-64.png">icons/lucide/folder-open-64.png</file>
+        <file alias="folder-plus-16.png">icons/lucide/folder-plus-16.png</file>
+        <file alias="folder-plus-20.png">icons/lucide/folder-plus-20.png</file>
+        <file alias="folder-plus-32.png">icons/lucide/folder-plus-32.png</file>
+        <file alias="folder-plus-64.png">icons/lucide/folder-plus-64.png</file>
         <file alias="layout-grid-16.png">icons/lucide/layout-grid-16.png</file>
         <file alias="layout-grid-20.png">icons/lucide/layout-grid-20.png</file>
         <file alias="layout-grid-32.png">icons/lucide/layout-grid-32.png</file>
@@ -81,6 +89,10 @@
         <file alias="lock-20.png">icons/lucide/lock-20.png</file>
         <file alias="lock-32.png">icons/lucide/lock-32.png</file>
         <file alias="lock-64.png">icons/lucide/lock-64.png</file>
+        <file alias="lock-open-16.png">icons/lucide/lock-open-16.png</file>
+        <file alias="lock-open-20.png">icons/lucide/lock-open-20.png</file>
+        <file alias="lock-open-32.png">icons/lucide/lock-open-32.png</file>
+        <file alias="lock-open-64.png">icons/lucide/lock-open-64.png</file>
         <file alias="log-in-16.png">icons/lucide/log-in-16.png</file>
         <file alias="log-in-20.png">icons/lucide/log-in-20.png</file>
         <file alias="log-in-32.png">icons/lucide/log-in-32.png</file>
@@ -133,6 +145,10 @@
         <file alias="smartphone-20.png">icons/lucide/smartphone-20.png</file>
         <file alias="smartphone-32.png">icons/lucide/smartphone-32.png</file>
         <file alias="smartphone-64.png">icons/lucide/smartphone-64.png</file>
+        <file alias="square-16.png">icons/lucide/square-16.png</file>
+        <file alias="square-20.png">icons/lucide/square-20.png</file>
+        <file alias="square-32.png">icons/lucide/square-32.png</file>
+        <file alias="square-64.png">icons/lucide/square-64.png</file>
         <file alias="square-pen-16.png">icons/lucide/square-pen-16.png</file>
         <file alias="square-pen-20.png">icons/lucide/square-pen-20.png</file>
         <file alias="square-pen-32.png">icons/lucide/square-pen-32.png</file>
@@ -149,6 +165,10 @@
         <file alias="unplug-20.png">icons/lucide/unplug-20.png</file>
         <file alias="unplug-32.png">icons/lucide/unplug-32.png</file>
         <file alias="unplug-64.png">icons/lucide/unplug-64.png</file>
+        <file alias="users-16.png">icons/lucide/users-16.png</file>
+        <file alias="users-20.png">icons/lucide/users-20.png</file>
+        <file alias="users-32.png">icons/lucide/users-32.png</file>
+        <file alias="users-64.png">icons/lucide/users-64.png</file>
         <file alias="wifi-16.png">icons/lucide/wifi-16.png</file>
         <file alias="wifi-20.png">icons/lucide/wifi-20.png</file>
         <file alias="wifi-32.png">icons/lucide/wifi-32.png</file>

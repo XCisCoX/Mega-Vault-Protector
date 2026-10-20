@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
 
@@ -122,6 +123,7 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
 
     auto* heading = new QHBoxLayout();
     auto* back = new QPushButton(QStringLiteral("Back"), this);
+    icons::withText(back, QStringLiteral("arrow-left"));
     back->setCursor(Qt::PointingHandCursor);
     auto* title = new QLabel(QStringLiteral("%1 · shared with you").arg(phone_), this);
     QFont titleFont(QStringLiteral("Segoe UI"));
@@ -139,7 +141,9 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
     crumbLayout_->setSpacing(2);
     top->addWidget(crumbHost_, 1);
     refresh_ = new QPushButton(QStringLiteral("Refresh"), this);
+    icons::withText(refresh_, QStringLiteral("refresh-cw"));
     unlink_ = new QPushButton(QStringLiteral("Disconnect phone"), this);
+    icons::withText(unlink_, QStringLiteral("unplug"));
     unlink_->setObjectName(QStringLiteral("peerUnlink"));
     top->addWidget(refresh_);
     top->addWidget(unlink_);

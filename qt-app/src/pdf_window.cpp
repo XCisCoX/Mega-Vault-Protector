@@ -1,4 +1,5 @@
 #include "videovault/app/in_window_sheet.hpp"
+#include "videovault/app/icons.hpp"
 #include "videovault/app/pdf_window.hpp"
 
 #include "videovault/core/vault.hpp"
@@ -452,6 +453,34 @@ PdfWindow::PdfWindow(QWidget* parent)
     fit->setProperty("quiet", true);
     impl_->previous->setProperty("quiet", true);
     impl_->next->setProperty("quiet", true);
+
+    // The viewer is a dark surface, so these glyphs are light in both themes.
+    struct ViewerControl {
+        QPushButton* button;
+        const char* icon;
+        const char* tooltip;
+        bool glyphOnly;
+    };
+    for (const auto& control : {
+             ViewerControl{back, "arrow-left", "Back to the library", false},
+             ViewerControl{impl_->pop, "external-link", "Open in a window you can move and resize", false},
+             ViewerControl{zoomOut, "minus", "Zoom out", true},
+             ViewerControl{zoomIn, "plus", "Zoom in", true},
+             ViewerControl{fit, "scan", "Fit width. Ctrl and the mouse wheel also zoom.", true},
+             ViewerControl{impl_->previous, "chevron-left", "Previous page", true},
+             ViewerControl{impl_->next, "chevron-right", "Next page", true}}) {
+        auto* button = control.button;
+        button->setToolTip(QString::fromLatin1(control.tooltip));
+        button->setAccessibleName(QString::fromLatin1(control.tooltip));
+        button->setIconSize(QSize(16, 16));
+        button->setIcon(icons::lucideSolid(QString::fromLatin1(control.icon),
+            QColor(0xd1, 0xd1, 0xd6)));
+        if (control.glyphOnly) {
+            button->setText(QString());
+            button->setStyleSheet(QStringLiteral(
+                "QPushButton { padding: 0px; min-width: 32px; min-height: 28px; }"));
+        }
+    }
     footerLayout->addWidget(zoomOut);
     footerLayout->addWidget(impl_->zoomLabel);
     footerLayout->addWidget(zoomIn);
