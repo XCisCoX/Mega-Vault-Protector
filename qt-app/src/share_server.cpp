@@ -1219,9 +1219,9 @@ void ShareServer::showDialog(QWidget* parent) {
         "  background: #1c1c1e; color: white; border: none; border-radius: 12px;"
         "  min-height: 36px; padding: 0 12px; }"
         "QFrame#shareSheet QComboBox QAbstractItemView {"
-        "  background: #1c1c1e; color: white; selection-background-color: #3390ec; }"
-        "QPushButton#shareDone { background: transparent; border: none; color: #3390ec; min-height: 32px; }"
-        "QPushButton#shareCopy { background: transparent; border: none; color: #3390ec; min-height: 32px; padding: 0 4px; }"
+        "  background: #1c1c1e; color: white; selection-background-color: #2672c8; }"
+        "QPushButton#shareDone { background: transparent; border: none; color: #2672c8; min-height: 32px; }"
+        "QPushButton#shareCopy { background: transparent; border: none; color: #2672c8; min-height: 32px; padding: 0 4px; }"
         "QPushButton#shareStop { background: #2c1518; border: none; color: #ff6b6b; border-radius: 14px; min-height: 40px; }"));
     auto* layout = new QVBoxLayout(sheet);
     layout->setContentsMargins(22, 16, 22, 18);

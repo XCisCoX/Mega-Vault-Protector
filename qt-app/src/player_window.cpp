@@ -495,7 +495,7 @@ PlayerWindow::PlayerWindow(
     centerPlayButton_->setStyleSheet(QStringLiteral(
         "QPushButton { border-radius: 36px; background: rgba(0,0,0,90);"
         " border: 1px solid rgba(255,255,255,70); }"
-        "QPushButton:hover { background: rgba(51,144,236,200); }"));
+        "QPushButton:hover { background: rgba(38,114,200,200); }"));
     connect(centerPlayButton_, &QPushButton::clicked, this, [this] {
         togglePlayPause();
     });

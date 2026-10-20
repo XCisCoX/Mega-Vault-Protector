@@ -33,10 +33,10 @@ inline QPalette darkPalette() {
     palette.setColor(QPalette::Base, QColor(20, 20, 22));
     palette.setColor(QPalette::AlternateBase, QColor(16, 16, 18));
     palette.setColor(QPalette::Text, QColor(242, 242, 247));
-    palette.setColor(QPalette::PlaceholderText, QColor(109, 109, 114));
+    palette.setColor(QPalette::PlaceholderText, QColor(142, 142, 147));
     palette.setColor(QPalette::Button, QColor(28, 28, 30));
     palette.setColor(QPalette::ButtonText, QColor(255, 255, 255));
-    palette.setColor(QPalette::Highlight, QColor(51, 144, 236));
+    palette.setColor(QPalette::Highlight, QColor(38, 114, 200));
     palette.setColor(QPalette::HighlightedText, Qt::white);
     // Explicit mid tones: Qt otherwise derives them from a light system
     // palette, which painted near-white hairlines around dark cards.
@@ -82,9 +82,9 @@ inline QString appStyleSheet() {
             border: 1px solid rgba(255, 255, 255, 28);
             border-radius: 14px;
             padding: 0 12px;
-            selection-background-color: #3390ec;
+            selection-background-color: #2672c8;
         }
-        QLineEdit:focus, QComboBox:focus { border: 1px solid #3390ec; }
+        QLineEdit:focus, QComboBox:focus { border: 1px solid #2672c8; }
         /* The native drop-down is a square block with its own frame, which
            reads as a foreign control inside the rounded fields. Draw only a
            chevron and keep the whole field on one surface. */
@@ -106,7 +106,7 @@ inline QString appStyleSheet() {
             background: #1c1c1e;
             color: #ffffff;
             border: 1px solid rgba(255, 255, 255, 36);
-            selection-background-color: #3390ec;
+            selection-background-color: #2672c8;
         }
         QMenu {
             background-color: #1c1c1e;
@@ -122,7 +122,7 @@ inline QString appStyleSheet() {
             margin: 2px 4px;
             border-radius: 8px;
         }
-        QMenu::item:selected { background: rgba(51, 144, 236, 90); }
+        QMenu::item:selected { background: rgba(38, 114, 200, 90); }
         QMenu::separator {
             height: 1px;
             background: rgba(255, 255, 255, 28);
@@ -140,11 +140,11 @@ inline QString appStyleSheet() {
         QPushButton:disabled { color: #636366; background: #1c1c1e; }
         QPushButton[primary="true"] {
             color: white;
-            background: #3390ec;
-            border-color: #3390ec;
+            background: #2672c8;
+            border-color: #2672c8;
             font-weight: 600;
         }
-        QPushButton[primary="true"]:hover { background: #4ba0f5; }
+        QPushButton[primary="true"]:hover { background: #2168b8; }
         /* A disabled primary action must not still look clickable. The record
            editor's Save button is the first primary button that gets disabled
            (while nothing is unsaved), and without this rule the plain
@@ -176,7 +176,7 @@ inline QString appStyleSheet() {
             max-height: 8px;
             min-height: 8px;
         }
-        QProgressBar::chunk { background: #3390ec; border-radius: 4px; }
+        QProgressBar::chunk { background: #2672c8; border-radius: 4px; }
         QToolTip {
             color: #ffffff;
             background: #2c2c2e;
@@ -202,7 +202,7 @@ inline QString appStyleSheet() {
             color: #ffffff;
         }
         QListWidget#tagList::item { border: none; }
-        QListWidget#tagList::item:selected { background: rgba(51, 144, 236, 70); }
+        QListWidget#tagList::item:selected { background: rgba(38, 114, 200, 70); }
         QTreeWidget#gallery, QListWidget#gallery {
             background: #000000;
             alternate-background-color: #101012;
@@ -215,7 +215,7 @@ inline QString appStyleSheet() {
             padding: 4px;
         }
         QTreeWidget#gallery::item:selected, QListWidget#gallery::item:selected {
-            background: rgba(51, 144, 236, 90);
+            background: rgba(38, 114, 200, 90);
             color: #ffffff;
         }
         QTreeWidget#gallery::item:hover, QListWidget#gallery::item:hover {
@@ -236,7 +236,7 @@ inline QString appStyleSheet() {
             border-radius: 2px;
         }
         QSlider::sub-page:horizontal {
-            background: #3390ec;
+            background: #2672c8;
             border-radius: 2px;
         }
         QSlider::handle:horizontal {
@@ -245,7 +245,7 @@ inline QString appStyleSheet() {
             margin: -5px 0;
             border-radius: 7px;
             background: #ffffff;
-            border: 1px solid #3390ec;
+            border: 1px solid #2672c8;
         }
         QSlider::handle:horizontal:hover { background: #e8f3ff; }
         QScrollBar:vertical { background: transparent; width: 12px; }

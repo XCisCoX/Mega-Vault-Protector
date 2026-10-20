@@ -473,8 +473,8 @@ void RecordWindow::applyStyle() {
             color: %1; background: %4; border: 1px solid %5;
             min-height: 30px; border-radius: 10px; padding: 0 10px;
         }
-        QLineEdit#recordSearch:focus { border: 1px solid #3390ec; }
-        QPushButton[quiet="true"]:focus { border: 1px solid #3390ec; border-radius: 7px; }
+        QLineEdit#recordSearch:focus { border: 1px solid #2672c8; }
+        QPushButton[quiet="true"]:focus { border: 1px solid #2672c8; border-radius: 7px; }
         QFrame#recordLegacyBar { background: %8; border: 1px solid %5; border-radius: 14px; }
         QLabel#recordLegacyLabel { color: %2; font-size: 13px; }
 
