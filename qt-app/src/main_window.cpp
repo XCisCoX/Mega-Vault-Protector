@@ -1367,7 +1367,7 @@ void placeCard(QWidget* page, QFrame* card) {
     // The scroll area's own size hint is small, which let the window shrink to
     // below the card once the auth page was shown. Hold the window at the card's
     // size, as the plain centred layout used to.
-    page->setMinimumSize(card->sizeHint().grownBy(QMargins(96, 96, 96, 96)));
+    page->setMinimumSize(card->sizeHint() + QSize(192, 192));
 }
 
 core::Argon2Parameters selectedParameters(const int profile) {
