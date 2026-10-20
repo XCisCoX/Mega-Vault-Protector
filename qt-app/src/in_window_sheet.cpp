@@ -118,12 +118,26 @@ QPushButton* InWindowSheet::addButton(const QString& label, const int result, co
             // in both themes rather than following ButtonText.
             button->setIcon(icons::lucideSolid(icon, QColor(0xff, 0xff, 0xff)));
         } else {
-            icons::apply(button, icon, icons::Tone::Quiet);
+            // The sheet paints a dark card in both themes, so a palette-tinted icon
+            // would go invisible in the light theme.
+            button->setIcon(icons::lucideSolid(icon, QColor(0xf2, 0xf2, 0xf7)));
         }
     }
     buttons_->addWidget(button);
     connect(button, &QPushButton::clicked, this, [this, result] { finish(result); });
     return button;
+}
+
+void InWindowSheet::fitCard() {
+    if (card_ == nullptr || card_->layout() == nullptr) {
+        return;
+    }
+    QLayout* layout = card_->layout();
+    layout->activate();
+    const int width = card_->width() > 0 ? card_->width() : 420;
+    const int height = layout->hasHeightForWidth() ? layout->heightForWidth(width)
+                                                   : layout->sizeHint().height();
+    card_->setFixedHeight(qMax(height, layout->minimumSize().height()));
 }
 
 int InWindowSheet::run() {
@@ -133,8 +147,11 @@ int InWindowSheet::run() {
     }
     setGeometry(host->rect());
     host->installEventFilter(this);
+    fitCard();
     show();
     raise();
+    // Showing polishes the layout; fit once more so the card is not a line short.
+    fitCard();
     if (entry_ != nullptr) {
         entry_->setFocus();
         entry_->selectAll();
