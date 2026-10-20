@@ -2560,6 +2560,11 @@ QWidget* MainWindow::buildUnlockedPage() {
 
     crumbHost_ = new QWidget(toolbar);
     crumbHost_->setStyleSheet(QStringLiteral("background: transparent;"));
+    // The bar's height is computed from this row's size hint (layoutLibraryChrome). A
+    // rebuild empties the row while it recreates the crumbs, and a hint measured in that
+    // window came back degenerate: the bar was then resized below its children's minimums
+    // and the path bar was clipped. The floor keeps the row's contribution stable.
+    crumbHost_->setMinimumHeight(40);
     crumbLayout_ = new QHBoxLayout(crumbHost_);
     crumbLayout_->setContentsMargins(0, 0, 0, 0);
     crumbLayout_->setSpacing(2);
@@ -5604,15 +5609,15 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
         for (auto* button : buttons) {
             const bool hit = on && button->property("mvpDropFolder").isValid()
                 && button->property("mvpDropFolder").toLongLong() == folder_id;
-            const bool current = button->property("mvpDropFolder").toLongLong() == currentFolderId_;
-            button->setStyleSheet(hit
-                // Same padding as the resting state: the highlight must not change the
-                // bar's geometry, or a drag can leave the path bar resized.
-                ? QStringLiteral("QPushButton { color: white; background: rgba(38, 114, 200, 150);"
-                    " border: none; border-radius: 8px; padding: 2px 4px; }")
-                : (current
-                    ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
-                    : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }")));
+            if (button->property("dropTarget").toBool() == hit) {
+                continue;
+            }
+            // Property plus repolish: the stylesheet is never replaced mid-drag, so the
+            // crumb keeps the height the path bar's row was laid out with.
+            button->setProperty("dropTarget", hit);
+            button->style()->unpolish(button);
+            button->style()->polish(button);
+            button->update();
         }
     }
 }
@@ -6224,6 +6229,18 @@ void MainWindow::openFolder(const std::int64_t folder_id) {
     refreshGallery();
 }
 
+namespace {
+// The path bar's crumbs share one stylesheet; the states are properties so that a drag
+// highlight cannot rewrite it. min-height is explicit because a widget stylesheet that
+// replaced this one used to drop the application's height rule, collapsing the row.
+const QString kCrumbStyle = QStringLiteral(
+    "QPushButton { color: #8ec8ff; background: transparent; border: none;"
+    " padding: 2px 4px; min-height: 36px; }"
+    "QPushButton[crumbCurrent=\"true\"] { color: white; }"
+    "QPushButton[dropTarget=\"true\"] { color: white;"
+    " background: rgba(38, 114, 200, 150); border-radius: 8px; }");
+} // namespace
+
 void MainWindow::rebuildBreadcrumb() {
     if (crumbLayout_ == nullptr) {
         return;
@@ -6238,10 +6255,14 @@ void MainWindow::rebuildBreadcrumb() {
         button->setCursor(Qt::PointingHandCursor);
         button->setAcceptDrops(true);
         button->setProperty("mvpDropFolder", static_cast<qlonglong>(id));
+        button->setProperty("crumbCurrent", current);
+        button->setProperty("dropTarget", false);
         button->installEventFilter(this);
-        button->setStyleSheet(current
-            ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
-            : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }"));
+        // One stylesheet for every crumb, switched by properties rather than replaced by
+        // setStyleSheet(). Replacing the stylesheet of a live button changes its size hint:
+        // the header then shrinks and clips the path bar. The explicit min-height keeps the
+        // row's height independent of whether an application-level rule survives a restyle.
+        button->setStyleSheet(kCrumbStyle);
         connect(button, &QPushButton::clicked, this, [this, id] { openFolder(id); });
         crumbLayout_->addWidget(button);
     };
@@ -6270,6 +6291,8 @@ void MainWindow::rebuildBreadcrumb() {
             chain[static_cast<std::size_t>(index)].first, index == 0);
     }
     crumbLayout_->addStretch(1);
+    // The bar's geometry was computed from a hint taken before these crumbs existed.
+    layoutLibraryChrome();
 }
 
 void MainWindow::beginNewFolder() {

@@ -13,6 +13,7 @@
 // a glyph, and which ones are still text-only.
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/pdf_window.hpp"
+#include "videovault/core/vault.hpp"
 #include "videovault/app/theme.hpp"
 
 #include <QApplication>
@@ -20,7 +21,9 @@
 #include <QEventLoop>
 #include <QFont>
 #include <QPushButton>
+#include <QLineEdit>
 #include <QSettings>
+#include <QStyle>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -110,6 +113,129 @@ int main(int argc, char** argv) {
     }
     pump(600);
     capture(window, QStringLiteral("login"));
+
+    // --- the library, with a vault created on the spot -----------------------
+    const auto vaultRoot = std::filesystem::path(settingsDir.path().toStdString()) / "vault";
+    if (auto created = videovault::core::Vault::create(vaultRoot, "local", {8192, 1, 1})) {
+        {
+            auto vault = std::make_shared<videovault::core::Vault>(std::move(created.value()));
+            const std::vector<unsigned char> note{'n', 'o', 't', 'e'};
+            vault->import_bytes(note, "note.txt");
+        }
+        for (auto* edit : window.findChildren<QLineEdit*>()) {
+            if (edit->placeholderText().contains(QStringLiteral("Vault storage"))) {
+                edit->setText(QDir::toNativeSeparators(QString::fromStdString(vaultRoot.string())));
+            } else if (edit->echoMode() == QLineEdit::Password) {
+                edit->setText(QStringLiteral("local"));
+            }
+        }
+        for (auto* button : window.findChildren<QPushButton*>()) {
+            if (button->isVisible() && button->text().contains(QStringLiteral("Unlock vault"))) {
+                button->click();
+                break;
+            }
+        }
+        pump(2500);
+        capture(window, QStringLiteral("library"));
+
+        // The path bar is the reported bug: a drag highlight used to resize the row.
+        QWidget* host = nullptr;
+        QList<QPushButton*> crumbs;
+        for (auto* button : window.findChildren<QPushButton*>()) {
+            if (button->property("mvpDropFolder").isValid()) {
+                crumbs.append(button);
+                host = button->parentWidget();
+            }
+        }
+        if (host != nullptr && !crumbs.isEmpty()) {
+            QPushButton* crumb = crumbs.first();
+            const int hostBefore = host->height();
+            const int crumbBefore = crumb->height();
+            crumb->setProperty("dropTarget", true);
+            crumb->style()->unpolish(crumb);
+            crumb->style()->polish(crumb);
+            pump(300);
+            const int hostDuring = host->height();
+            const int crumbDuring = crumb->height();
+            capture(window, QStringLiteral("library-highlight"));
+            crumb->setProperty("dropTarget", false);
+            crumb->style()->unpolish(crumb);
+            crumb->style()->polish(crumb);
+            pump(300);
+            std::printf("path bar: host %d -> %d -> %d | crumb %d -> %d -> %d | crumbs %d\n",
+                hostBefore, hostDuring, host->height(), crumbBefore, crumbDuring, crumb->height(),
+                int(crumbs.size()));
+            std::printf("  highlight invariant %s\n",
+                (hostBefore == hostDuring && hostDuring == host->height()
+                    && crumbBefore == crumbDuring && crumbDuring == crumb->height())
+                    ? "HOLDS (highlight does not resize the row)" : "BROKEN");
+
+            // A rebuild empties the row while it recreates the crumbs; the bar used to be
+            // sized from a hint taken in that window and then clipped. Clicking the
+            // current crumb forces a full rebuild, then the bar must be unchanged.
+            QWidget* bar = host->parentWidget();
+            while (bar != nullptr && bar->parentWidget() != window.findChild<QWidget*>()
+                   && bar->parentWidget() != nullptr && !bar->isWindow()) {
+                if (bar->height() > host->height() + 8) {
+                    break;
+                }
+                bar = bar->parentWidget();
+            }
+            const int barBefore = bar != nullptr ? bar->height() : -1;
+            const int hostFloor = host->minimumHeight();
+            crumb->click();
+            pump(900);
+            QWidget* hostAfter = nullptr;
+            for (auto* button : window.findChildren<QPushButton*>()) {
+                if (button->property("mvpDropFolder").isValid()) {
+                    hostAfter = button->parentWidget();
+                    break;
+                }
+            }
+            const int barAfter = bar != nullptr ? bar->height() : -1;
+            std::printf("path bar: bar %d -> %d after a rebuild | row floor %d | row %d\n",
+                barBefore, barAfter, hostFloor, hostAfter != nullptr ? hostAfter->height() : -1);
+            std::printf("  rebuild invariant %s\n",
+                (barBefore == barAfter && hostFloor >= 40) ? "HOLDS (bar does not shrink on rebuild)"
+                                                           : "BROKEN");
+            capture(window, QStringLiteral("library-after-rebuild"));
+
+            // Regression check for the reported bug: force the bar short the way the bug
+            // did (a degenerate row hint measured mid-rebuild), then let a rebuild run.
+            // The rebuild has to restore the bar without the user resizing the window.
+            for (auto* button : window.findChildren<QPushButton*>()) {
+                if (button->property("mvpDropFolder").isValid()) {
+                    button->setVisible(false);
+                }
+            }
+            host->setMinimumHeight(0);
+            window.resize(window.width() + 1, window.height());
+            pump(400);
+            const int shrunk = bar->height();
+            for (auto* button : window.findChildren<QPushButton*>()) {
+                if (button->property("mvpDropFolder").isValid()) {
+                    button->setVisible(true);
+                }
+            }
+            host->setMinimumHeight(hostFloor);
+            bool rebuilt = false;
+            for (auto* button : window.findChildren<QPushButton*>()) {
+                if (button->property("mvpDropFolder").isValid() && button->isVisible()) {
+                    button->click();
+                    rebuilt = true;
+                    break;
+                }
+            }
+            pump(900);
+            std::printf("path bar: forced short to %d, after a rebuild %d (full height %d)\n",
+                shrunk, bar->height(), barBefore);
+            std::printf("  recovery invariant %s\n",
+                (rebuilt && shrunk < barBefore && bar->height() == barBefore)
+                    ? "HOLDS (a rebuild restores the bar)" : "BROKEN");
+        } else {
+            std::printf("path bar: no crumbs found (login did not reach the library)\n");
+        }
+    }
 
     // The PDF viewer builds its header and footer controls in its constructor, so its
     // buttons can be reviewed without a document loaded.
