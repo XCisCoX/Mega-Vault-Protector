@@ -11,6 +11,8 @@
 #include <QGraphicsScene>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QTimer>
+#include <QScopedValueRollback>
 #include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -131,16 +133,20 @@ void InWindowSheet::paintEvent(QPaintEvent* event) {
 
 void InWindowSheet::clampCardHeight() {
     QWidget* host = parentWidget();
-    if (host == nullptr || card_ == nullptr) {
+    if (host == nullptr || card_ == nullptr || clamping_) {
         return;
     }
-    if (layout() != nullptr) {
-        layout()->activate();
-    }
-    scroll_->setMaximumHeight(QWIDGETSIZE_MAX);
+    const QScopedValueRollback<bool> guard(clamping_, true);
     const int needed = card_->sizeHint().height();
     const int room = std::max(220, host->height() - 48);
-    card_->setFixedHeight(std::min(needed, room));
+    if (needed <= room) {
+        // The card fits: leave it to size itself. Pinning it here re-ran the
+        // layout on every resize, which is what hung the offscreen platform.
+        return;
+    }
+    if (card_->height() != room) {
+        card_->setFixedHeight(room);
+    }
 }
 
 void InWindowSheet::captureBackdrop() {
@@ -282,8 +288,15 @@ bool InWindowSheet::eventFilter(QObject* watched, QEvent* event) {
     if (watched == parentWidget() && event->type() == QEvent::Resize && parentWidget() != nullptr) {
         setGeometry(parentWidget()->rect());
         // A shorter window must shrink the card too, or its buttons fall off the
-        // bottom while the body keeps the old height.
-        clampCardHeight();
+        // bottom while the body keeps the old height. Deferred: querying the card
+        // size hint inside the resize event re-entered the layout synchronously.
+        if (!clampPending_) {
+            clampPending_ = true;
+            QTimer::singleShot(0, this, [this] {
+                clampPending_ = false;
+                clampCardHeight();
+            });
+        }
         raise();
     }
     return QWidget::eventFilter(watched, event);

@@ -52,6 +52,8 @@ protected:
 private:
     void captureBackdrop();
     void clampCardHeight();
+    bool clamping_{false};
+    bool clampPending_{false};
     static std::function<void(InWindowSheet*)> testDriver_;
     QFrame* card_{nullptr};
     QLabel* title_{nullptr};

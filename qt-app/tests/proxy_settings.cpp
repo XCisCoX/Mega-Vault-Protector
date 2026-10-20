@@ -10,6 +10,7 @@
 #include <QSslCertificate>
 #include <QFile>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -27,17 +28,39 @@ int main(int argc, char** argv) {
         check(!validateProxySettings(settings).isEmpty(), "control characters in proxy server must be rejected");
         settings.entries[0].server = "127.0.0.1";
         QString error;
-        check(saveProxySettings(settings, &error), error.toUtf8().constData());
-        auto loaded = loadProxySettings(&error);
-        check(error.isEmpty() && loaded.entries.size() == 1 && loaded.entries[0].password == "fixture-password", "protected proxy roundtrip");
-        QFile file(QSettings().fileName()); check(file.open(QIODevice::ReadOnly), "settings file");
-        const auto disk = file.readAll();
-        check(!disk.contains("fixture-password") && !disk.contains("fixture-user"), "credentials must not be plaintext in preferences");
-        check(!disk.contains(QByteArray("fixture-password").toBase64()), "credentials must not merely be base64 encoded");
-        file.close();
-        auto invalid = settings; invalid.entries[0].port = 65536;
-        check(!saveProxySettings(invalid, &error), "invalid port rejected without replacing settings");
-        check(loadProxySettings().entries[0].port == 1080, "invalid save leaves protected settings intact");
+        // Sealing needs an OS store: DPAPI on Windows, the keychain on macOS and
+        // secret-tool on Linux. A headless runner has no keyring, and then the
+        // correct behaviour is to refuse the save rather than write plaintext.
+        const bool sealedStore =
+#ifdef Q_OS_WIN
+            true;
+#elif defined(Q_OS_MACOS)
+            true;
+#else
+            !QStandardPaths::findExecutable(QStringLiteral("secret-tool")).isEmpty();
+#endif
+        if (sealedStore) {
+            check(saveProxySettings(settings, &error), error.toUtf8().constData());
+            auto loaded = loadProxySettings(&error);
+            check(error.isEmpty() && loaded.entries.size() == 1 && loaded.entries[0].password == "fixture-password", "protected proxy roundtrip");
+            QFile file(QSettings().fileName()); check(file.open(QIODevice::ReadOnly), "settings file");
+            const auto disk = file.readAll();
+            check(!disk.contains("fixture-password") && !disk.contains("fixture-user"), "credentials must not be plaintext in preferences");
+            check(!disk.contains(QByteArray("fixture-password").toBase64()), "credentials must not merely be base64 encoded");
+            file.close();
+            auto invalid = settings; invalid.entries[0].port = 65536;
+            check(!saveProxySettings(invalid, &error), "invalid port rejected without replacing settings");
+            check(loadProxySettings().entries[0].port == 1080, "invalid save leaves protected settings intact");
+        } else {
+            QString saveError;
+            check(!saveProxySettings(settings, &saveError) && !saveError.isEmpty(),
+                "without an OS keyring saving must fail instead of storing plaintext");
+            QFile file(QSettings().fileName());
+            if (file.open(QIODevice::ReadOnly)) {
+                check(!file.readAll().contains("fixture-password"),
+                    "no plaintext credentials may be written when sealing is unavailable");
+            }
+        }
         QSettings().setValue("network/proxyStore", QByteArray("corrupt"));
         initializeProxySettings(); check(proxyEnabled(), "damaged credential store must fail closed, not direct");
         settings.enabled = false; applyProxySettings(settings);
