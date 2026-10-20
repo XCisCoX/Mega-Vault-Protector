@@ -81,6 +81,21 @@ class SyncV4Engine(
         }
 
         if (current == null) {
+            // Taken off this phone on purpose: keep the record known, but do not
+            // pull its bytes back down until the user asks for it.
+            if (link.remoteOnly.contains(record.id)) {
+                mappings.add(
+                    SyncV4Mapping(
+                        recordId = record.id,
+                        localId = 0L,
+                        path = record.path,
+                        signature = "",
+                        version = record.version,
+                        packageName = record.packageName,
+                    ),
+                )
+                return false
+            }
             val localId = materialise(record, onStep)
             mappings.add(
                 SyncV4Mapping(
@@ -99,6 +114,14 @@ class SyncV4Engine(
 
         var localId = current.localId
         if (record.packageName != null && record.packageName != current.packageName) {
+            if (link.remoteOnly.contains(record.id)) {
+                mappings[index] = current.copy(
+                    path = record.path,
+                    version = record.version,
+                    packageName = record.packageName,
+                )
+                return true
+            }
             onStep("Replacing ${record.name}…")
             val landed = materialise(record, onStep)
             if (landed != 0L) {
@@ -339,5 +362,116 @@ class SyncV4Engine(
             else -> "Pulled $applied, pushed $pushed."
         }
         return summary
+    }
+
+    // ── the list, and what a selection does ──────────────────────────────
+
+    /** One row of the list: what the vault holds and where this phone stands. */
+    data class Item(
+        val recordId: String,
+        val name: String,
+        val path: String,
+        val state: String,
+        val size: Long,
+        val localId: Long,
+    )
+
+    fun items(): List<Item> {
+        val locals = runCatching { Json.videos(CoreBridge.nativeListVideos()) }.getOrDefault(emptyList())
+        val byId = locals.associateBy { it.id }
+        return link.mappings.map { mapping ->
+            val local = byId[mapping.localId]
+            val onDevice = mapping.localId != 0L && local != null
+            Item(
+                recordId = mapping.recordId,
+                name = mapping.path.substringAfterLast('/').ifBlank { mapping.path },
+                path = mapping.path,
+                state = when {
+                    onDevice -> "synced"
+                    link.remoteOnly.contains(mapping.recordId) -> "remote"
+                    else -> "pending"
+                },
+                size = local?.size ?: 0L,
+                localId = if (onDevice) mapping.localId else 0L,
+            )
+        }.sortedBy { it.path.lowercase() }
+    }
+
+    /** Downloads the ticked records; they leave the shelf and stay here. */
+    fun downloadItems(recordIds: List<String>, onStep: (String) -> Unit = {}): Int {
+        var kept = 0
+        val mappings = link.mappings.toMutableList()
+        for (id in recordIds) {
+            val index = mappings.indexOfFirst { it.recordId == id }
+            if (index < 0) continue
+            onStep("Downloading ${mappings[index].path}…")
+            val record = runCatching { client.record(link.vaultId, id) }.getOrNull() ?: continue
+            if (record.deleted) continue
+            val localId = materialise(record, onStep)
+            if (localId == 0L) continue
+            mappings[index] = mappings[index].copy(
+                localId = localId,
+                path = record.path,
+                version = record.version,
+                packageName = record.packageName ?: mappings[index].packageName,
+                signature = "",
+            )
+            link = link.copy(mappings = mappings.toList(), remoteOnly = link.remoteOnly - id)
+            save()
+            kept++
+        }
+        return kept
+    }
+
+    /** Deletes this phone's copy only; the record stays in the vault. */
+    fun removeFromDevice(recordIds: List<String>): Int {
+        var dropped = 0
+        val mappings = link.mappings.toMutableList()
+        val shelf = link.remoteOnly.toMutableList()
+        for (id in recordIds) {
+            val index = mappings.indexOfFirst { it.recordId == id }
+            if (index < 0) continue
+            val localId = mappings[index].localId
+            if (localId != 0L) {
+                runCatching { CoreBridge.nativeRemoveVideo(localId) }
+                dropped++
+            }
+            mappings[index] = mappings[index].copy(localId = 0L, signature = "")
+            if (!shelf.contains(id)) shelf.add(id)
+        }
+        link = link.copy(mappings = mappings.toList(), remoteOnly = shelf)
+        save()
+        return dropped
+    }
+
+    fun restoreItems(recordIds: List<String>, onStep: (String) -> Unit = {}) {
+        for (id in recordIds) {
+            onStep("Restoring…")
+            runCatching { client.restore(link.vaultId, id) }
+        }
+    }
+
+    fun tombstoneItems(recordIds: List<String>, onStep: (String) -> Unit = {}) {
+        val mappings = link.mappings.toMutableList()
+        for (id in recordIds) {
+            onStep("Removing…")
+            runCatching { client.tombstone(link.vaultId, id) }
+            mappings.removeAll { it.recordId == id }
+        }
+        link = link.copy(mappings = mappings.toList(), remoteOnly = link.remoteOnly - recordIds.toSet())
+        save()
+    }
+
+    fun purgeItems(recordIds: List<String>, onStep: (String) -> Unit = {}) {
+        val mappings = link.mappings.toMutableList()
+        for (id in recordIds) {
+            onStep("Deleting permanently…")
+            val localId = mappings.firstOrNull { it.recordId == id }?.localId ?: 0L
+            runCatching { client.purge(link.vaultId, id) }
+            if (localId != 0L) runCatching { CoreBridge.nativeRemoveVideo(localId) }
+            mappings.removeAll { it.recordId == id }
+        }
+        link = link.copy(mappings = mappings.toList(), remoteOnly = link.remoteOnly - recordIds.toSet())
+        save()
     }
 }

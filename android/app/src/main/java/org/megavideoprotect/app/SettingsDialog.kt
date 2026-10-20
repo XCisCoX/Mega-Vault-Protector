@@ -10,6 +10,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -32,6 +33,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -54,6 +56,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -72,6 +75,7 @@ private const val TAB_APPEARANCE = 1
 private const val TAB_PLUGINS = 2
 private const val TAB_SECURITY = 3
 private const val TAB_LIBRARY = 4
+private const val TAB_PROXY = 5
 
 /**
  * Phone settings. Same shape as the desktop build: grouped cards, one section
@@ -406,7 +410,7 @@ fun SettingsDialog(
                                         Text(label, color = Mvp.text, fontSize = 16.sp, modifier = Modifier.weight(1f))
                                         if (idleLabel == label) {
                                             Icon(
-                                                painterResource(R.drawable.msg_check_s),
+                                                painterResource(R.drawable.ic_lucide_check),
                                                 contentDescription = null,
                                                 tint = Mvp.accent,
                                                 modifier = Modifier.size(18.dp),
@@ -455,6 +459,8 @@ fun SettingsDialog(
                                 }
                             }
                         }
+
+                        TAB_PROXY -> ProxySettingsContent()
 
                         else -> {
                             Text(
@@ -568,11 +574,12 @@ fun SettingsDialog(
 
 @Composable
 private fun SettingsTabs(selected: Int, onSelect: (Int) -> Unit) {
-    val labels = listOf("Updates", "Appearance", "Plugins", "Security", "Library")
+    val labels = listOf("Updates", "Appearance", "Plugins", "Security", "Library", "Proxy")
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp)
+            .horizontalScroll(rememberScrollState())
             .heightIn(min = 42.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -740,6 +747,10 @@ private fun SettingsField(
         singleLine = true,
         textStyle = TextStyle(color = Mvp.text, fontSize = 16.sp),
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = if (password) KeyboardOptions(
+            keyboardType = KeyboardType.Password,
+            autoCorrectEnabled = false,
+        ) else KeyboardOptions.Default,
         cursorBrush = SolidColor(Mvp.accent),
         modifier = Modifier.fillMaxWidth(),
         decorationBox = { inner ->

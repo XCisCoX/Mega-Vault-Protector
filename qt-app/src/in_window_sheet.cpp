@@ -1,17 +1,27 @@
 #include "videovault/app/in_window_sheet.hpp"
 
 #include "videovault/app/icons.hpp"
+#include "videovault/app/theme.hpp"
 
+#include <algorithm>
 #include <QEventLoop>
 #include <QFrame>
+#include <QGraphicsBlurEffect>
+#include <QGraphicsPixmapItem>
+#include <QGraphicsScene>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QTimer>
+#include <cstdio>
+#include <QScopedValueRollback>
+#include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QVBoxLayout>
 
@@ -19,28 +29,41 @@ namespace videovault::app {
 
 InWindowSheet::InWindowSheet(QWidget* host)
     : QWidget(host == nullptr ? nullptr : host->window()) {
+    setObjectName(QStringLiteral("inWindowSheet"));
     setAttribute(Qt::WA_StyledBackground, true);
     setFocusPolicy(Qt::StrongFocus);
+    // Palette roles, not hex: the sheet lives inside the window and has to look
+    // native in both themes. The blurred, dimmed backdrop is painted in paintEvent.
     setStyleSheet(QStringLiteral(
-        "InWindowSheet { background: rgba(0, 0, 0, 160); }"
-        "QFrame#inWindowCard { background: #161618; border-radius: 16px; }"
-        "QFrame#inWindowCard QLabel { color: white; background: transparent; }"
+        "InWindowSheet { background: transparent; }"
+        "QFrame#inWindowCard { background: palette(base); border: 1px solid palette(midlight);"
+        "  border-radius: 16px; }"
+        "QFrame#inWindowCard QLabel { color: palette(window-text); background: transparent; }"
         "QFrame#inWindowCard QLineEdit, QFrame#inWindowCard QComboBox {"
-        "  color: white; background: #1c1c22; border: none; border-radius: 8px;"
+        "  color: palette(text); background: palette(base);"
+        "  border: 1px solid palette(midlight); border-radius: 8px;"
         "  min-height: 36px; padding: 0 10px; }"
+        "QFrame#inWindowCard QLineEdit:focus, QFrame#inWindowCard QComboBox:focus {"
+        "  border-color: palette(highlight); }"
         "QFrame#inWindowCard QComboBox QAbstractItemView {"
-        "  color: white; background: #1c1c22; selection-background-color: #3390ec; }"
-        "QFrame#inWindowCard QCheckBox { color: white; background: transparent; }"
+        "  color: palette(text); background: palette(base);"
+        "  selection-background-color: palette(highlight); selection-color: palette(highlighted-text); }"
+        "QFrame#inWindowCard QCheckBox, QFrame#inWindowCard QRadioButton {"
+        "  color: palette(window-text); background: transparent; }"
         "QFrame#inWindowCard QListWidget {"
-        "  color: white; background: #1c1c22; border: none; border-radius: 8px; outline: none; }"
+        "  color: palette(text); background: palette(alternate-base); border: none;"
+        "  border-radius: 8px; outline: none; }"
         "QFrame#inWindowCard QListWidget::item { padding: 6px 8px; }"
-        "QFrame#inWindowCard QListWidget::item:selected { background: rgba(51, 144, 236, 90); }"
-        "QPushButton#inWindowPrimary {"
-        "  color: white; background: #3390ec; border: none; border-radius: 10px;"
+        "QFrame#inWindowCard QListWidget::item:selected {"
+        "  background: palette(highlight); color: palette(highlighted-text); }"
+        "QPushButton[sheetPrimary='true'] {"
+        "  color: palette(highlighted-text); background: palette(highlight); border: none;"
+        "  border-radius: 10px; min-height: 36px; padding: 0 16px; font-weight: 600; }"
+        "QPushButton[sheetSecondary='true'] {"
+        "  color: palette(button-text); background: palette(alternate-base);"
+        "  border: 1px solid palette(midlight); border-radius: 10px;"
         "  min-height: 36px; padding: 0 16px; }"
-        "QPushButton#inWindowSecondary {"
-        "  color: white; background: #2a2a32; border: none; border-radius: 10px;"
-        "  min-height: 36px; padding: 0 16px; }"));
+        "QPushButton[sheetSecondary='true']:hover { background: palette(midlight); }"));
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(24, 24, 24, 24);
@@ -58,14 +81,36 @@ InWindowSheet::InWindowSheet(QWidget* host)
     message_ = new QLabel(card_);
     message_->setWordWrap(true);
     message_->hide();
-    body_ = new QVBoxLayout();
+    // The body lives in a scroll area: a form taller than a short window scrolls
+    // instead of being squeezed until half of each field is cut off.
+    bodyHost_ = new QWidget;
+    body_ = new QVBoxLayout(bodyHost_);
+    body_->setContentsMargins(0, 0, 0, 0);
     body_->setSpacing(10);
+    body_->setSizeConstraint(QLayout::SetMinimumSize);
+    scroll_ = new QScrollArea(card_);
+    scroll_->setObjectName(QStringLiteral("inWindowBody"));
+    scroll_->setWidget(bodyHost_);
+    scroll_->setWidgetResizable(true);
+    scroll_->setFrameShape(QFrame::NoFrame);
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll_->viewport()->setAutoFillBackground(false);
+    // Only the scroll container is made transparent, in code: a stylesheet
+    // wildcard here would also strip the rounded white fields inside it.
+    scroll_->setAutoFillBackground(false);
+    bodyHost_->setAutoFillBackground(false);
+    scroll_->setBackgroundRole(QPalette::NoRole);
+    scroll_->viewport()->setBackgroundRole(QPalette::NoRole);
+    bodyHost_->setBackgroundRole(QPalette::NoRole);
+    scroll_->setStyleSheet(QStringLiteral(
+        "QScrollArea#inWindowBody { background: transparent; border: none; }"));
     buttons_ = new QHBoxLayout();
     buttons_->setSpacing(8);
     buttons_->addStretch(1);
     column->addWidget(title_);
     column->addWidget(message_);
-    column->addLayout(body_);
+    column->addWidget(scroll_, 1);
     column->addLayout(buttons_);
     outer->addWidget(card_, 0, Qt::AlignHCenter);
     outer->addStretch(1);
@@ -77,7 +122,37 @@ InWindowSheet::InWindowSheet(QWidget* host)
 void InWindowSheet::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(0, 0, 0, 160));
+    // The host is blurred and only lightly dimmed, so the window stays visible
+    // behind the card instead of disappearing under a black sheet.
+    if (!backdrop_.isNull()) {
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.drawPixmap(rect(), backdrop_);
+    }
+    const bool dark = isDarkTheme();
+    painter.fillRect(rect(), QColor(0, 0, 0, dark ? 118 : 58));
+}
+
+void InWindowSheet::captureBackdrop() {
+    QWidget* host = parentWidget();
+    if (host == nullptr || host->size().isEmpty()) {
+        return;
+    }
+    const QPixmap shot = host->grab();
+    if (shot.isNull()) {
+        return;
+    }
+    QGraphicsScene scene;
+    QGraphicsPixmapItem item(shot);
+    QGraphicsBlurEffect blur;
+    // Scaled with the window so a maximised window does not turn to mush.
+    blur.setBlurRadius(std::max(8.0, host->width() / 90.0));
+    item.setGraphicsEffect(&blur);
+    scene.addItem(&item);
+    QPixmap out(shot.size());
+    out.fill(Qt::transparent);
+    QPainter painter(&out);
+    scene.render(&painter);
+    backdrop_ = out;
 }
 
 void InWindowSheet::setTitle(const QString& title) {
@@ -88,8 +163,8 @@ void InWindowSheet::setMessage(const QString& message, const bool problem) {
     message_->setText(message);
     message_->setVisible(!message.isEmpty());
     message_->setStyleSheet(problem
-        ? QStringLiteral("color: #ff6b6b; background: transparent;")
-        : QStringLiteral("color: #aeaeb2; background: transparent;"));
+        ? QStringLiteral("color: palette(window-text); background: transparent;")
+        : QStringLiteral("color: palette(mid); background: transparent;"));
 }
 
 QLineEdit* InWindowSheet::addTextEntry(
@@ -106,9 +181,9 @@ QLineEdit* InWindowSheet::addTextEntry(
 QPushButton* InWindowSheet::addButton(const QString& label, const int result, const bool primary,
     const QString& icon) {
     auto* button = new QPushButton(label, card_);
-    button->setObjectName(primary
-        ? QStringLiteral("inWindowPrimary")
-        : QStringLiteral("inWindowSecondary"));
+    // A property, not objectName: call sites name buttons for tests and for
+    // automation, and the look must survive that.
+    button->setProperty(primary ? "sheetPrimary" : "sheetSecondary", true);
     button->setCursor(Qt::PointingHandCursor);
     button->setFocusPolicy(Qt::NoFocus);
     if (!icon.isEmpty()) {
@@ -128,16 +203,31 @@ QPushButton* InWindowSheet::addButton(const QString& label, const int result, co
     return button;
 }
 
+std::function<void(InWindowSheet*)> InWindowSheet::testDriver_;
+
+void InWindowSheet::setTestDriver(std::function<void(InWindowSheet*)> driver) {
+    testDriver_ = std::move(driver);
+}
+
 void InWindowSheet::fitCard() {
-    if (card_ == nullptr || card_->layout() == nullptr) {
+    if (card_ == nullptr || card_->layout() == nullptr || fitting_) {
         return;
     }
+    const QScopedValueRollback<bool> guard(fitting_, true);
     QLayout* layout = card_->layout();
     layout->activate();
     const int width = card_->width() > 0 ? card_->width() : 420;
     const int height = layout->hasHeightForWidth() ? layout->heightForWidth(width)
                                                    : layout->sizeHint().height();
-    card_->setFixedHeight(qMax(height, layout->minimumSize().height()));
+    int target = qMax(height, layout->minimumSize().height());
+    // Never taller than the window: past that the body scrolls instead of the
+    // buttons falling off the bottom.
+    if (QWidget* host = parentWidget()) {
+        target = qMin(target, qMax(220, host->height() - 48));
+    }
+    if (card_->height() != target) {
+        card_->setFixedHeight(target);
+    }
 }
 
 int InWindowSheet::run() {
@@ -147,6 +237,9 @@ int InWindowSheet::run() {
     }
     setGeometry(host->rect());
     host->installEventFilter(this);
+    // Captured before the sheet is shown, so the backdrop is the window itself.
+    backdrop_ = QPixmap();
+    captureBackdrop();
     fitCard();
     show();
     raise();
@@ -156,12 +249,40 @@ int InWindowSheet::run() {
         entry_->setFocus();
         entry_->selectAll();
     }
+    if (testDriver_) {
+        // A driver stands in for the user: it acts inside the visible sheet.
+        testDriver_(this);
+        hide();
+        if (parentWidget() != nullptr) {
+            parentWidget()->removeEventFilter(this);
+        }
+        return 1;
+    }
+    // A modal sheet that never finishes must not hang a headless run forever;
+    // the trace names it so a CI log is diagnosable.
+    const QString sheetTitle = title_ != nullptr ? title_->text() : QString();
+    std::fprintf(stderr, "[sheet] open '%s'\n", qPrintable(sheetTitle));
+    std::fflush(stderr);
+    QTimer::singleShot(300000, this, [this] {
+        std::fprintf(stderr, "[sheet] watchdog closed '%s'\n",
+            qPrintable(title_ != nullptr ? title_->text() : QString()));
+        std::fflush(stderr);
+        loop_.quit();
+    });
     loop_.exec();
+    std::fprintf(stderr, "[sheet] closed '%s'\n", qPrintable(sheetTitle));
+    std::fflush(stderr);
     hide();
     if (parentWidget() != nullptr) {
         parentWidget()->removeEventFilter(this);
     }
     return result_;
+}
+
+void InWindowSheet::addRow(QWidget* widget) {
+    if (widget != nullptr) {
+        body_->addWidget(widget);
+    }
 }
 
 void InWindowSheet::finish(const int result) {
@@ -186,6 +307,16 @@ void InWindowSheet::mousePressEvent(QMouseEvent* event) {
 bool InWindowSheet::eventFilter(QObject* watched, QEvent* event) {
     if (watched == parentWidget() && event->type() == QEvent::Resize && parentWidget() != nullptr) {
         setGeometry(parentWidget()->rect());
+        // A shorter window must shrink the card too, or its buttons fall off the
+        // bottom while the body keeps the old height. Deferred: querying the card
+        // size hint inside the resize event re-entered the layout synchronously.
+        if (!fitPending_) {
+            fitPending_ = true;
+            QTimer::singleShot(0, this, [this] {
+                fitPending_ = false;
+                fitCard();
+            });
+        }
         raise();
     }
     return QWidget::eventFilter(watched, event);

@@ -54,6 +54,14 @@ data class MvpPalette(
     val scrollbarHandle: Color,
     val statusText: Color,
     val destructive: Color,
+    /** Backing behind folder tiles, thumbnails and media placeholders. */
+    val tileBg: Color,
+    /** Labels sitting on a tile that is always painted with tileBg. */
+    val tileText: Color,
+    /** Full-bleed dimming for sheets and drag previews. */
+    val scrim: Color,
+    /** Quiet progress groove on cards (transfers, imports). */
+    val progressTrack: Color,
 )
 
 val MvpDarkPalette = MvpPalette(
@@ -93,6 +101,10 @@ val MvpDarkPalette = MvpPalette(
     scrollbarHandle = Color(0xFF3A3A3C),
     statusText = Color(0xFF8E8E93),
     destructive = Color(0xFFFF453A),
+    tileBg = Color(0xFF161618),
+    tileText = Color(0xFFDCDCE0),
+    scrim = Color(0xC4101014),
+    progressTrack = Color(0xFF2A2A2E),
 )
 
 val MvpLightPalette = MvpPalette(
@@ -132,6 +144,10 @@ val MvpLightPalette = MvpPalette(
     scrollbarHandle = Color(0xFFC7C7CC),
     statusText = Color(0xFF6D6D72),
     destructive = Color(0xFFD70015),
+    tileBg = Color(0xFFEDEDF1),
+    tileText = Color(0xFF3C3C43),
+    scrim = Color(0x99000000),
+    progressTrack = Color(0xFFE5E5EA),
 )
 
 /** System is the default so a phone already in light mode is not forced dark. */
@@ -262,6 +278,10 @@ object Mvp {
     val window: Color get() = p.window
     val card: Color get() = p.card
     val cardBorder: Color get() = p.cardBorder
+    val tileBg: Color get() = p.tileBg
+    val tileText: Color get() = p.tileText
+    val scrim: Color get() = p.scrim
+    val progressTrack: Color get() = p.progressTrack
     val glass: Color get() = p.glass
     val glassStroke: Color get() = p.glassStroke
     val inputBg: Color get() = p.inputBg

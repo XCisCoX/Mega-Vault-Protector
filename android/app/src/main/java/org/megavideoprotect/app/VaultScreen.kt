@@ -330,6 +330,8 @@ fun VaultScreen(
     onOpenMusic: () -> Unit = {},
     onOpenPeer: () -> Unit = {},
     onOpenSync: () -> Unit = {},
+    onOpenPlugins: () -> Unit = {},
+    onPlayPlugin: (PluginSession) -> Unit = {},
     shareUris: List<Uri> = emptyList(),
     onShareHandled: () -> Unit = {},
 ) {
@@ -363,6 +365,20 @@ fun VaultScreen(
     val incomingFolders = remember { mutableStateListOf<Long>() }
     var showTags by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    val pluginManager = remember(vaultLocation) { PluginManager(context.applicationContext, vaultLocation) }
+    var providerSearch by remember(vaultLocation) { mutableStateOf<List<PluginManifest>>(emptyList()) }
+    LaunchedEffect(vaultLocation, showSettings) {
+        if (!showSettings) {
+            providerSearch = if (RemoteVault.connected()) emptyList() else withContext(Dispatchers.IO) {
+                pluginManager.manifests().filter {
+                    PluginProviderRegistry.protocol(it.protocol).music && pluginManager.options(it).enabled
+                }
+            }
+            if (PluginLibrary.session?.manifest?.id?.let { id -> providerSearch.none { it.id == id } } == true) {
+                PluginLibrary.close()
+            }
+        }
+    }
     var showTransfers by remember { mutableStateOf(false) }
     // Batch import progress: fraction of the bytes of the whole selection.
     var importProgress by remember { mutableStateOf<Float?>(null) }
@@ -944,7 +960,7 @@ fun VaultScreen(
         bottom = with(density) { bottomInset.toDp() },
     )
     val glass = HazeStyle(
-        backgroundColor = Color(0xC4101014),
+        backgroundColor = Mvp.scrim,
         tints = listOf(HazeTint(Color.Black.copy(alpha = 0.28f))),
         blurRadius = 32.dp,
         noiseFactor = 0.03f,
@@ -998,6 +1014,10 @@ fun VaultScreen(
         }
         if (showSettings) {
             showSettings = false
+            return@BackHandler
+        }
+        if (PluginLibrary.folderOpen) {
+            PluginLibrary.back()
             return@BackHandler
         }
         if (selectedIds.isNotEmpty()) {
@@ -1329,6 +1349,11 @@ fun VaultScreen(
         val pressItem: (VideoEntry) -> Unit = { v ->
             selectedIds = if (v.id in selectedIds) selectedIds - v.id else selectedIds + v.id
         }
+        val discoverProviders = if (search.isNotBlank()) providerSearch else emptyList()
+        val searchProvider: (PluginManifest) -> Unit = { manifest ->
+            selectedIds = emptySet()
+            PluginLibrary.open(context, manifest, vaultLocation, pluginManager.options(manifest), search)
+        }
 
         val upParentId = if (currentFolderId == 0L) {
             null
@@ -1394,13 +1419,16 @@ fun VaultScreen(
                 }
                 .hazeSource(state = haze),
         ) {
-            when (viewMode) {
+            if (PluginLibrary.folderOpen) {
+                PluginLibraryView(viewMode, contentPad, onPlayPlugin)
+            } else when (viewMode) {
                 0 -> DetailsView(
                     shown, orderedFolders, upParentId, selectedIds,
                     openItem, pressItem, openActions, { openFolder(it) }, { folderMenu = it },
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
                 1 -> IconGridView(
                     shown, orderedFolders, upParentId, selectedIds,
@@ -1408,6 +1436,7 @@ fun VaultScreen(
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
                 else -> ListView(
                     shown, orderedFolders, upParentId, selectedIds,
@@ -1415,6 +1444,7 @@ fun VaultScreen(
                     contentPad, dropHere, { event, id -> handleDrop(event, id) }, dragVideo,
                     videoPlace, folderPlace,
                     currentFolderId.toString(), { chooseSort(it) }, refusalOn,
+                    discoverProviders, search, searchProvider,
                 )
             }
         }
@@ -1451,6 +1481,7 @@ fun VaultScreen(
                     GalleryCache.filterTagIds = emptySet()
                 },
                 onSearch = { text ->
+                    if (PluginLibrary.folderOpen) PluginLibrary.leave()
                     search = text
                     GalleryCache.search = text
                 },
@@ -1490,7 +1521,7 @@ fun VaultScreen(
             )
             CloudBar()
             TelegramMusicBar(onOpen = onOpenMusic)
-            FolderBar(
+            if (PluginLibrary.folderOpen) PluginLibraryBar() else FolderBar(
                 folders = folders,
                 currentFolderId = currentFolderId,
                 onOpen = { openFolder(it) },
@@ -1531,7 +1562,9 @@ fun VaultScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("${childFolders.size + filtered.size} items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
+            val itemCount = if (PluginLibrary.folderOpen) PluginLibrary.target?.visibleRows(PluginLibrary.session?.rows.orEmpty())?.size ?: 0
+                else childFolders.size + filtered.size + discoverProviders.size
+            Text("$itemCount items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
         }
         }
 
@@ -1633,6 +1666,7 @@ fun VaultScreen(
     if (showTags) {
         val chosen = videos.filter { it.id in selectedIds }
         Dialog(onDismissRequest = { if (!actionBusy) showTags = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Tag")
                 MvpDescription(
@@ -1682,6 +1716,7 @@ fun VaultScreen(
 
     if (confirmRemove) {
         Dialog(onDismissRequest = { if (!actionBusy) confirmRemove = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Remove ${selectedIds.size} item(s)?")
                 MvpDescription("Removal deletes the encrypted packages. This cannot be undone.")
@@ -1704,6 +1739,7 @@ fun VaultScreen(
     // Per-item action sheet: remove (permanent) or export a plaintext copy.
     actionTarget?.let { target ->
         Dialog(onDismissRequest = { if (!actionBusy) actionTarget = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(target.name)
                 MvpDescription("${target.sizeText} · ${target.tags.joinToString(", ")}")
@@ -1779,6 +1815,7 @@ fun VaultScreen(
 
     folderMenu?.takeIf { it.id == PEER_FOLDER_ID }?.let { folder ->
         Dialog(onDismissRequest = { folderMenu = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(folder.name)
                 MvpDescription(
@@ -1797,6 +1834,7 @@ fun VaultScreen(
 
     folderMenu?.takeIf { it.id != PEER_FOLDER_ID }?.let { folder ->
         Dialog(onDismissRequest = { folderMenu = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(folder.name)
                 MvpDescription("Removing a folder deletes the files and folders inside it.")
@@ -1833,6 +1871,7 @@ fun VaultScreen(
         val tree = folderSubtree(folders, folder.id)
         val inside = videos.count { it.folderId in tree }
         Dialog(onDismissRequest = { if (!actionBusy) folderDelete = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Remove \"${folder.name}\"?")
                 MvpDescription(
@@ -1885,6 +1924,7 @@ fun VaultScreen(
     var mediaPick by remember { mutableStateOf<DevicePick?>(null) }
     if (showAdd) {
         Dialog(onDismissRequest = { showAdd = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Add")
                 MvpButton("Gallery", onClick = {
@@ -1910,6 +1950,10 @@ fun VaultScreen(
                 MvpButton("New folder", onClick = {
                     showAdd = false
                     namePrompt = NamePrompt.NewFolder(currentFolderId)
+                }, modifier = Modifier.fillMaxWidth())
+                if (!RemoteVault.connected()) MvpButton("Extensions…", onClick = {
+                    showAdd = false
+                    onOpenPlugins()
                 }, modifier = Modifier.fillMaxWidth())
                 if (!RemoteVault.connected()) MvpButton("Encrypted sync…", onClick = {
                     showAdd = false
@@ -1951,6 +1995,7 @@ fun VaultScreen(
 
     if (linkingPc) {
         Dialog(onDismissRequest = {}) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Swap with PC")
                 Row(
@@ -1974,6 +2019,7 @@ fun VaultScreen(
         var compress by remember { mutableStateOf(true) }
         var problem by remember { mutableStateOf<String?>(null) }
         Dialog(onDismissRequest = { packagePlan = null; packagePassword = "" }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Export package")
                 MvpDescription(problem ?: "This password locks the package. It is separate from the vault password.")
@@ -2011,6 +2057,7 @@ fun VaultScreen(
         var password by remember { mutableStateOf("") }
         var problem by remember { mutableStateOf<String?>(null) }
         Dialog(onDismissRequest = { packageImportUri = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Import package")
                 MvpDescription(problem ?: "Enter the password that was set when this package was created.")
@@ -2033,6 +2080,7 @@ fun VaultScreen(
     namePrompt?.let { prompt ->
         var draft by remember(prompt) { mutableStateOf(prompt.initial) }
         Dialog(onDismissRequest = { namePrompt = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(prompt.title)
                 MvpInput(draft, { draft = it }, "Name")
@@ -2066,6 +2114,7 @@ fun VaultScreen(
             moveChoices(folders, currentFolderId, request.folders)
         }
         Dialog(onDismissRequest = { moveTarget = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Move to")
                 MvpDescription(
@@ -2168,7 +2217,7 @@ private fun MusicLibrary(
             Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HeaderIcon("Close", R.drawable.msg_close, onClose)
+            HeaderIcon("Close", R.drawable.ic_lucide_x, onClose)
             Column(Modifier.weight(1f)) {
                 Text("Music", color = Mvp.title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Text(
@@ -2202,7 +2251,7 @@ private fun MusicLibrary(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                painterResource(R.drawable.outline_header_search),
+                painterResource(R.drawable.ic_lucide_search),
                 contentDescription = null,
                 tint = Mvp.placeholder,
                 modifier = Modifier.size(18.dp),
@@ -2311,7 +2360,7 @@ private fun GalleryHeader(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                HeaderIcon("Clear selection", R.drawable.msg_close, onClearSelection)
+                HeaderIcon("Clear selection", R.drawable.ic_lucide_x, onClearSelection)
                 Text(
                     selectionTitle,
                     color = Mvp.title,
@@ -2326,8 +2375,8 @@ private fun GalleryHeader(
                 }
                 HeaderIcon("Move", R.drawable.msg_forward, onMove, enabled = actionsEnabled)
                 HeaderIcon("Tag", R.drawable.menu_tag_plus, onTag, enabled = actionsEnabled)
-                HeaderIcon("Restore", R.drawable.msg_download, onRestore, enabled = actionsEnabled)
-                HeaderIcon("Remove", R.drawable.msg_delete_filled, onRemove, enabled = actionsEnabled, iconTint = Mvp.errorText)
+                HeaderIcon("Restore", R.drawable.ic_lucide_download, onRestore, enabled = actionsEnabled)
+                HeaderIcon("Remove", R.drawable.ic_lucide_trash, onRemove, enabled = actionsEnabled, iconTint = Mvp.errorText)
             }
         } else {
         Row(
@@ -2354,7 +2403,7 @@ private fun GalleryHeader(
                 )
             }
             if (updateReady) {
-                HeaderIcon("Update", R.drawable.msg_download, onUpdate)
+                HeaderIcon("Update", R.drawable.ic_lucide_download, onUpdate)
             }
             Text(
                 "Music",
@@ -2366,9 +2415,9 @@ private fun GalleryHeader(
                     .clickable(onClick = onMusic)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
-            HeaderIcon("Add", R.drawable.msg_add, onImport, filled = true)
-            HeaderIcon("Settings", R.drawable.msg_settings, onSettings)
-            HeaderIcon("Lock", R.drawable.outline_header_lock_24, onLock)
+            HeaderIcon("Add", R.drawable.ic_lucide_plus, onImport, filled = true)
+            HeaderIcon("Settings", R.drawable.ic_lucide_settings, onSettings)
+            HeaderIcon("Lock", R.drawable.ic_lucide_lock, onLock)
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -2386,7 +2435,7 @@ private fun GalleryHeader(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    painterResource(R.drawable.outline_header_search),
+                    painterResource(R.drawable.ic_lucide_search),
                     contentDescription = null,
                     tint = Mvp.placeholder,
                     modifier = Modifier.size(16.dp),
@@ -2418,7 +2467,7 @@ private fun GalleryHeader(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            painterResource(R.drawable.msg_close),
+                            painterResource(R.drawable.ic_lucide_x),
                             contentDescription = "Clear search",
                             tint = Mvp.description,
                             modifier = Modifier.size(14.dp),
@@ -2490,9 +2539,10 @@ private fun TagFilterButton(
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     Box {
-        ViewModeButton(R.drawable.menu_tag_filter, "Filter by tags", selected.isNotEmpty()) { open = true }
+        ViewModeButton(R.drawable.ic_lucide_list, "Filter by tags", selected.isNotEmpty()) { open = true }
         if (open) {
             Dialog(onDismissRequest = { open = false }) {
+                BlurredDialogWindow()
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -2574,7 +2624,7 @@ private fun TagFilterButton(
                                 Spacer(Modifier.width(10.dp))
                                 if (tag.id in selected) {
                                     Icon(
-                                        painterResource(R.drawable.msg_check_s),
+                                        painterResource(R.drawable.ic_lucide_check),
                                         contentDescription = "Selected",
                                         tint = Mvp.accent,
                                         modifier = Modifier.size(18.dp),
@@ -2890,7 +2940,7 @@ private fun Modifier.explorerItem(
     transfer: () -> DragAndDropTransferData,
 ): Modifier = this.dragAndDropSource(
     drawDragDecoration = {
-        drawRoundRect(color = Color(0xCC3390EC), cornerRadius = CornerRadius(24f, 24f))
+        drawRoundRect(color = Mvp.accent.copy(alpha = 0.8f), cornerRadius = CornerRadius(24f, 24f))
     },
     block = {
     val source = this
@@ -2973,7 +3023,7 @@ private fun FolderBar(
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Icon(
-                    painterResource(R.drawable.ic_ab_back),
+                    painterResource(R.drawable.ic_lucide_arrow_left),
                     contentDescription = "Up",
                     tint = Mvp.accent,
                     modifier = Modifier.size(14.dp),
@@ -3021,9 +3071,9 @@ private fun Crumb(
 @Composable
 private fun FolderGlyph(modifier: Modifier = Modifier) {
     Icon(
-        painterResource(R.drawable.files_folder),
+        painterResource(R.drawable.ic_lucide_folder),
         contentDescription = null,
-        tint = Color(0xFF4FA6F7),
+        tint = Mvp.accent,
         modifier = modifier,
     )
 }
@@ -3045,7 +3095,7 @@ private fun folderModifier(
 }
 
 @Composable
-private fun FolderDetailRow(
+internal fun FolderDetailRow(
     name: String,
     meta: String,
     onClick: () -> Unit,
@@ -3093,7 +3143,7 @@ private fun FolderDetailRow(
 }
 
 @Composable
-private fun FolderListRow(
+internal fun FolderListRow(
     name: String,
     meta: String,
     onClick: () -> Unit,
@@ -3140,7 +3190,7 @@ private fun FolderListRow(
 }
 
 @Composable
-private fun FolderTile(
+internal fun FolderTile(
     name: String,
     onClick: () -> Unit,
     transfer: (() -> DragAndDropTransferData)?,
@@ -3160,7 +3210,7 @@ private fun FolderTile(
                 when {
                     refused != null -> Mvp.errorBg
                     hint.hot -> Mvp.accent.copy(alpha = 0.35f)
-                    else -> Color(0xFF161618)
+                    else -> Mvp.tileBg
                 },
             )
             .then(
@@ -3190,7 +3240,7 @@ private fun FolderTile(
             if (place.isNotEmpty()) {
                 Text(
                     place,
-                    color = Color(0xFFDCDCE0),
+                    color = Mvp.tileText,
                     fontSize = 10.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3341,7 +3391,7 @@ private fun FileTile(video: VideoEntry, edge: Int, square: Boolean) {
                     .align(Alignment.BottomEnd)
                     .padding(2.dp)
                     .size(14.dp)
-                    .background(Color(0xFF107C10), CircleShape),
+                    .background(Mvp.primary, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("✓", color = Color.White, fontSize = 9.sp)
@@ -3402,15 +3452,21 @@ private fun Thumb(id: Long, size: Int, audio: Boolean = false, image: Boolean = 
     LaunchedEffect(id) {
         if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
-            if (image && !RemoteVault.connected()) {
-                decodeVaultImage(id, 320)
-            } else {
-                val jpeg = if (RemoteVault.connected()) {
-                    RemoteVault.getBytes("/v1/thumbnail?id=$id&max=320")
+            // Background decodes must not crowd out playback: at most two at a
+            // time, and none at all while a player is on screen.
+            if (VaultWork.playback) return@withContext null
+            VaultWork.thumbs.withPermit {
+                if (VaultWork.playback) return@withPermit null
+                if (image && !RemoteVault.connected()) {
+                    decodeVaultImage(id, 320)
                 } else {
-                    CoreBridge.nativeThumbnail(id, 320)
+                    val jpeg = if (RemoteVault.connected()) {
+                        RemoteVault.getBytes("/v1/thumbnail?id=$id&max=320")
+                    } else {
+                        CoreBridge.nativeThumbnail(id, 320)
+                    }
+                    jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
                 }
-                jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             }
         }
         if (decoded != null) {
@@ -3451,7 +3507,7 @@ private fun MusicNote(modifier: Modifier) {
 @Composable
 private fun TextBadge(label: String, modifier: Modifier) {
     val badge = label.uppercase().take(5)
-    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+    Box(modifier.background(Mvp.tileBg), contentAlignment = Alignment.Center) {
         Box(Modifier.fillMaxSize(0.72f), contentAlignment = Alignment.Center) {
             Image(
                 painterResource(R.drawable.media_doc_blue),
@@ -3472,7 +3528,7 @@ private fun TextBadge(label: String, modifier: Modifier) {
 
 @Composable
 private fun PdfBadge(modifier: Modifier, large: Boolean) {
-    Box(modifier.background(Color(0xFF1C1C1E)), contentAlignment = Alignment.Center) {
+    Box(modifier.background(Mvp.tileBg), contentAlignment = Alignment.Center) {
         Box(
             Modifier.fillMaxSize(if (large) 0.56f else 0.82f),
             contentAlignment = Alignment.Center,
@@ -3501,15 +3557,20 @@ private fun SquareThumb(id: Long, audio: Boolean = false, image: Boolean = false
     LaunchedEffect(id) {
         if (bmp != null || pdf) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
-            if (image && !RemoteVault.connected()) {
-                decodeVaultImage(id, 480)
-            } else {
-                val jpeg = if (RemoteVault.connected()) {
-                    RemoteVault.getBytes("/v1/thumbnail?id=$id&max=480")
+            // Same gate as the list rows: playback keeps the vault.
+            if (VaultWork.playback) return@withContext null
+            VaultWork.thumbs.withPermit {
+                if (VaultWork.playback) return@withPermit null
+                if (image && !RemoteVault.connected()) {
+                    decodeVaultImage(id, 480)
                 } else {
-                    CoreBridge.nativeThumbnail(id, 480)
+                    val jpeg = if (RemoteVault.connected()) {
+                        RemoteVault.getBytes("/v1/thumbnail?id=$id&max=480")
+                    } else {
+                        CoreBridge.nativeThumbnail(id, 480)
+                    }
+                    jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
                 }
-                jpeg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
             }
         }
         if (decoded != null) {
@@ -3620,6 +3681,9 @@ private fun DetailsView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyColumn(
         state = GalleryCache.listScroll("details:$scrollKey"),
@@ -3627,6 +3691,9 @@ private fun DetailsView(
         modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         stickyHeader { DetailSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 0) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderDetailRow(
@@ -3748,6 +3815,9 @@ private fun IconGridView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
@@ -3758,6 +3828,9 @@ private fun IconGridView(
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         item(span = { GridItemSpan(3) }) { ListSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }, span = { GridItemSpan(3) }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 2) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderTile(
@@ -3890,7 +3963,7 @@ private fun IconGridView(
                         if (artist.isNotBlank()) {
                             Text(
                                 artist,
-                                color = Color(0xFFDCDCE0),
+                                color = Mvp.tileText,
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -3936,7 +4009,7 @@ private fun IconGridView(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            painterResource(R.drawable.checkbig),
+                            painterResource(R.drawable.ic_lucide_check),
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(14.dp),
@@ -3969,6 +4042,9 @@ private fun ListView(
     scrollKey: String = "0",
     onSort: (SortKey) -> Unit = {},
     dropRefusalOn: (DragAndDropEvent, Long) -> String? = { _, _ -> null },
+    providerSearch: List<PluginManifest> = emptyList(),
+    searchQuery: String = "",
+    onSearchProvider: (PluginManifest) -> Unit = {},
 ) {
     LazyColumn(
         state = GalleryCache.listScroll("list:$scrollKey"),
@@ -3976,6 +4052,9 @@ private fun ListView(
         modifier = Modifier.fillMaxSize().background(Mvp.window).vaultDropTarget(onActive = {}, onDrop = onDrop),
     ) {
         item { ListSortBar(onSort) }
+        items(providerSearch, key = { "provider:${it.id}" }) { manifest ->
+            PluginSearchEntry(manifest, searchQuery, 2) { onSearchProvider(manifest) }
+        }
         if (upParentId != null) {
             item(key = "up") {
                 FolderListRow(

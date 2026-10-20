@@ -92,6 +92,9 @@ data class SyncV4Link(
     val packageSecret: String,
     val cursor: Long,
     val mappings: List<SyncV4Mapping>,
+    // Records the user took off this phone on purpose. They stay in the vault
+    // and on the other devices, and a later sync must not pull them back.
+    val remoteOnly: List<String> = emptyList(),
 ) {
     fun toJson(): JSONObject {
         val records = JSONArray()
@@ -106,6 +109,8 @@ data class SyncV4Link(
                     .put("package", item.packageName ?: JSONObject.NULL),
             )
         }
+        val shelf = JSONArray()
+        remoteOnly.forEach { id -> shelf.put(id) }
         return JSONObject()
             .put("server", server)
             .put("email", email)
@@ -115,6 +120,7 @@ data class SyncV4Link(
             .put("packageSecret", packageSecret)
             .put("cursor", cursor)
             .put("records", records)
+            .put("remoteOnly", shelf)
     }
 
     companion object {
@@ -124,6 +130,12 @@ data class SyncV4Link(
             val vault = value.optString("vault")
             if (server.isEmpty() || token.isEmpty() || vault.isEmpty()) return null
             val listed = ArrayList<SyncV4Mapping>()
+            val shelf = ArrayList<String>()
+            val remote = value.optJSONArray("remoteOnly") ?: JSONArray()
+            for (index in 0 until remote.length()) {
+                val id = remote.optString(index)
+                if (id.isNotEmpty()) shelf.add(id)
+            }
             val array = value.optJSONArray("records") ?: JSONArray()
             for (index in 0 until array.length()) {
                 val entry = array.optJSONObject(index) ?: continue
@@ -147,6 +159,7 @@ data class SyncV4Link(
                 packageSecret = value.optString("packageSecret"),
                 cursor = value.optLong("cursor"),
                 mappings = listed,
+                remoteOnly = shelf,
             )
         }
     }

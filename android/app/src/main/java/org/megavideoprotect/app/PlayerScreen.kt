@@ -125,6 +125,13 @@ fun PlayerScreen(
     var loopPosition by remember { mutableLongStateOf(0L) }
     var loopDuration by remember { mutableLongStateOf(0L) }
 
+    // The player owns the vault while it is open: thumbnail decodes stop
+    // starting, so the first frame never waits behind gallery work.
+    DisposableEffect(Unit) {
+        VaultWork.playback = true
+        onDispose { VaultWork.playback = false }
+    }
+
     val page = pagerState.settledPage
     val shown = items[page.coerceIn(0, items.lastIndex)]
     val view = LocalView.current

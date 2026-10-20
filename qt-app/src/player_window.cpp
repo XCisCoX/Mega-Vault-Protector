@@ -839,6 +839,7 @@ void PlayerWindow::resetPlayback(std::shared_ptr<videovault::core::Vault> vault,
     if (imageMode_) {
         // Back to the video chrome (playback controls instead of zoom row).
         imageMode_ = false;
+        surface_->setInfo({});
         positionSlider_->show();
         positionLabel_->show();
         timeLeftLabel_->show();
@@ -900,7 +901,8 @@ void PlayerWindow::playStill(
     ended_.store(false);
     imageModeFlag_.store(true);
     enterImageMode();
-    surface_->setText(QStringLiteral("Decrypting…"));
+    surface_->setInfo({});
+    surface_->setText(QStringLiteral("Decrypting %1…").arg(windowTitle()));
     const int epoch = ++stillEpoch_;
     const auto source = vault_;
     auto* watcher = new QFutureWatcher<QImage>(this);
@@ -955,6 +957,10 @@ void PlayerWindow::resizeEvent(QResizeEvent* event) {
         surfaceSize_ = surface_->size();
     }
     surface_->update();
+    if (imageMode_) {
+        // "Fit 41%" is a function of the window size.
+        updateImageInfo();
+    }
 }
 
 void PlayerWindow::closeEvent(QCloseEvent* event) {
@@ -1955,6 +1961,33 @@ void PlayerWindow::updateZoomLabel() {
     zoomLabel_->setText(imageZoom_ <= 0.0
         ? QStringLiteral("Fit")
         : QStringLiteral("%1%").arg(qRound(imageZoom_ * 100.0)));
+    updateImageInfo();
+}
+
+// The chip in the corner of a still: pixel size and the scale actually on
+// screen, so "Fit" is not a guess.
+void PlayerWindow::updateImageInfo() {
+    QImage frame;
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        frame = latestFrame_;
+    }
+    if (frame.isNull() || surface_ == nullptr) {
+        if (surface_ != nullptr) {
+            surface_->setInfo({});
+        }
+        return;
+    }
+    double shown = imageZoom_;
+    if (shown <= 0.0) {
+        shown = std::min(static_cast<double>(surface_->width()) / frame.width(),
+                         static_cast<double>(surface_->height()) / frame.height());
+        shown = std::min(shown, 1.0);  // fit never magnifies
+    }
+    surface_->setInfo(QStringLiteral("%1 × %2 · %3%")
+                          .arg(frame.width())
+                          .arg(frame.height())
+                          .arg(qRound(shown * 100.0)));
 }
 
 // Sizes the window so the video surface matches the video's pixel dimensions

@@ -1,4 +1,5 @@
 #include "videovault/app/main_window.hpp"
+#include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/version.hpp"
 
@@ -128,6 +129,14 @@ void installPackageFileType() {
     const std::wstring prog_id = L"MegaVaultProtect.mvpk";
     const std::wstring icon = L"\"" + exe + L"\",2";
     const std::wstring command = L"\"" + exe + L"\" \"%1\"";
+    // Bumped when the registration itself changes (the icon resource was
+    // rebuilt from PNG frames to BMP frames, which is what the shell reads).
+    // Without this, an install whose values already match never re-announces
+    // the type, and Explorer keeps serving its cached generic icon.
+    constexpr int kRegistrationVersion = 2;
+    QSettings settings;
+    const bool stale = settings.value(QStringLiteral("shell/registrationVersion"), 0).toInt()
+        != kRegistrationVersion;
     bool changed = false;
     changed |= writeRegistryString(classes + L"\\.mvpk", nullptr, prog_id);
     changed |= writeRegistryString(classes + L"\\.mvpk", L"Content Type",
@@ -138,9 +147,10 @@ void installPackageFileType() {
         nullptr, icon);
     changed |= writeRegistryString(
         classes + L"\\" + prog_id + L"\\shell\\open\\command", nullptr, command);
-    if (!changed) {
+    if (!changed && !stale) {
         return;
     }
+    settings.setValue(QStringLiteral("shell/registrationVersion"), kRegistrationVersion);
     // Explorer caches the icon it showed for a file type, so tell it to look
     // again after the first run (or after the app moved).
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
@@ -195,6 +205,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    videovault::app::initializeProxySettings();
     videovault::app::MainWindow window;
     if (!incoming.isEmpty()) {
         window.acceptExternalPaths(incoming);

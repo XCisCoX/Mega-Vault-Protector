@@ -51,7 +51,7 @@ fun TextScreen(
         val loaded = withContext(Dispatchers.IO) { readVaultText(videoId) }
         if (loaded == null) failed = true else body = loaded
     }
-    Column(Modifier.fillMaxSize().background(Color(0xFF101014))) {
+    Column(Modifier.fillMaxSize().background(Mvp.window)) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -60,7 +60,7 @@ fun TextScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                painterResource(R.drawable.ic_ab_back),
+                painterResource(R.drawable.ic_lucide_arrow_left),
                 contentDescription = "Back",
                 tint = Mvp.accent,
                 modifier = Modifier.clickable(onClick = onBack).padding(8.dp).size(24.dp),
@@ -84,7 +84,7 @@ fun TextScreen(
             }
             else -> Text(
                 body.orEmpty(),
-                color = Color(0xFFF2F2F7),
+                color = Mvp.text,
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
                 fontFamily = FontFamily.Monospace,

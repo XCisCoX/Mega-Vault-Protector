@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "org.megavault.monochrome",
+  "name": "Monochrome Music",
+  "version": "1.0.0",
+  "description": "Search songs, artists, and albums, play in memory, and save music directly into your encrypted vault.",
+  "protocol": "monochrome-tracks-v1",
+  "platforms": ["windows", "linux", "android"],
+  "permissions": ["network", "audio-playback", "vault-import"],
+  "network": {
+    "baseUrl": "https://tracks.monochrome.st",
+    "allowedHosts": ["tracks.monochrome.st"]
+  },
+  "sourceNotice": "Catalogue and audio are supplied by Monochrome's service, not directly by Spotify. Download only content you have permission to save."
+}

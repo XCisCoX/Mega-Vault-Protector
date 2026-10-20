@@ -187,7 +187,7 @@ fun PeerScreen(onClose: () -> Unit) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF101014))
+                    .background(Mvp.window)
                     .statusBarsPadding()
                     .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -212,7 +212,7 @@ fun PeerScreen(onClose: () -> Unit) {
                     )
                     Text(
                         "Disconnect",
-                        color = Color(0xFFFF6B6B),
+                        color = Mvp.errorText,
                         fontSize = 14.sp,
                         modifier = Modifier
                             .clickable {
@@ -288,7 +288,7 @@ fun PeerScreen(onClose: () -> Unit) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF101014))
+                    .background(Mvp.window)
                     .navigationBarsPadding()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -373,13 +373,13 @@ private fun PeerFolderTile(name: String, picked: Boolean, onClick: () -> Unit, o
         Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .background(Color(0xFF161618))
+            .background(Mvp.tileBg)
             .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
         Icon(
-            painterResource(R.drawable.files_folder),
+            painterResource(R.drawable.ic_lucide_folder),
             contentDescription = null,
-            tint = Color(0xFF4FA6F7),
+            tint = Mvp.accent,
             modifier = Modifier.align(Alignment.Center).fillMaxSize().padding(22.dp),
         )
         Text(
@@ -490,7 +490,7 @@ private fun PickedMark() {
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                painterResource(R.drawable.checkbig),
+                painterResource(R.drawable.ic_lucide_check),
                 contentDescription = null,
                 tint = Color.White,
                 modifier = Modifier.size(14.dp),
@@ -509,6 +509,7 @@ private fun CopyTargetDialog(onPick: (Long) -> Unit, onDismiss: () -> Unit) {
         }
     }
     Dialog(onDismissRequest = onDismiss) {
+        BlurredDialogWindow()
         MvpCard(Modifier.fillMaxWidth()) {
             MvpTitle("Copy into")
             MvpDescription("Pick a place in your library. Copied folders keep their structure.")

@@ -77,6 +77,17 @@ public:
     void tombstone(const QString& recordId);     // reversible delete
     void restore(const QString& recordId);       // undelete
     void purge(const QString& recordId);         // delete permanently
+
+    // The same operations over a selection, in one pass: the page's list acts
+    // on everything the user ticked, not one row at a time.
+    void receiveMany(const QStringList& recordIds);    // keep on this device
+    void tombstoneMany(const QStringList& recordIds);  // recycle everywhere
+    void restoreMany(const QStringList& recordIds);    // undo a recycle
+    void purgeMany(const QStringList& recordIds);      // delete permanently
+    // Drop the local copy only: the record and its bytes stay in the vault and
+    // on the other devices, and later passes will not pull it back down.
+    void removeFromDevice(const QStringList& recordIds);
+
     void stop();
 
     // The server's page size. 500 is the default; a smaller value makes the

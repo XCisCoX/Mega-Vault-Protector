@@ -1,3 +1,9 @@
+#include "videovault/app/proxy_settings.hpp"
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QEventLoop>
+#include <QTimer>
 #include "videovault/app/app_update.hpp"
 
 #include "videovault/core/version.hpp"
@@ -461,6 +467,39 @@ bool httpsFetch(const QUrl&, const std::function<bool(qint64, qint64)>&, QFile*,
 
 #endif
 
+// A configured proxy must never fall back to WinHTTP/direct (WinHTTP has no
+// SOCKS5 transport). Qt keeps TLS peer/hostname verification enabled by default.
+bool proxyHttpsFetch(const QUrl& url, const std::function<bool(qint64, qint64)>& progress,
+                     QFile* sink, HttpReply* result) {
+    QNetworkAccessManager manager; configureNetworkProxy(&manager);
+    QNetworkRequest request(url);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
+    request.setRawHeader("User-Agent", "MegaVaultProtect");
+    auto* response = manager.get(request); response->setReadBufferSize(kTransferBufferBytes);
+    QEventLoop loop; QTimer timer; timer.setSingleShot(true);
+    qint64 received = 0; bool failed = false;
+    auto drain = [&] {
+        const auto bytes = response->readAll(); received += bytes.size();
+        if (isRedirect(response->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt())) return;
+        if ((sink && sink->write(bytes) != bytes.size()) || (!sink && received > kApiLimit)) {
+            result->error = QStringLiteral("Update reply exceeded its limit or could not be written."); failed = true; response->abort(); return;
+        }
+        if (!sink) result->body += bytes;
+        if (progress && !progress(received, response->header(QNetworkRequest::ContentLengthHeader).toLongLong())) {
+            result->error = QStringLiteral("Update download cancelled."); failed = true; response->abort();
+        }
+    };
+    QObject::connect(response, &QIODevice::readyRead, &loop, drain);
+    QObject::connect(response, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&timer, &QTimer::timeout, &loop, [&] { failed = true; result->error = QStringLiteral("Proxy update request timed out."); response->abort(); });
+    timer.start(kUnpackTimeoutMs); loop.exec(); timer.stop(); drain();
+    result->status = response->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    result->location = response->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
+    if (response->error() != QNetworkReply::NoError && !failed) { result->error = response->errorString(); failed = true; }
+    delete response; return !failed;
+}
+
 [[nodiscard]] bool trustedAssetUrl(const QUrl& url, bool redirect = false);
 
 // Follows GitHub's redirects to the asset host, starting the
@@ -470,7 +509,7 @@ bool httpGet(const QUrl& url, const std::function<bool(qint64, qint64)>& progres
     QUrl target = url;
     for (int hop = 0; hop <= kRedirectLimit; ++hop) {
         HttpReply current;
-        if (!httpsFetch(target, progress, sink, &current)) {
+        if (!(proxyEnabled() ? proxyHttpsFetch(target, progress, sink, &current) : httpsFetch(target, progress, sink, &current))) {
             *reply = current;
             return false;
         }

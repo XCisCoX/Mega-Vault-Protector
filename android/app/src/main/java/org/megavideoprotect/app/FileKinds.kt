@@ -17,6 +17,21 @@ object FileKinds {
 
     fun peek(id: Long): FileKind? = cache[id]
 
+    /**
+     * What the name alone says, with no vault read. A tap uses this so opening
+     * a video never waits behind the gallery's probes or a folder's worth of
+     * header reads; [resolve] still has the last word when it is free.
+     */
+    fun fromNameOnly(name: String): FileKind = fromName(name)
+
+    /** True when the name alone says "movie" (a picture is on route 1 too). */
+    fun looksLikeVideo(name: String): Boolean {
+        val kind = fromName(name)
+        return kind.route == 1 && !isImage(kind)
+    }
+
+    fun looksLikeAudio(name: String): Boolean = fromName(name).route == 2
+
     fun clear() {
         stamp++
         cache.clear()

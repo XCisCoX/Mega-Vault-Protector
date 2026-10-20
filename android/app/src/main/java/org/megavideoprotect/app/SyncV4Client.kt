@@ -147,7 +147,7 @@ class SyncV4Client(
         body: ByteArray? = null,
         headers: Map<String, String> = emptyMap(),
     ): Response {
-        val connection = URL(server.trimEnd('/') + path).openConnection() as HttpURLConnection
+        val connection = AppProxy.open(URL(server.trimEnd('/') + path))
         try {
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 15_000

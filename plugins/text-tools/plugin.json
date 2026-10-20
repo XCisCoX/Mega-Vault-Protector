@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "org.megavault.text-tools",
+  "name": "Text Tools",
+  "version": "1.0.0",
+  "description": "A general-purpose extension example: text statistics, line cleanup, and JSON formatting, executed locally without network or vault access.",
+  "protocol": "megavault-actions-v1",
+  "platforms": [
+    "windows",
+    "linux",
+    "android"
+  ],
+  "permissions": [],
+  "settings": [
+    {
+      "id": "remove-empty-lines",
+      "title": "Remove empty lines",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "compact-json",
+      "title": "Compact JSON output",
+      "type": "boolean",
+      "default": false
+    }
+  ],
+  "sourceNotice": "Runs locally. Receives only the text you submit; no network, files, or vault keys are exposed to the script.",
+  "commands": [
+    {
+      "id": "statistics",
+      "title": "Text statistics",
+      "inputLabel": "Text to analyze"
+    },
+    {
+      "id": "clean-lines",
+      "title": "Clean up lines",
+      "inputLabel": "Lines to clean"
+    },
+    {
+      "id": "format-json",
+      "title": "Format JSON",
+      "inputLabel": "JSON to format"
+    }
+  ],
+  "script": "\"use strict\";\n\n// Portable JavaScript only: no Node, DOM, network, or filesystem APIs.\n// Each invocation receives just the text the user explicitly submitted.\nfunction inputText(input) {\n    if (!input || typeof input.text !== \"string\") {\n        throw new Error(\"Enter some text first.\");\n    }\n    if (input.text.length > 65536) {\n        throw new Error(\"This example accepts up to 65,536 UTF-16 code units.\");\n    }\n    return input.text;\n}\n\nglobalThis.extension = Object.freeze({\n    commands: Object.freeze({\n        statistics(input) {\n            const text = inputText(input);\n            const trimmed = text.trim();\n            const words = trimmed ? trimmed.split(/\\s+/u).length : 0;\n            const lines = text ? text.split(/\\r\\n|\\r|\\n/u).length : 0;\n            const characters = Array.from(text).length;\n            return {\n                title: \"Text statistics\",\n                text: \"Words (whitespace-separated): \" + words +\n                    \"\\nCharacters (Unicode code points): \" + characters +\n                    \"\\nLines: \" + lines,\n            };\n        },\n        \"clean-lines\"(input) {\n            const text = inputText(input);\n            let lines = text.split(/\\r\\n|\\r|\\n/u).map(line => line.trim());\n            if (!input.settings || input.settings[\"remove-empty-lines\"] !== false) {\n                lines = lines.filter(Boolean);\n            }\n            return {\n                title: \"Cleaned lines\",\n                text: lines.join(\"\\n\"),\n            };\n        },\n        \"format-json\"(input) {\n            const text = inputText(input);\n            const indent = input.settings && input.settings[\"compact-json\"] === true ? 0 : 2;\n            return {title: \"Formatted JSON\", text: JSON.stringify(JSON.parse(text), null, indent)};\n        },\n    }),\n});\n"
+}

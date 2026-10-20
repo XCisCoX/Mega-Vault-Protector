@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "org.megavault.text-tools",
+  "name": "Text Tools",
+  "version": "1.0.0",
+  "description": "A general-purpose extension example: text statistics, line cleanup, and JSON formatting, executed locally without network or vault access.",
+  "protocol": "megavault-actions-v1",
+  "platforms": ["windows", "linux", "android"],
+  "permissions": [],
+  "settings": [
+    {"id": "remove-empty-lines", "title": "Remove empty lines", "type": "boolean", "default": true},
+    {"id": "compact-json", "title": "Compact JSON output", "type": "boolean", "default": false}
+  ],
+  "sourceNotice": "Runs locally. Receives only the text you submit; no network, files, or vault keys are exposed to the script.",
+  "commands": [
+    {"id": "statistics", "title": "Text statistics", "inputLabel": "Text to analyze"},
+    {"id": "clean-lines", "title": "Clean up lines", "inputLabel": "Lines to clean"},
+    {"id": "format-json", "title": "Format JSON", "inputLabel": "JSON to format"}
+  ]
+}

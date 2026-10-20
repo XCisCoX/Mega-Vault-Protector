@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QEventLoop>
+#include <functional>
 #include <QMouseEvent>
+#include <QPixmap>
 #include <QWidget>
 
 class QFrame;
@@ -9,6 +11,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QScrollArea;
 class QVBoxLayout;
 
 namespace videovault::app {
@@ -32,6 +35,12 @@ public:
     int run();
     void finish(int result);
     [[nodiscard]] QString text() const;
+    // Adds a row of widgets (e.g. radio buttons) to the card body.
+    void addRow(QWidget* widget);
+
+    // Test-only: when set, run() shows the sheet and hands it to the driver
+    // instead of spinning a nested event loop, so headless tests can click it.
+    static void setTestDriver(std::function<void(InWindowSheet*)> driver);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -41,18 +50,24 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    void captureBackdrop();
+    bool fitting_{false};
+    bool fitPending_{false};
+    static std::function<void(InWindowSheet*)> testDriver_;
     // The card has a fixed width, so its height has to come from the layout's
     // heightForWidth at that width: a word-wrapped message is otherwise cut off.
     void fitCard();
-
     QFrame* card_{nullptr};
     QLabel* title_{nullptr};
     QLabel* message_{nullptr};
+    QWidget* bodyHost_{nullptr};
+    QScrollArea* scroll_{nullptr};
     QVBoxLayout* body_{nullptr};
     QHBoxLayout* buttons_{nullptr};
     QLineEdit* entry_{nullptr};
     QEventLoop loop_;
     int result_{0};
+    QPixmap backdrop_;
 };
 
 } // namespace videovault::app

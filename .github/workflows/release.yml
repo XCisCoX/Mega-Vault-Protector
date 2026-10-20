@@ -85,17 +85,39 @@ jobs:
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
-
       # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
-      # vcpkg copies may not resolve. A FULL clone is required: a shallow
-      # clone does not contain the baseline commit, so `git show
-      # <baseline>:versions/baseline.json` fails ("failed to git show").
+      # vcpkg copies may not resolve, and resolving it needs vcpkg's own git
+      # history. That baseline never changes between builds, so the tool and its
+      # registry come back from cache instead of being cloned on every run.
+      - name: Cache the vcpkg tool and registry
+        id: vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg
+          key: vcpkg-tool-${{ runner.os }}-b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
-          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          $root = "$env:RUNNER_TEMP\vcpkg"
+          Write-Output "vcpkg tool cache: ${{ steps.vcpkg-tool.outputs.cache-hit == 'true' && 'hit' || 'miss' }}"
+          if (-not (Test-Path "$root\.git")) {
+            # A miss needs a FULL clone: a shallow one cannot resolve the baseline.
+            git clone https://github.com/microsoft/vcpkg.git $root
+          }
+          if (-not (Test-Path "$root\vcpkg.exe")) {
+            & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          }
 
+      # ffmpeg is the expensive port (15-20 minutes even with the release-only
+      # triplet). Caching the installed tree turns `vcpkg install` into a
+      # validation pass of seconds. The key follows the baseline, the manifest
+      # and the overlay triplet, so a dependency change starts a clean tree.
+      - name: Cache the built dependencies
+        id: vcpkg-installed
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01-${{ hashFiles('vcpkg.json', 'third_party/vcpkg-overlays/triplets/x64-windows-release.cmake') }}
       - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
         shell: pwsh
         env:
@@ -110,6 +132,7 @@ jobs:
           #    ffmpeg/openssl/etc. from cache instead of recompiling.
           VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
         run: |
+          Write-Output "dependency cache: ${{ steps.vcpkg-installed.outputs.cache-hit == 'true' && 'hit (verify only)' || 'miss (building)' }}"
           # --vcpkg-root overrides the runner's VS-installed VCPKG_ROOT env
           # (otherwise vcpkg detects the temp root and warns about the mismatch).
           & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
@@ -117,6 +140,7 @@ jobs:
             --triplet x64-windows-release `
             --overlay-triplets="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
             --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 
       # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
       # DLL export tables (same step as local builds; paths come from env).
@@ -127,6 +151,49 @@ jobs:
           MVP_VCPKG_INSTALLED: ${{ runner.temp }}\vcpkg_installed\x64-windows-release
           MVP_FFMPEG_DEFS: ${{ runner.temp }}\ffmpeg-defs
         run: bash scripts/regenerate-ffmpeg-importlibs.sh
+
+      # Qt 5.12 loads OpenSSL 1.1 by name (libssl-1_1-x64.dll). The rest of the
+      # package is OpenSSL 3, so nothing satisfied Qt and every HTTPS request
+      # QNetworkAccessManager made — cloud sync, and the provider plugin — failed
+      # before it was sent. Build the 1.1 runtime Qt expects and ship it beside
+      # the exe; the app's own crypto keeps using OpenSSL 3 under different names.
+      # Building 1.1.1w costs several minutes and yields the same two DLLs every
+      # time, so the build output is cached by commit; a hit skips configure and
+      # nmake and only re-verifies the files.
+      - name: Cache OpenSSL 1.1 for Qt TLS
+        id: openssl11
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl11
+          key: openssl11-${{ runner.os }}-e04bd3433fd84e1861bf258ea37928d9845e6a86
+      - name: Build OpenSSL 1.1 for Qt TLS
+        if: steps.openssl11.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          OPENSSL_COMMIT: e04bd3433fd84e1861bf258ea37928d9845e6a86
+        run: |
+          $src = "$env:RUNNER_TEMP\openssl11"
+          git clone --quiet --depth 1 --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git $src
+          $head = git -C $src rev-parse HEAD
+          if ($head -ne $env:OPENSSL_COMMIT) { throw "OpenSSL_1_1_1w moved: $head" }
+          Push-Location $src
+          perl Configure VC-WIN64A no-asm no-tests no-comp
+          if ($LASTEXITCODE -ne 0) { throw "OpenSSL configure failed" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && nmake /nologo"
+          if ($LASTEXITCODE -ne 0) { throw "OpenSSL build failed" }
+          Pop-Location
+          foreach ($dll in @("libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll")) {
+            if (-not (Test-Path "$src\$dll")) { throw "OpenSSL did not produce $dll" }
+          }
+      - name: Verify the Qt TLS runtime
+        shell: pwsh
+        run: |
+          foreach ($dll in @("libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll")) {
+            if (-not (Test-Path "$env:RUNNER_TEMP\openssl11\$dll")) { throw "Qt TLS runtime missing: $dll" }
+          }
+          Write-Output "Qt TLS runtime ready (cache: ${{ steps.openssl11.outputs.cache-hit == 'true' && 'hit' || 'built' }})"
 
       - name: Configure (Release)
         shell: pwsh
@@ -172,11 +239,14 @@ jobs:
           # picked list forgot argon2/libsodium/sqlcipher, which made the zip
           # fail on clean machines.
           Get-ChildItem "$exeDir\*.dll" | Copy-Item -Destination $staging
+          # Qt's own TLS dependency, built above; it lives outside the exe dir.
+          Copy-Item "$env:RUNNER_TEMP\openssl11\libssl-1_1-x64.dll",
+                    "$env:RUNNER_TEMP\openssl11\libcrypto-1_1-x64.dll" $staging
           # Gather Qt platform plugins, styles, ICU, etc.
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVaultProtect.exe"
           # Defensive: the crypto stack and the five FFmpeg DLLs must be in the
           # package (throw with a clear message if any are missing).
-          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","zlib1.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
+          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","libssl-1_1-x64.dll","libcrypto-1_1-x64.dll","zlib1.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
             if (-not (Test-Path "$staging\$dll")) { throw "Missing runtime DLL in package: $dll" }
           }
           Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVaultProtect-windows-x64.zip" -Force
@@ -250,6 +320,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The notes diff against the previous published tag.
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -268,20 +341,42 @@ jobs:
           test -f "$dir/app-release.apk"
           mv "$dir/app-release.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
+      # Deterministic change summary since the previous release tag, optionally
+      # written as prose by an OpenAI-compatible endpoint when
+      # MVP_NOTES_API_KEY is configured. Without the secret the notes are still
+      # accurate and the release never depends on a network service.
+      - name: Generate release notes
+        shell: bash
+        env:
+          MVP_NOTES_API_KEY: ${{ secrets.MVP_NOTES_API_KEY }}
+          MVP_NOTES_MODEL: ${{ vars.MVP_NOTES_MODEL }}
+          MVP_NOTES_ENDPOINT: ${{ vars.MVP_NOTES_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-notes.py \
+            --auto \
+            --version "${{ needs.version.outputs.tag }}" \
+            --to "${{ needs.version.outputs.tag }}" \
+            --out "$RUNNER_TEMP/notes.md"
+          {
+            echo "Windows, Linux, and Android downloads for this version."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo "- **Windows x64:** unzip and run \`MegaVaultProtect.exe\`."
+            echo "- **Linux x64:** extract and run \`./MegaVaultProtect.sh\`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive."
+            echo "- **Android (arm64):** install \`MegaVaultProtect-android-arm64.apk\` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app."
+            echo
+            echo "The vault stays on your machine. Playback does not decrypt videos onto disk."
+          } > "$RUNNER_TEMP/body.md"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: Mega Vault Protect ${{ needs.version.outputs.tag }}
           fail_on_unmatched_files: true
-          body: |
-            Windows, Linux, and Android downloads for this version.
-
-            - **Windows x64:** unzip and run `MegaVaultProtect.exe`.
-            - **Linux x64:** extract and run `./MegaVaultProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive.
-            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app. Copies installed from releases published before this became the case carry a per-build CI key and need one uninstall before they can join that line.
-
-            The vault stays on your machine. Playback does not decrypt videos onto disk.
+          body_path: ${{ runner.temp }}/body.md
           files: |
             ${{ runner.temp }}/artifacts/MegaVaultProtect-windows-x64.zip
             ${{ runner.temp }}/artifacts/MegaVaultProtect-linux-x64.tar.gz

@@ -27,7 +27,7 @@ class RemoteHttpDataSource private constructor() : BaseDataSource(/* isNetwork= 
     override fun open(dataSpec: DataSpec): Long {
         transferInitializing(dataSpec)
         if (!RemoteVault.connected()) throw IOException("The PC connection is closed.")
-        val conn = (URL(dataSpec.uri.toString()).openConnection() as HttpsURLConnection).apply {
+        val conn = (AppProxy.open(URL(dataSpec.uri.toString())) as HttpsURLConnection).apply {
             RemoteVault.applySecurity(this)
             requestMethod = "GET"
             connectTimeout = 8_000

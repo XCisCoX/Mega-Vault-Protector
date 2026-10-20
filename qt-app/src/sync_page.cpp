@@ -8,6 +8,7 @@
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QCheckBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
@@ -17,6 +18,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QSslSocket>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -407,39 +409,121 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     status_->hide();
     workLayout->addWidget(status_);
 
-    conflictBox_ = new QWidget(work_);
-    auto* conflictLayout = new QVBoxLayout(conflictBox_);
-    conflictLayout->setContentsMargins(0, 0, 0, 0);
-    conflictLayout->setSpacing(6);
-    conflictLayout->addWidget(
-        sectionLabel(QStringLiteral("Conflict copies"), conflictBox_));
-    conflicts_ = new QListWidget(conflictBox_);
-    conflicts_->setObjectName(QStringLiteral("syncConflicts"));
-    conflicts_->setFrameShape(QFrame::NoFrame);
-    conflicts_->setSelectionMode(QAbstractItemView::NoSelection);
-    conflicts_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    conflicts_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    conflicts_->setStyleSheet(rowStyle("syncConflicts"));
-    conflictLayout->addWidget(conflicts_);
-    conflictBox_->hide();
-    workLayout->addWidget(conflictBox_);
+    // -- the vault as one list, with a selection ---------------------------
+    itemsBox_ = new QWidget(work_);
+    auto* itemsLayout = new QVBoxLayout(itemsBox_);
+    itemsLayout->setContentsMargins(0, 0, 0, 0);
+    itemsLayout->setSpacing(8);
 
-    debrisBox_ = new QWidget(work_);
-    auto* debrisLayout = new QVBoxLayout(debrisBox_);
-    debrisLayout->setContentsMargins(0, 0, 0, 0);
-    debrisLayout->setSpacing(6);
-    debrisLayout->addWidget(
-        sectionLabel(QStringLiteral("Removed on another device"), debrisBox_));
-    debris_ = new QListWidget(debrisBox_);
-    debris_->setObjectName(QStringLiteral("syncDebris"));
-    debris_->setFrameShape(QFrame::NoFrame);
-    debris_->setSelectionMode(QAbstractItemView::NoSelection);
-    debris_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    debris_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    debris_->setStyleSheet(rowStyle("syncDebris"));
-    debrisLayout->addWidget(debris_);
-    debrisBox_->hide();
-    workLayout->addWidget(debrisBox_);
+    auto* itemsHead = new QHBoxLayout();
+    itemsHead->setContentsMargins(0, 0, 0, 0);
+    itemsHead->setSpacing(8);
+    itemsHead->addWidget(sectionLabel(QStringLiteral("Items in this vault"), itemsBox_), 1);
+    selectAll_ = new QPushButton(QStringLiteral("Select all"), itemsBox_);
+    selectAll_->setObjectName(QStringLiteral("syncSelectAll"));
+    selectAll_->setCursor(Qt::PointingHandCursor);
+    selectAll_->setFocusPolicy(Qt::NoFocus);
+    selectAll_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; border: none; color: palette(link);"
+        " padding: 0 4px; min-height: 24px; font: 600 12px \"Segoe UI\"; }"
+        "QPushButton:hover { color: white; }"));
+    itemsHead->addWidget(selectAll_);
+    itemsLayout->addLayout(itemsHead);
+
+    items_ = new QListWidget(itemsBox_);
+    items_->setObjectName(QStringLiteral("syncItems"));
+    items_->setFrameShape(QFrame::NoFrame);
+    items_->setSelectionMode(QAbstractItemView::NoSelection);
+    items_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    items_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    items_->setStyleSheet(rowStyle("syncItems"));
+    itemsLayout->addWidget(items_);
+
+    const QString actionStyle = QStringLiteral(
+        "QPushButton { background: palette(alternate-base); color: palette(text);"
+        " border: 1px solid palette(midlight); border-radius: 12px; padding: 0 10px;"
+        " min-height: 30px; font: 600 12px \"Segoe UI\"; }"
+        "QPushButton:hover { background: palette(midlight); }"
+        "QPushButton:disabled { color: palette(placeholder-text); }");
+    const QString dangerStyle = QStringLiteral(
+        "QPushButton { background: transparent; color: #ff6b6b;"
+        " border: 1px solid #ff6b6b; border-radius: 12px; padding: 0 10px;"
+        " min-height: 30px; font: 600 12px \"Segoe UI\"; }"
+        "QPushButton:hover { color: #ff8f85; border-color: #ff8f85; }"
+        "QPushButton:disabled { color: palette(placeholder-text); border-color: palette(midlight); }");
+
+    auto* firstActions = new QHBoxLayout();
+    firstActions->setContentsMargins(0, 0, 0, 0);
+    firstActions->setSpacing(6);
+    keep_ = new QPushButton(QStringLiteral("Keep on device"), itemsBox_);
+    keep_->setObjectName(QStringLiteral("syncKeep"));
+    keep_->setToolTip(QStringLiteral("Download the ticked items from the vault to this device"));
+    offload_ = new QPushButton(QStringLiteral("Remove from device"), itemsBox_);
+    offload_->setObjectName(QStringLiteral("syncOffload"));
+    offload_->setToolTip(QStringLiteral("Delete the local copy only; the item stays in the vault"));
+    restore_ = new QPushButton(QStringLiteral("Restore"), itemsBox_);
+    restore_->setObjectName(QStringLiteral("syncRestore"));
+    restore_->setToolTip(QStringLiteral("Bring back items that were removed everywhere"));
+    for (auto* button : {keep_, offload_, restore_}) {
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setStyleSheet(actionStyle);
+    }
+    firstActions->addWidget(keep_);
+    firstActions->addWidget(offload_);
+    firstActions->addWidget(restore_);
+    itemsLayout->addLayout(firstActions);
+
+    auto* secondActions = new QHBoxLayout();
+    secondActions->setContentsMargins(0, 0, 0, 0);
+    secondActions->setSpacing(6);
+    recycle_ = new QPushButton(QStringLiteral("Recycle"), itemsBox_);
+    recycle_->setObjectName(QStringLiteral("syncRecycle"));
+    recycle_->setToolTip(QStringLiteral("Remove the ticked items on every device; they stay under Removed"));
+    recycle_->setCursor(Qt::PointingHandCursor);
+    recycle_->setFocusPolicy(Qt::NoFocus);
+    recycle_->setStyleSheet(actionStyle);
+    purgeButton_ = new QPushButton(QStringLiteral("Delete permanently"), itemsBox_);
+    purgeButton_->setObjectName(QStringLiteral("syncPurge"));
+    purgeButton_->setToolTip(QStringLiteral("Delete the ticked items from the server and every device"));
+    purgeButton_->setCursor(Qt::PointingHandCursor);
+    purgeButton_->setFocusPolicy(Qt::NoFocus);
+    purgeButton_->setStyleSheet(dangerStyle);
+    selectionLabel_ = quietLabel(itemsBox_);
+    selectionLabel_->setObjectName(QStringLiteral("syncSelection"));
+    secondActions->addWidget(recycle_);
+    secondActions->addWidget(purgeButton_);
+    secondActions->addWidget(selectionLabel_, 1);
+    itemsLayout->addLayout(secondActions);
+
+    confirmBar_ = new QWidget(itemsBox_);
+    auto* confirmLayout = new QHBoxLayout(confirmBar_);
+    confirmLayout->setContentsMargins(0, 0, 0, 0);
+    confirmLayout->setSpacing(6);
+    confirmText_ = quietLabel(confirmBar_);
+    confirmText_->setObjectName(QStringLiteral("syncPurgeQuestion"));
+    confirmText_->setWordWrap(true);
+    confirmCancel_ = new QPushButton(QStringLiteral("Cancel"), confirmBar_);
+    confirmCancel_->setObjectName(QStringLiteral("syncPurgeCancel"));
+    confirmCancel_->setCursor(Qt::PointingHandCursor);
+    confirmCancel_->setFocusPolicy(Qt::NoFocus);
+    confirmCancel_->setStyleSheet(actionStyle);
+    confirmDelete_ = new QPushButton(QStringLiteral("Delete"), confirmBar_);
+    confirmDelete_->setObjectName(QStringLiteral("syncPurgeConfirm"));
+    confirmDelete_->setCursor(Qt::PointingHandCursor);
+    confirmDelete_->setFocusPolicy(Qt::NoFocus);
+    confirmDelete_->setStyleSheet(dangerStyle);
+    confirmLayout->addWidget(confirmText_, 1);
+    confirmLayout->addWidget(confirmCancel_);
+    confirmLayout->addWidget(confirmDelete_);
+    confirmBar_->hide();
+    // The question appears above the list, never where an action button was a
+    // moment ago: a click on "Delete permanently" must not land on "Delete"
+    // because the row grew under the pointer.
+    itemsLayout->insertWidget(1, confirmBar_);
+
+    itemsBox_->hide();
+    workLayout->addWidget(itemsBox_);
 
     work_->hide();
     columnLayout->addWidget(work_);
@@ -476,9 +560,35 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
         refresh();
     });
     connect(engine_, &SyncEngine::libraryChanged, this, [this] {
-        rebuildDebris();
-        rebuildConflicts();
+        rebuildItems();
     });
+
+    connect(selectAll_, &QPushButton::clicked, this, [this] {
+        selectAll(checked_.size() < items_->count());
+    });
+    connect(keep_, &QPushButton::clicked, this, [this] {
+        const QStringList ids = checkedRecords({QStringLiteral("pending"), QStringLiteral("remote")});
+        if (!ids.isEmpty()) engine_->receiveMany(ids);
+    });
+    connect(offload_, &QPushButton::clicked, this, [this] {
+        const QStringList ids = checkedRecords({QStringLiteral("synced"), QStringLiteral("queued")});
+        if (!ids.isEmpty()) engine_->removeFromDevice(ids);
+    });
+    connect(restore_, &QPushButton::clicked, this, [this] {
+        const QStringList ids = checkedRecords({QStringLiteral("removed")});
+        if (!ids.isEmpty()) engine_->restoreMany(ids);
+    });
+    connect(recycle_, &QPushButton::clicked, this, [this] {
+        const QStringList ids = checkedRecords({QStringLiteral("synced"), QStringLiteral("queued"),
+                                                QStringLiteral("pending"), QStringLiteral("remote")});
+        if (!ids.isEmpty()) engine_->tombstoneMany(ids);
+    });
+    connect(purgeButton_, &QPushButton::clicked, this, &SyncPage::requestPurge);
+    connect(confirmCancel_, &QPushButton::clicked, this, [this] {
+        pendingPurge_.clear();
+        confirmBar_->hide();
+    });
+    connect(confirmDelete_, &QPushButton::clicked, this, &SyncPage::confirmPurge);
 
     refresh();
 }
@@ -510,6 +620,21 @@ void SyncPage::showEvent(QShowEvent* event) {
 
 void SyncPage::signIn() {
     if (engine_->busy()) {
+        return;
+    }
+    // Without a TLS backend Qt cannot open an https URL at all, and the generic
+    // network error it returns ("TLS initialization failed") hides that. Say it
+    // plainly instead of letting the user hunt for a server problem. An empty
+    // address stays the engine's own refusal, which names the rule.
+    const QString address = url_->text().trimmed();
+    // Only https needs the missing library; a plain-http address still goes
+    // through the engine, which reports its own connection result.
+    if (address.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive) &&
+        !QSslSocket::supportsSsl()) {
+        signInStatus_->setText(
+            QStringLiteral("This build has no TLS library, so it cannot reach an https server. "
+                           "Windows builds need libssl-1_1-x64.dll next to the exe."));
+        signInStatus_->show();
         return;
     }
     const QString password = password_->text();
@@ -554,9 +679,9 @@ void SyncPage::signOut() {
     password_->clear();
     lastPassAt_ = QDateTime();
     vaultSignature_.clear();
-    debrisSignature_.clear();
-    conflictSignature_.clear();
-    confirmingRecord_.clear();
+    itemsSignature_.clear();
+    checked_.clear();
+    pendingPurge_.clear();
     refresh();
 }
 
@@ -593,6 +718,8 @@ void SyncPage::refresh() {
     stop_->setVisible(signedIn && busy);
 
     if (!signedIn) {
+        // Nothing is listed while signed out, so no bulk action may look ready.
+        updateSelection();
         const QString text = engine_->status();
         const bool showError = failed && !text.isEmpty();
         signInStatus_->setText(showError ? text : QString());
@@ -621,8 +748,7 @@ void SyncPage::refresh() {
               .arg(QString::fromLatin1(kSecondary)));
 
     rebuildVaults();
-    rebuildConflicts();
-    rebuildDebris();
+    rebuildItems();
 }
 
 QString SyncPage::lastRunLine() const {
@@ -796,37 +922,78 @@ void SyncPage::rebuildVaults() {
     vaults_->setFixedHeight(visibleRows * 44 + 2);
 }
 
-void SyncPage::rebuildConflicts() {
-    QStringList names;
-    for (const auto& value : engine_->items()) {
+namespace {
+
+// What a row says under its name. The engine's states are precise; these are
+// the words a person reads.
+QString itemStateText(const QString& stateText) {
+    if (stateText == QLatin1String("synced")) return QStringLiteral("On this device");
+    if (stateText == QLatin1String("queued")) return QStringLiteral("Not uploaded yet");
+    if (stateText == QLatin1String("pending")) return QStringLiteral("Waiting to download");
+    if (stateText == QLatin1String("remote")) return QStringLiteral("Only in the cloud");
+    if (stateText == QLatin1String("removed")) return QStringLiteral("Removed everywhere");
+    return stateText;
+}
+
+}  // namespace
+
+void SyncPage::rebuildItems() {
+    const QJsonArray rows = engine_->items();
+    QStringList signature;
+    QSet<QString> present;
+    for (const auto& value : rows) {
         const QJsonObject item = value.toObject();
-        const QString name = item.value(QStringLiteral("name")).toString();
-        if (name.contains(QStringLiteral("(conflict copy)"))) {
-            names << name;
-        }
+        const QString id = item.value(QStringLiteral("record")).toString();
+        present.insert(id);
+        signature << QStringLiteral("%1|%2|%3|%4")
+                         .arg(id, item.value(QStringLiteral("state")).toString(),
+                             item.value(QStringLiteral("name")).toString(),
+                             QString::number(qint64(item.value(QStringLiteral("size")).toDouble())));
     }
-    const QString joined = names.join(QLatin1Char('\n'));
-    if (joined == conflictSignature_ && conflicts_->count() == names.size()) {
-        conflictBox_->setVisible(!names.isEmpty());
+    signature.sort();
+    // A selection survives a redraw, but only for rows that still exist.
+    for (auto it = checked_.begin(); it != checked_.end();) {
+        it = present.contains(*it) ? std::next(it) : checked_.erase(it);
+    }
+    const QString joined = signature.join(QLatin1Char('\n'));
+    if (joined == itemsSignature_ && items_->count() == rows.size()) {
+        itemsBox_->setVisible(!rows.isEmpty());
+        updateSelection();
         return;
     }
-    conflictSignature_ = joined;
+    itemsSignature_ = joined;
 
     building_ = true;
-    conflicts_->clear();
-    for (const auto& value : engine_->items()) {
+    items_->clear();
+    for (const auto& value : rows) {
         const QJsonObject item = value.toObject();
+        const QString id = item.value(QStringLiteral("record")).toString();
         const QString name = item.value(QStringLiteral("name")).toString();
-        if (!name.contains(QStringLiteral("(conflict copy)"))) {
-            continue;
-        }
-        auto* entry = new QListWidgetItem(conflicts_);
+        const qint64 size = qint64(item.value(QStringLiteral("size")).toDouble());
+
+        auto* entry = new QListWidgetItem(items_);
         entry->setText(QString());
-        entry->setSizeHint(QSize(0, 41));
+        entry->setSizeHint(QSize(0, 48));
+        entry->setData(Qt::UserRole, id);
         entry->setToolTip(item.value(QStringLiteral("path")).toString());
 
-        const RowParts parts = makeRow(conflicts_, 41, QStringLiteral("syncConflictRow"));
-        auto* nameLabel = new QLabel(elided(name, rowFont(), 320), parts.row);
+        const RowParts parts = makeRow(items_, 48, QStringLiteral("syncItemRow"));
+        auto* tick = new QCheckBox(parts.row);
+        tick->setObjectName(QStringLiteral("syncItemCheck"));
+        tick->setProperty("record", id);
+        tick->setChecked(checked_.contains(id));
+        tick->setCursor(Qt::PointingHandCursor);
+        tick->setFocusPolicy(Qt::NoFocus);
+        connect(tick, &QCheckBox::toggled, this, [this, id](bool on) {
+            if (on) {
+                checked_.insert(id);
+            } else {
+                checked_.remove(id);
+            }
+            updateSelection();
+        });
+
+        auto* nameLabel = new QLabel(elided(name, rowFont(), 240), parts.row);
         nameLabel->setFont(rowFont());
         nameLabel->setStyleSheet(QStringLiteral(
             "color: palette(text); background: transparent;"));
@@ -836,141 +1003,117 @@ void SyncPage::rebuildConflicts() {
         meta->setFont(metaFont());
         meta->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
                                 .arg(QString::fromLatin1(kSecondary)));
-        meta->setText(QStringLiteral("Both versions kept"));
+        meta->setText(QStringLiteral("%1 · %2")
+                          .arg(itemStateText(item.value(QStringLiteral("state")).toString()),
+                              bytesText(double(size))));
         meta->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+
+        parts.body->addWidget(tick);
         parts.body->addWidget(nameLabel, 1);
         parts.body->addWidget(meta);
-        conflicts_->setItemWidget(entry, parts.row);
+        items_->setItemWidget(entry, parts.row);
     }
     building_ = false;
 
-    conflictBox_->setVisible(!names.isEmpty());
-    const int visibleRows = std::min(int(names.size()), 3);
-    conflicts_->setFixedHeight(visibleRows * 40 + 2);
+    itemsBox_->setVisible(!rows.isEmpty());
+    const int visibleRows = std::min(int(rows.size()), 6);
+    items_->setFixedHeight(visibleRows * 47 + 2);
+    updateSelection();
 }
 
-QWidget* SyncPage::debrisRow(const QJsonObject& item) {
-    const QString record = item.value(QStringLiteral("record")).toString();
-    const QString name = item.value(QStringLiteral("name")).toString();
-    const bool confirming = !record.isEmpty() && record == confirmingRecord_;
-
-    const RowParts parts = makeRow(debris_, 45, QStringLiteral("syncDebrisRow"));
-    auto* nameLabel = new QLabel(elided(name, rowFont(), 220), parts.row);
-    nameLabel->setFont(rowFont());
-    nameLabel->setStyleSheet(QStringLiteral(
-        "color: palette(text); background: transparent;"));
-    nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    auto* meta = quietLabel(parts.row);
-    meta->setFont(metaFont());
-    meta->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
-                            .arg(QString::fromLatin1(kSecondary)));
-    // The section heading already says where these came from, so the row only
-    // speaks up when it is about to delete something.
-    meta->setText(confirming ? QStringLiteral("Delete from the server and this device?")
-                             : QString());
-    meta->setVisible(confirming);
-    meta->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    parts.body->addWidget(nameLabel, 1);
-    parts.body->addWidget(meta);
-
-    const QString actionStyle = QStringLiteral(
-        "QPushButton { background: transparent; border: none; color: palette(link);"
-        " padding: 0 8px; min-height: 28px; font: 600 12px \"Segoe UI\"; }"
-        "QPushButton:hover { color: white; }");
-    const QString dangerStyle = QStringLiteral(
-        "QPushButton { background: transparent; border: none; color: #ff6b6b;"
-        " padding: 0 8px; min-height: 28px; font: 600 12px \"Segoe UI\"; }"
-        "QPushButton:hover { color: #ff8f85; }");
-
-    if (confirming) {
-        auto* cancel = new QPushButton(QStringLiteral("Cancel"), parts.row);
-        icons::withText(cancel, QStringLiteral("x"));
-        cancel->setObjectName(QStringLiteral("syncDebrisCancel"));
-        cancel->setCursor(Qt::PointingHandCursor);
-        cancel->setFocusPolicy(Qt::NoFocus);
-        cancel->setStyleSheet(actionStyle);
-        auto* remove = new QPushButton(QStringLiteral("Delete"), parts.row);
-        icons::withText(remove, QStringLiteral("trash"));
-        remove->setObjectName(QStringLiteral("syncDebrisConfirm"));
-        remove->setCursor(Qt::PointingHandCursor);
-        remove->setFocusPolicy(Qt::NoFocus);
-        remove->setStyleSheet(dangerStyle);
-        parts.body->addWidget(cancel);
-        parts.body->addWidget(remove);
-        connect(cancel, &QPushButton::clicked, this, [this] {
-            confirmingRecord_.clear();
-            rebuildDebris();
-        });
-        connect(remove, &QPushButton::clicked, this, [this, record] {
-            confirmingRecord_.clear();
-            engine_->purge(record);
-            rebuildDebris();
-        });
-    } else {
-        auto* restore = new QPushButton(QStringLiteral("Restore"), parts.row);
-        icons::withText(restore, QStringLiteral("rotate-ccw"));
-        restore->setObjectName(QStringLiteral("syncRestore"));
-        restore->setCursor(Qt::PointingHandCursor);
-        restore->setFocusPolicy(Qt::NoFocus);
-        restore->setStyleSheet(actionStyle);
-        auto* purge = new QPushButton(QStringLiteral("Delete permanently"), parts.row);
-        icons::withText(purge, QStringLiteral("trash"));
-        purge->setObjectName(QStringLiteral("syncPurge"));
-        purge->setCursor(Qt::PointingHandCursor);
-        purge->setFocusPolicy(Qt::NoFocus);
-        purge->setStyleSheet(dangerStyle);
-        parts.body->addWidget(restore);
-        parts.body->addWidget(purge);
-        connect(restore, &QPushButton::clicked, this, [this, record] {
-            confirmingRecord_.clear();
-            engine_->restore(record);
-        });
-        connect(purge, &QPushButton::clicked, this, [this, record] {
-            confirmingRecord_ = record;
-            rebuildDebris();
-        });
-    }
-    return parts.row;
-}
-
-void SyncPage::rebuildDebris() {
-    QStringList records;
+void SyncPage::updateSelection() {
+    int local = 0;
+    int remote = 0;
+    int removed = 0;
     for (const auto& value : engine_->items()) {
         const QJsonObject item = value.toObject();
-        if (item.value(QStringLiteral("state")).toString() == QLatin1String("removed")) {
-            records << item.value(QStringLiteral("record")).toString();
-        }
-    }
-    const QString joined = records.join(QLatin1Char('\n')) + QLatin1Char('|') + confirmingRecord_;
-    if (joined == debrisSignature_ && debris_->count() == records.size()) {
-        debrisBox_->setVisible(!records.isEmpty());
-        return;
-    }
-    debrisSignature_ = joined;
-
-    building_ = true;
-    debris_->clear();
-    for (const auto& value : engine_->items()) {
-        const QJsonObject item = value.toObject();
-        if (item.value(QStringLiteral("state")).toString() != QLatin1String("removed")) {
+        if (!checked_.contains(item.value(QStringLiteral("record")).toString())) {
             continue;
         }
-        auto* entry = new QListWidgetItem(debris_);
-        entry->setText(QString());
-        entry->setSizeHint(QSize(0, 45));
-        entry->setData(Qt::UserRole, item.value(QStringLiteral("record")).toString());
-        entry->setToolTip(item.value(QStringLiteral("path")).toString());
-        debris_->setItemWidget(entry, debrisRow(item));
+        const QString stateText = item.value(QStringLiteral("state")).toString();
+        if (stateText == QLatin1String("synced") || stateText == QLatin1String("queued")) {
+            ++local;
+        } else if (stateText == QLatin1String("removed")) {
+            ++removed;
+        } else {
+            ++remote;
+        }
     }
-    building_ = false;
+    const int count = checked_.size();
+    const bool idle = !engine_->busy();
+    selectionLabel_->setText(count == 0
+            ? QStringLiteral("Tick items to act on them")
+            : count == 1 ? QStringLiteral("1 selected")
+                         : QStringLiteral("%1 selected").arg(count));
+    selectAll_->setText(count > 0 && count == items_->count()
+            ? QStringLiteral("Clear")
+            : QStringLiteral("Select all"));
+    // Each action is offered only when the selection holds something it can
+    // act on.
+    keep_->setEnabled(remote > 0 && idle);
+    offload_->setEnabled(local > 0 && idle);
+    restore_->setEnabled(removed > 0 && idle);
+    recycle_->setEnabled((local + remote) > 0 && idle);
+    purgeButton_->setEnabled(count > 0 && idle);
+    if (count == 0) {
+        pendingPurge_.clear();
+        confirmBar_->hide();
+    }
+}
 
-    if (records.isEmpty()) {
-        confirmingRecord_.clear();
+void SyncPage::selectAll(const bool select) {
+    checked_.clear();
+    if (select) {
+        for (int row = 0; row < items_->count(); ++row) {
+            const QString id = items_->item(row)->data(Qt::UserRole).toString();
+            if (!id.isEmpty()) {
+                checked_.insert(id);
+            }
+        }
     }
-    debrisBox_->setVisible(!records.isEmpty());
-    const int visibleRows = std::min(int(records.size()), 3);
-    debris_->setFixedHeight(visibleRows * 45 + 2);
+    const auto boxes = items_->findChildren<QCheckBox*>(QStringLiteral("syncItemCheck"));
+    for (auto* box : boxes) {
+        QSignalBlocker blocker(box);
+        box->setChecked(select);
+    }
+    updateSelection();
+}
+
+QStringList SyncPage::checkedRecords(const QStringList& states) const {
+    QStringList ids;
+    for (const auto& value : engine_->items()) {
+        const QJsonObject item = value.toObject();
+        const QString id = item.value(QStringLiteral("record")).toString();
+        if (id.isEmpty() || !checked_.contains(id)) {
+            continue;
+        }
+        if (states.contains(item.value(QStringLiteral("state")).toString())) {
+            ids << id;
+        }
+    }
+    return ids;
+}
+
+void SyncPage::requestPurge() {
+    const QStringList ids = checkedRecords({QStringLiteral("synced"), QStringLiteral("queued"),
+        QStringLiteral("pending"), QStringLiteral("remote"), QStringLiteral("removed")});
+    if (ids.isEmpty()) {
+        return;
+    }
+    pendingPurge_ = ids;
+    confirmText_->setText(ids.size() == 1
+            ? QStringLiteral("Delete 1 item permanently? It cannot be restored.")
+            : QStringLiteral("Delete %1 items permanently? They cannot be restored.").arg(ids.size()));
+    confirmBar_->show();
+}
+
+void SyncPage::confirmPurge() {
+    const QStringList ids = pendingPurge_;
+    pendingPurge_.clear();
+    confirmBar_->hide();
+    if (!ids.isEmpty()) {
+        engine_->purgeMany(ids);
+    }
 }
 
 } // namespace videovault::app

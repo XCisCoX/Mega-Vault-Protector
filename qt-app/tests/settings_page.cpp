@@ -1,8 +1,11 @@
 // Offscreen settings regression tests. Only a generated vault and isolated INI settings.
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/proxy_settings.hpp"
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
+#include <QAbstractButton>
 #include <QAccessible>
 #include <QCheckBox>
 #include <QComboBox>
@@ -13,6 +16,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTabBar>
@@ -22,9 +26,20 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <iostream>
+#include <algorithm>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace {
+
+// Progress marks keep a CI timeout diagnosable: the last mark names the stage
+// that stopped answering, which no assertion message can do once it hangs.
+static void stageMark(const char* stage) {
+    std::fprintf(stderr, "[stage] %s\n", stage);
+    std::fflush(stderr);
+}
+
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -48,6 +63,7 @@ int main(int argc, char** argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
+        stageMark("start");
 #ifdef Q_OS_WIN
         const auto root = std::filesystem::path(temporary.path().toStdWString()) / L"vault";
 #else
@@ -64,9 +80,11 @@ int main(int argc, char** argv) {
         };
         auto* tabs = child.operator()<QTabBar>("settingsNavigation");
         auto* sections = child.operator()<QStackedWidget>("settingsSections");
-        check(tabs->count() == 5 && sections->count() == 5, "five settings sections");
+        check(page.findChild<QCheckBox*>("useProxy") != nullptr, "proxy settings switch must be reachable");
+        check(tabs->count() == 6 && sections->count() == 6, "six settings sections");
         check(tabs->tabText(0) == "Updates" && tabs->tabText(4) == "Library", "section order");
         page.resize(480, 640); page.show(); app.processEvents();
+        stageMark("page shown");
         int preferences = 0, libraryChanges = 0, appearanceChanges = 0, checks = 0, closes = 0;
         QObject::connect(&page, &videovault::app::SettingsDialog::updatePreferencesChanged, [&] { ++preferences; });
         QObject::connect(&page, &videovault::app::SettingsDialog::settingsChanged, [&] { ++libraryChanges; });
@@ -96,6 +114,7 @@ int main(int argc, char** argv) {
         manual->click(); check(checks == 1, "busy check cannot fire");
         check(child.operator()<QLabel>("updateStatus")->text() == "Checking test release", "inline update state");
         page.setUpdateStatus("Up to date"); check(manual->isEnabled(), "manual check restored");
+        stageMark("updates section");
         tabs->setCurrentIndex(1); app.processEvents();
         check(child.operator()<QPushButton>("theme_dark")->isChecked(), "default dark appearance");
         for (const auto& theme : {QString("light"), QString("system"), QString("dark")}) {
@@ -105,9 +124,12 @@ int main(int argc, char** argv) {
             check(QSettings().value("appearance/theme").toString() == theme, "appearance saved");
         }
         check(appearanceChanges == 3 && libraryChanges == 0, "appearance isolated signal");
+        stageMark("appearance section");
         tabs->setCurrentIndex(2); app.processEvents();
-        check(child.operator()<QLabel>("pluginsEmptyState")->text() == "External plugin loading is not supported yet", "honest plugins empty state");
-        check(child.operator()<QPushButton>("openPluginsFolder")->isVisible(), "plugins folder action reachable");
+        check(page.findChild<QWidget*>("pluginManager") != nullptr, "real data-only plugin manager");
+        check(!child.operator()<QCheckBox>("pluginEnable_org.megavault.monochrome")->isChecked(), "Monochrome starts disabled");
+        check(child.operator()<QPushButton>("installPlugin")->isVisible(), "manifest installer reachable");
+        stageMark("extensions section");
         tabs->setCurrentIndex(3); app.processEvents();
         auto* lock = child.operator()<QComboBox>("autoLockMinutes");
         check(lock->currentData().toInt() == 5 && lock->count() == 5, "auto-lock choices and default");
@@ -130,6 +152,7 @@ int main(int argc, char** argv) {
         check(rotate->isEnabled() && child.operator()<QLabel>("settingsStatus")->text() == "Password changed.", "real generated vault password rotation completes");
         check(current->text().isEmpty() && next->text().isEmpty() && confirm->text().isEmpty(), "password fields cleared after rotation");
         check(bool(videovault::core::Vault::validate_password(root, "new-test-password")), "new password opens generated vault");
+        stageMark("security section");
         tabs->setCurrentIndex(4); app.processEvents();
         auto* tagList = child.operator()<QListWidget>("tagList");
         child.operator()<QLineEdit>("newTag")->setText("Settings test tag"); child.operator()<QPushButton>("addTag")->click();
@@ -151,6 +174,7 @@ int main(int argc, char** argv) {
             check(reopened.findChild<QComboBox*>("autoLockMinutes")->currentData().toInt() == 15, "auto-lock survives new page");
             check(reopened.findChild<QPushButton*>("theme_dark")->isChecked(), "appearance survives new page");
         }
+        stageMark("library section");
         for (const auto size : {QSize(1100, 760), QSize(480, 640)}) {
             page.resize(size);
             for (int index = 0; index < tabs->count(); ++index) {
@@ -159,6 +183,21 @@ int main(int argc, char** argv) {
                 auto* scroll = qobject_cast<QScrollArea*>(sections->currentWidget());
                 if (scroll && scroll->widget()->width() > scroll->viewport()->width()) {
                     std::cerr << "layout size=" << size.width() << " section=" << index << " content=" << scroll->widget()->width() << " viewport=" << scroll->viewport()->width() << '\n';
+                    // Name the controls that force the width so a font-dependent
+                    // failure on another platform is diagnosable from CI logs.
+                    std::vector<std::pair<int, std::string>> widest;
+                    for (auto* child : scroll->widget()->findChildren<QWidget*>()) {
+                        const int minimum = child->minimumSizeHint().width();
+                        if (minimum < 200) continue;
+                        std::string name = child->metaObject()->className();
+                        if (!child->objectName().isEmpty()) name += " '" + child->objectName().toStdString() + "'";
+                        if (auto* text = qobject_cast<QLabel*>(child)) name += " text='" + text->text().left(40).toStdString() + "'";
+                        if (auto* button = qobject_cast<QAbstractButton*>(child)) name += " text='" + button->text().left(40).toStdString() + "'";
+                        widest.emplace_back(minimum, name);
+                    }
+                    std::sort(widest.rbegin(), widest.rend());
+                    for (std::size_t i = 0; i < widest.size() && i < 8; ++i)
+                        std::cerr << "  min=" << widest[i].first << ' ' << widest[i].second << '\n';
                 }
                 check(scroll && scroll->widget()->width() <= scroll->viewport()->width(), "no horizontally clipped content");
             }
@@ -167,6 +206,7 @@ int main(int argc, char** argv) {
         // This goes through the real engine, which is what the app does: setting
         // a palette directly and hoping Qt re-resolves style-sheet colours is
         // exactly the path that differs between Qt 5.15 builds.
+        stageMark("responsive layout");
         videovault::app::initializeTheme(app);
         videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
         tabs->setCurrentIndex(0);
@@ -190,6 +230,86 @@ int main(int argc, char** argv) {
             page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/settings-dark-480.png");
             tabs->setCurrentIndex(3); app.processEvents(); page.grab().save(folder + "/settings-security-480.png");
         }
+        tabs->setCurrentIndex(5); app.processEvents();
+        auto* proxySwitch = child.operator()<QCheckBox>("useProxy");
+        auto* proxyList = child.operator()<QListWidget>("proxyList");
+        check(proxyList->count() == 0 && !proxySwitch->isChecked(), "empty proxies start disabled");
+        // Validation is a pure function, so the rules are asserted without a dialog.
+        {
+            videovault::app::ProxySettings bad;
+            videovault::app::ProxyEntry badEntry;
+            badEntry.id = "x"; badEntry.server = "has space"; badEntry.port = 1080;
+            bad.entries.append(badEntry);
+            check(!videovault::app::validateProxySettings(bad).isEmpty(), "invalid server is rejected");
+            badEntry.server = "proxy.example.test"; badEntry.port = 70000;
+            bad.entries[0] = badEntry;
+            check(!videovault::app::validateProxySettings(bad).isEmpty(), "out-of-range port is rejected");
+        }
+        stageMark("theme switch");
+        // The editor is an in-window sheet: the driver stands in for the user,
+        // exactly where a person would click, so the real save path runs.
+        QString shotFolder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
+        bool grabbed = false;
+        videovault::app::InWindowSheet::setTestDriver(
+            [&](videovault::app::InWindowSheet* sheet) {
+                auto* server = sheet->findChild<QLineEdit*>("proxyServer");
+                auto* port = sheet->findChild<QLineEdit*>("proxyPort");
+                auto* user = sheet->findChild<QLineEdit*>("proxyUsername");
+                auto* pass = sheet->findChild<QLineEdit*>("proxyPassword");
+                check(server && port && user && pass, "proxy sheet carries its fields");
+                check(pass->echoMode() == QLineEdit::Password, "proxy password is masked");
+                server->setText("proxy.example.test");
+                port->setText("1080");
+                user->setText("test-only-user");
+                pass->setText("test-only-secret");
+                app.processEvents();
+                if (!shotFolder.isEmpty() && !grabbed) {
+                    // The sheet covers the settings window: grab the window, which
+                    // is what a person sees, including the blurred backdrop.
+                    grabbed = true;
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-dark.png");
+                }
+                sheet->findChild<QPushButton*>("saveProxy")->click();
+            });
+        child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
+        check(proxyList->count() == 1, "proxy saved through the in-window sheet");
+        check(!page.window()->findChild<QWidget*>("inWindowSheet"), "sheet closes after saving");
+        proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
+        if (!shotFolder.isEmpty()) {
+            page.resize(480, 640); app.processEvents(); page.grab().save(shotFolder + "/proxy-list-dark-480.png");
+        }
+#ifdef Q_OS_WIN
+        videovault::app::InWindowSheet::setTestDriver(
+            [&](videovault::app::InWindowSheet* sheet) {
+                check(sheet->findChild<QLineEdit*>("proxyServer")->text() == "proxy.example.test", "edit restores server");
+                check(sheet->findChild<QLineEdit*>("proxyPassword")->text() == "test-only-secret", "edit restores securely stored password");
+                sheet->findChild<QRadioButton*>("proxyHttp")->setChecked(true);
+                sheet->findChild<QLineEdit*>("proxyPort")->setText("8080");
+                app.processEvents();
+                if (!shotFolder.isEmpty()) {
+                    // A short window is where a fixed-height card used to clip
+                    // half of every field; the body has to scroll instead.
+                    const QSize was = page.window()->size();
+                    page.window()->resize(460, 380);
+                    app.processEvents();
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-short.png");
+                    page.window()->resize(was);
+                    app.processEvents();
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-light.png");
+                }
+                sheet->findChild<QPushButton*>("saveProxy")->click();
+            });
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
+        child.operator()<QPushButton>("editProxy")->click(); app.processEvents();
+        check(proxyList->item(0)->text().contains("8080") && proxyList->item(0)->text().contains("HTTP"), "edit updates protocol and port");
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Dark);
+        app.processEvents();
+        child.operator()<QPushButton>("deleteProxy")->click();
+        check(proxyList->count() == 0 && !proxySwitch->isChecked(), "deleting active proxy disables use");
+#else
+        child.operator()<QPushButton>("deleteProxy")->click();
+#endif
+        videovault::app::InWindowSheet::setTestDriver({});
         page.reject(); check(closes == 1 && page.isVisible(), "reject requests host navigation without destroying or hiding page");
         std::cout << "Settings page tests passed: switches, accessibility, updates, appearance, navigation, security, tags, thumbnails, persistence, responsive layout, live palette\n";
     } catch (const std::exception& error) {

@@ -94,6 +94,31 @@ set(MVP_APP_SOURCES
     resources/icons.qrc
 )
 
+add_library(MegaVaultNetwork STATIC src/proxy_settings.cpp)
+target_include_directories(MegaVaultNetwork PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(MegaVaultNetwork PUBLIC Qt5::Network)
+target_compile_features(MegaVaultNetwork PUBLIC cxx_std_20)
+if(WIN32 OR MINGW)
+    target_link_libraries(MegaVaultNetwork PRIVATE crypt32)
+elseif(APPLE)
+    target_link_libraries(MegaVaultNetwork PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
+
+add_library(MegaVaultPlugins STATIC src/plugin_host.cpp src/plugin_audio.cpp src/plugin_tools.cpp src/media_decoder.cpp
+    include/videovault/app/plugin_audio.hpp include/videovault/app/plugin_tools.hpp include/videovault/app/plugin_host.hpp resources/plugins.qrc)
+target_include_directories(MegaVaultPlugins PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(MegaVaultPlugins PUBLIC cxx_std_20)
+set_target_properties(MegaVaultPlugins PROPERTIES AUTOMOC ON AUTORCC ON)
+target_link_libraries(MegaVaultPlugins PUBLIC MegaVaultNetwork VideoVault::Core MegaVaultExtensions Qt5::Widgets Qt5::Network Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
+if(WIN32 OR MINGW)
+    target_include_directories(MegaVaultPlugins PRIVATE "${MVP_VCPKG_PREFIX}/include")
+    # Provider requests use WinHTTP on Windows: Qt 5.12 links OpenSSL 1.1 while
+    # the shipped app carries OpenSSL 3, so QSslSocket cannot initialise there.
+    target_link_libraries(MegaVaultPlugins PUBLIC winhttp)
+elseif(ANDROID)
+    target_include_directories(MegaVaultPlugins PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+endif()
+
 add_library(MegaVaultSync STATIC
     src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp src/icons.cpp
     include/videovault/app/sync_state.hpp
@@ -103,7 +128,7 @@ add_library(MegaVaultSync STATIC
 target_include_directories(MegaVaultSync PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(MegaVaultSync PUBLIC cxx_std_20)
 set_target_properties(MegaVaultSync PROPERTIES AUTOMOC ON)
-target_link_libraries(MegaVaultSync PUBLIC VideoVault::Core Qt5::Core Qt5::Concurrent Qt5::Network Qt5::Widgets)
+target_link_libraries(MegaVaultSync PUBLIC MegaVaultNetwork VideoVault::Core Qt5::Core Qt5::Concurrent Qt5::Network Qt5::Widgets)
 if(WIN32)
     target_link_libraries(MegaVaultSync PRIVATE MvpSodium)
 elseif(ANDROID)
@@ -148,6 +173,7 @@ target_link_libraries(VideoVaultApp
     PRIVATE
         VideoVault::Core
         MegaVaultSync
+        MegaVaultPlugins
         Qt5::Core
         Qt5::Concurrent
         Qt5::Widgets
@@ -230,6 +256,19 @@ endif()
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
     enable_testing()
+    add_executable(VideoVaultProxyTests tests/proxy_settings.cpp src/app_update.cpp)
+    target_link_libraries(VideoVaultProxyTests PRIVATE MegaVaultNetwork MegaVaultSync MegaVaultPlugins)
+    if(WIN32 OR MINGW)
+        target_link_libraries(VideoVaultProxyTests PRIVATE winhttp)
+    endif()
+    add_test(NAME proxy_settings COMMAND VideoVaultProxyTests)
+    set_tests_properties(proxy_settings PROPERTIES TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultProxyTests)
+    add_executable(VideoVaultPluginTests tests/plugin_host.cpp)
+    target_link_libraries(VideoVaultPluginTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_host COMMAND VideoVaultPluginTests)
+    set_tests_properties(plugin_host PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultPluginTests)
     # Sync protocol 4: the state file, key derivation and validation run without
     # a server; the engine test runs against a real sync_server through
     # tests/run_sync_live.py and skips when it is started without one.
@@ -267,6 +306,24 @@ if(MVP_BUILD_TESTS)
     set_target_properties(VideoVaultGalleryPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON)
     add_test(NAME gallery_performance COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(gallery_performance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
+    add_test(NAME vault_creation_ui COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(vault_creation_ui PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_VAULT_CREATION_TEST=1" TIMEOUT 150)
+
+    add_executable(VideoVaultPluginToolsTests tests/plugin_tools.cpp)
+    target_link_libraries(VideoVaultPluginToolsTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_tools COMMAND VideoVaultPluginToolsTests)
+    set_tests_properties(plugin_tools PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultPluginToolsTests)
+    add_executable(VideoVaultPluginLiveTests tests/plugin_live.cpp)
+    target_link_libraries(VideoVaultPluginLiveTests PRIVATE MegaVaultPlugins)
+    add_test(NAME plugin_live COMMAND VideoVaultPluginLiveTests)
+    set_tests_properties(plugin_live PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
+    mvp_copy_runtime_dlls(VideoVaultPluginLiveTests)
+    add_test(NAME plugin_navigation COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(plugin_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_PLUGIN_NAVIGATION_TEST=1" TIMEOUT 60)
+    add_test(NAME plugin_folder COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(plugin_folder PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_PLUGIN_FOLDER_TEST=1" TIMEOUT 120)
 
     add_executable(VideoVaultTagFilterTests
         tests/tag_filter_button.cpp
@@ -293,7 +350,7 @@ if(MVP_BUILD_TESTS)
 
     add_executable(VideoVaultAppUpdateTests tests/app_update.cpp src/app_update.cpp)
     target_include_directories(VideoVaultAppUpdateTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(VideoVaultAppUpdateTests PRIVATE VideoVault::Core Qt5::Core Qt5::Network)
+    target_link_libraries(VideoVaultAppUpdateTests PRIVATE MegaVaultNetwork VideoVault::Core Qt5::Core Qt5::Network)
     if(WIN32 OR MINGW)
         target_link_libraries(VideoVaultAppUpdateTests PRIVATE winhttp)
     endif()
@@ -304,11 +361,11 @@ if(MVP_BUILD_TESTS)
 
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
         src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/icons.cpp
-        src/sync_state.cpp resources/icons.qrc
+        src/sync_state.cpp src/proxy_settings.cpp resources/icons.qrc
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/sync_state.hpp)
     target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core Qt5::Widgets Qt5::Concurrent)
+    target_link_libraries(VideoVaultSettingsTests PRIVATE VideoVault::Core MegaVaultPlugins Qt5::Widgets Qt5::Concurrent)
     target_compile_features(VideoVaultSettingsTests PRIVATE cxx_std_20)
     set_target_properties(VideoVaultSettingsTests PROPERTIES AUTOMOC ON FOLDER "Tests")
     add_test(NAME settings_page COMMAND VideoVaultSettingsTests)

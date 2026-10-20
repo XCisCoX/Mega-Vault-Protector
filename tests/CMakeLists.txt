@@ -111,3 +111,18 @@ target_compile_features(VideoVaultSyncPackageTests PRIVATE cxx_std_20)
 set_target_properties(VideoVaultSyncPackageTests PROPERTIES FOLDER "Tests")
 mvp_copy_runtime_dlls(VideoVaultSyncPackageTests)
 add_test(NAME VideoVaultCore.SyncPackages COMMAND VideoVaultSyncPackageTests)
+
+# Provider audio enters through the shared memory-only import boundary on every
+# platform. The test generates its audio fixture in RAM, never as a source file.
+add_executable(VideoVaultPluginMemoryTests plugin_memory.cpp)
+target_link_libraries(VideoVaultPluginMemoryTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultPluginMemoryTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultPluginMemoryTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultPluginMemoryTests)
+add_test(NAME VideoVaultCore.PluginMemory COMMAND VideoVaultPluginMemoryTests)
+
+find_package(Threads REQUIRED)
+add_executable(MegaVaultExtensionTests extension_runtime.cpp)
+target_link_libraries(MegaVaultExtensionTests PRIVATE MegaVaultExtensions Threads::Threads)
+add_test(NAME VideoVault.ExtensionRuntime COMMAND MegaVaultExtensionTests)
+set_tests_properties(VideoVault.ExtensionRuntime PROPERTIES TIMEOUT 20)

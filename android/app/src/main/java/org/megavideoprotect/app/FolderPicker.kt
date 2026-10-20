@@ -94,6 +94,7 @@ fun FolderPickerDialog(
     var granted by remember { mutableStateOf(FolderPicker.hasAccess()) }
 
     Dialog(onDismissRequest = onDismiss) {
+        BlurredDialogWindow()
         MvpCard(Modifier.fillMaxWidth()) {
             MvpTitle("Choose vault folder")
             MvpDescription(dir?.absolutePath ?: "No storage is accessible yet")
