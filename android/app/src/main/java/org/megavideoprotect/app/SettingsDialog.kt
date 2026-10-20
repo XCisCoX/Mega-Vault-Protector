@@ -410,7 +410,7 @@ fun SettingsDialog(
                                         Text(label, color = Mvp.text, fontSize = 16.sp, modifier = Modifier.weight(1f))
                                         if (idleLabel == label) {
                                             Icon(
-                                                painterResource(R.drawable.msg_check_s),
+                                                painterResource(R.drawable.ic_lucide_check),
                                                 contentDescription = null,
                                                 tint = Mvp.accent,
                                                 modifier = Modifier.size(18.dp),

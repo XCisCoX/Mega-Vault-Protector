@@ -278,6 +278,10 @@ object Mvp {
     val window: Color get() = p.window
     val card: Color get() = p.card
     val cardBorder: Color get() = p.cardBorder
+    val tileBg: Color get() = p.tileBg
+    val tileText: Color get() = p.tileText
+    val scrim: Color get() = p.scrim
+    val progressTrack: Color get() = p.progressTrack
     val glass: Color get() = p.glass
     val glassStroke: Color get() = p.glassStroke
     val inputBg: Color get() = p.inputBg

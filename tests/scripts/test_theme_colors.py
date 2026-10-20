@@ -19,6 +19,11 @@ THEME = SOURCES / "theme.cpp"
 # Files that are deliberately dark in both themes.
 EXEMPT = {"theme.cpp", "player_window.cpp", "pdf_window.cpp", "music_window.cpp", "windows_fallback.cpp"}
 
+# Semantic colours that stay identical in both themes on purpose (accent blue,
+# its hover, and the light-theme error red). They are declared here instead of
+# in theme.cpp so the transform never rewrites them.
+INVARIANT = {"#3390ec", "#4ba0f5", "#5aa6f0", "#c62828"}
+
 DECLARATION = re.compile(r"(?<![\w-])(color|background(?:-color)?|border(?:-[a-z]+)?)\s*:\s*([^;{}\"]+)")
 COLOR_TOKEN = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|\bwhite\b", re.IGNORECASE)
 
@@ -63,6 +68,8 @@ class LightThemeCoverage(unittest.TestCase):
                 if value in {"transparent", "none", "inherit", "palette"}:
                     continue
                 if value in mapped or value.replace(" ", "") in {m.replace(" ", "") for m in mapped}:
+                    continue
+                if value in INVARIANT:
                     continue
                 # rgba(0,0,0,x) is a shadow/dim, valid on both themes.
                 if value.startswith("rgba(0, 0, 0") or value.startswith("rgba(0,0,0"):

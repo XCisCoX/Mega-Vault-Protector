@@ -118,7 +118,7 @@ fun PdfScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                painterResource(R.drawable.ic_ab_back),
+                painterResource(R.drawable.ic_lucide_arrow_left),
                 contentDescription = "Back",
                 tint = Mvp.accent,
                 modifier = Modifier.clickable(onClick = onBack).padding(8.dp).size(24.dp),

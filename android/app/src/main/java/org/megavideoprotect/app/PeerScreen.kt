@@ -377,7 +377,7 @@ private fun PeerFolderTile(name: String, picked: Boolean, onClick: () -> Unit, o
             .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
         Icon(
-            painterResource(R.drawable.files_folder),
+            painterResource(R.drawable.ic_lucide_folder),
             contentDescription = null,
             tint = Mvp.accent,
             modifier = Modifier.align(Alignment.Center).fillMaxSize().padding(22.dp),
@@ -490,7 +490,7 @@ private fun PickedMark() {
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                painterResource(R.drawable.checkbig),
+                painterResource(R.drawable.ic_lucide_check),
                 contentDescription = null,
                 tint = Color.White,
                 modifier = Modifier.size(14.dp),
@@ -509,6 +509,7 @@ private fun CopyTargetDialog(onPick: (Long) -> Unit, onDismiss: () -> Unit) {
         }
     }
     Dialog(onDismissRequest = onDismiss) {
+        BlurredDialogWindow()
         MvpCard(Modifier.fillMaxWidth()) {
             MvpTitle("Copy into")
             MvpDescription("Pick a place in your library. Copied folders keep their structure.")

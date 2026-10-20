@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QIntValidator>
 #include <QUuid>
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
@@ -21,6 +22,7 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -371,38 +373,86 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
             if (!proxyList->currentItem()) return;
             for (const auto& saved : proxyState->entries) if (saved.id == proxyList->currentItem()->data(Qt::UserRole).toString()) entry = saved;
         }
-        auto* dialog = new QDialog(this); dialog->setObjectName("proxyEditor"); dialog->setWindowTitle(editing ? "Edit proxy" : "Add proxy");
-        dialog->setAttribute(Qt::WA_DeleteOnClose); dialog->setWindowModality(Qt::WindowModal);
-        dialog->setStyleSheet(styleSheet()); dialog->resize(380, 460);
-        auto* layout = new QVBoxLayout(dialog); layout->setContentsMargins(20, 16, 20, 16); layout->setSpacing(10);
-        auto* protocols = new QHBoxLayout;
-        auto* socks = new QPushButton("SOCKS5", dialog); auto* http = new QPushButton("HTTP", dialog);
-        for (auto* button : {socks, http}) { button->setCheckable(true); button->setAutoExclusive(true); button->setProperty("themeSegment", true); protocols->addWidget(button); }
-        socks->setObjectName("proxySocks5"); http->setObjectName("proxyHttp");
-        socks->setChecked(entry.socks5); http->setChecked(!entry.socks5); layout->addLayout(protocols);
-        auto field = [dialog, layout](const QString& title, const char* name, const QString& value) {
-            auto* label = textLabel(title, dialog); auto* input = new QLineEdit(value, dialog);
-            input->setObjectName(name); input->setAccessibleName(title); input->setMinimumWidth(0); label->setBuddy(input);
-            layout->addWidget(label); layout->addWidget(input); input->setCursorPosition(0); return input;
+        // An in-window sheet, like rename and the confirmations: it dims and
+        // blurs the window behind it instead of opening a separate OS dialog.
+        InWindowSheet sheet(this);
+        sheet.setTitle(editing ? QStringLiteral("Edit proxy") : QStringLiteral("Add proxy"));
+        sheet.setMessage(QStringLiteral(
+            "HTTP or SOCKS5. SOCKS5 resolves the destination on the proxy. "
+            "Credentials are sealed by the operating system, never plaintext."));
+        auto rowOf = [](QWidget* parent) {
+            auto* host = new QWidget(parent);
+            auto* column = new QVBoxLayout(host);
+            column->setContentsMargins(0, 0, 0, 0);
+            column->setSpacing(4);
+            return column;
+        };
+        auto* protocolHost = new QWidget;
+        auto* protocols = new QHBoxLayout(protocolHost);
+        protocols->setContentsMargins(0, 0, 0, 0);
+        protocols->setSpacing(14);
+        auto* socks = new QRadioButton("SOCKS5", protocolHost);
+        auto* http = new QRadioButton("HTTP", protocolHost);
+        socks->setObjectName("proxySocks5");
+        http->setObjectName("proxyHttp");
+        socks->setChecked(entry.socks5);
+        http->setChecked(!entry.socks5);
+        protocols->addWidget(socks);
+        protocols->addWidget(http);
+        protocols->addStretch(1);
+        sheet.addRow(protocolHost);
+        auto field = [&sheet, rowOf](const QString& title, const char* name, const QString& value) {
+            auto* column = rowOf(&sheet);
+            auto* label = textLabel(title, column->parentWidget());
+            auto* input = new QLineEdit(value, column->parentWidget());
+            input->setObjectName(name);
+            input->setAccessibleName(title);
+            input->setCursorPosition(0);
+            column->addWidget(label);
+            column->addWidget(input);
+            sheet.addRow(column->parentWidget());
+            return input;
         };
         auto* server = field("Server", "proxyServer", entry.server);
-        auto* port = field("Port", "proxyPort", QString::number(entry.port)); port->setValidator(new QIntValidator(1, 65535, port));
+        auto* port = field("Port", "proxyPort", QString::number(entry.port));
+        port->setValidator(new QIntValidator(1, 65535, port));
         auto* username = field("Username (optional)", "proxyUsername", entry.username);
-        auto* password = field("Password (optional)", "proxyPassword", entry.password); password->setEchoMode(QLineEdit::Password);
-        auto* errorLabel = textLabel({}, dialog, true); errorLabel->setObjectName("proxyEditorError"); layout->addWidget(errorLabel);
-        auto* buttons = new QHBoxLayout; auto* cancel = action("Cancel", "cancelProxy", dialog); auto* save = action("Save", "saveProxy", dialog);
-        buttons->addWidget(cancel); buttons->addWidget(save); layout->addLayout(buttons);
-        connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
-        connect(save, &QPushButton::clicked, dialog, [=] {
-            auto next = *proxyState; auto changed = entry;
-            changed.server = server->text().trimmed(); changed.port = port->text().toInt(); changed.username = username->text(); changed.password = password->text(); changed.socks5 = socks->isChecked();
-            bool found = false; for (auto& saved : next.entries) if (saved.id == changed.id) { saved = changed; found = true; }
+        auto* password = field("Password (optional)", "proxyPassword", entry.password);
+        password->setEchoMode(QLineEdit::Password);
+        auto* cancelButton = sheet.addButton(QStringLiteral("Cancel"), 0, false);
+        cancelButton->setObjectName(QStringLiteral("cancelProxy"));
+        auto* saveButton = sheet.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
+        saveButton->setObjectName(QStringLiteral("saveProxy"));
+        for (;;) {
+            if (sheet.run() != 1) {
+                password->clear();
+                return;
+            }
+            auto next = *proxyState;
+            auto changed = entry;
+            changed.server = server->text().trimmed();
+            changed.port = port->text().toInt();
+            changed.username = username->text();
+            changed.password = password->text();
+            changed.socks5 = socks->isChecked();
+            bool found = false;
+            for (auto& saved : next.entries) {
+                if (saved.id == changed.id) { saved = changed; found = true; }
+            }
             if (!found) next.entries.append(changed);
             next.activeId = changed.id;
-            QString error; if (!saveProxySettings(next, &error)) { errorLabel->setText(error); return; }
-            *proxyState = next; proxyStatus->clear(); refreshProxies(); password->clear(); dialog->accept();
-        });
-        dialog->open(); server->setFocus();
+            QString error;
+            if (!saveProxySettings(next, &error)) {
+                // Keep the sheet open with the reason instead of dropping the edit.
+                sheet.setMessage(error, true);
+                continue;
+            }
+            *proxyState = next;
+            proxyStatus->clear();
+            refreshProxies();
+            password->clear();
+            return;
+        }
     };
     connect(addProxy, &QPushButton::clicked, this, [openProxyEditor] { openProxyEditor(false); });
     connect(editProxy, &QPushButton::clicked, this, [openProxyEditor] { openProxyEditor(true); });

@@ -120,7 +120,7 @@ fun ImageViewerScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    painterResource(R.drawable.ic_ab_back),
+                    painterResource(R.drawable.ic_lucide_arrow_left),
                     contentDescription = "Back",
                     tint = Mvp.title,
                     modifier = Modifier.size(24.dp),

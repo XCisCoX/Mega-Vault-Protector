@@ -221,11 +221,7 @@ QString themedStyleSheet(const QString& darkStyle) {
         {"#636366", "rgb(142, 142, 147)"}, {"#6d6d72", "rgb(142, 142, 147)"},
         {"#2c1518", "rgb(255, 235, 237)"}, {"#5c2a30", "rgb(240, 189, 195)"},
         {"#ff6b6b", "rgb(198, 40, 40)"}, {"#ff453a", "rgb(198, 40, 40)"},
-        {"#8ec8ff", "rgb(23, 103, 178)"}, {"#ff8f85", "rgb(183, 28, 28)"},
-        // Accents and semantic reds are theme-invariant: declared here so every
-        // stylesheet colour is accounted for by this map (see tests/scripts).
-        {"#3390ec", "rgb(51, 144, 236)"}, {"#4ba0f5", "rgb(75, 160, 245)"},
-        {"#5aa6f0", "rgb(90, 166, 240)"}, {"#c62828", "rgb(198, 40, 40)"}
+        {"#8ec8ff", "rgb(23, 103, 178)"}, {"#ff8f85", "rgb(183, 28, 28)"}
     };
     QString result;
     int cursor = 0;

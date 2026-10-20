@@ -7,6 +7,8 @@ plugins {
 android {
     namespace = "org.megavideoprotect.app"
     sourceSets.getByName("main").assets.srcDir("../../plugins")
+    // Lucide VectorDrawables generated from assets/icons/lucide by tools/icons/generate.py
+    sourceSets.getByName("main").res.srcDir("../../assets/icons/android")
     compileSdk = 36
     // The SDK image ships no build-tools; the app build script provides a
     // 35.0.0 shim (zipalign/apksigner via apt + source.properties). AGP 8.13

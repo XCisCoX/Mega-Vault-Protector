@@ -117,7 +117,7 @@ fun DeviceLibraryScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    painterResource(R.drawable.ic_ab_back),
+                    painterResource(R.drawable.ic_lucide_arrow_left),
                     contentDescription = "Back",
                     tint = Color.White,
                     modifier = Modifier.size(22.dp),
@@ -241,7 +241,7 @@ private fun PickMark(on: Boolean) {
     ) {
         if (on) {
             Icon(
-                painterResource(R.drawable.checkbig),
+                painterResource(R.drawable.ic_lucide_check),
                 contentDescription = null,
                 tint = Color.White,
                 modifier = Modifier.size(14.dp),

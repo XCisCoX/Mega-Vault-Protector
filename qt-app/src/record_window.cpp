@@ -457,14 +457,23 @@ void RecordWindow::applyStyle() {
     sheet += QStringLiteral(
                  "#recordPage QPushButton[quiet=\"true\"]:disabled { color: %1; }")
                  .arg(quietOff);
+    restyling_ = true;
     setStyleSheet(sheet);
+    restyling_ = false;
+    styledWindowColor_ = palette().color(QPalette::Window);
 }
 
 void RecordWindow::changeEvent(QEvent* event) {
     if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) {
-        applyStyle();
-        if (editable_) {
-            rebuild();
+        // applyStyle() calls setStyleSheet(), which sends StyleChange right back
+        // here. Re-entering it recursed until the stack overflowed, so a real
+        // theme change is the only thing allowed to run it again.
+        const QColor window = palette().color(QPalette::Window);
+        if (!restyling_ && window != styledWindowColor_) {
+            applyStyle();
+            if (editable_) {
+                rebuild();
+            }
         }
     }
     QWidget::changeEvent(event);

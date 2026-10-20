@@ -4,6 +4,8 @@
 #include "videovault/app/theme.hpp"
 #include "videovault/app/tag_filter_button.hpp"
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/in_window_sheet.hpp"
+#include "videovault/app/record_window.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
 #include <QElapsedTimer>
@@ -68,6 +70,23 @@ struct GalleryPerformanceTestAccess {
         }
         return 0;
     }
+
+    // Theme screenshots of the real folder surface (no user vault involved).
+    static void shoot(MainWindow& window, const QString& name) {
+        const QString dir = qEnvironmentVariable("MVP_FOLDER_SHOTS");
+        if (dir.isEmpty()) return;
+        QDir().mkpath(dir);
+        QApplication::processEvents();
+        window.grab().save(dir + "/" + name + ".png");
+    }
+    static void shootBothThemes(MainWindow& window, const QString& name) {
+        if (qEnvironmentVariableIsEmpty("MVP_FOLDER_SHOTS")) return;
+        setThemeMode(ThemeMode::Dark);
+        shoot(window, name + "-dark");
+        setThemeMode(ThemeMode::Light);
+        shoot(window, name + "-light");
+        setThemeMode(ThemeMode::Dark);
+    }
     static void drain(MainWindow& window) {
         QElapsedTimer clock;
         clock.start();
@@ -88,6 +107,123 @@ struct GalleryPerformanceTestAccess {
     // Saved with a progress state seen in between. Only the HTTP transport is
     // replaced (setFetcher); rows, buttons, the FLAC check and the encrypted
     // import are the production code.
+
+    // Creating a record from the library: sheet prompt, vault import, editor open.
+    static int newRecord() {
+        const auto scratch = qEnvironmentVariable("TMPDIR", QDir::tempPath());
+        QTemporaryDir temp(scratch + QStringLiteral("/MVP-new-record-XXXXXX"));
+        if (!temp.isValid()) return 70;
+        core::Argon2Parameters parameters;
+        parameters.memory_kib = 8192;
+        parameters.iterations = 1;
+        auto created = core::Vault::create(std::filesystem::path(temp.path().toStdWString()) / L"vault",
+            "generated record fixture", parameters);
+        if (!created) return 71;
+        // The light theme is where the record window used to restyle itself in a
+        // loop; keep the regression test in that state.
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
+        MainWindow window;
+        window.vault_ = std::make_shared<core::Vault>(std::move(created.value()));
+        window.pages_->setCurrentIndex(2);
+        window.contentStack_->setCurrentWidget(window.pages_);
+        window.resize(1100, 760);
+        window.show();
+        QApplication::processEvents();
+        const QString shots = qEnvironmentVariable("MVP_NEW_RECORD_SHOTS");
+
+        InWindowSheet::setTestDriver([&](InWindowSheet* sheet) {
+            QLineEdit* entry = nullptr;
+            for (QLineEdit* candidate : sheet->findChildren<QLineEdit*>()) {
+                if (candidate->echoMode() == QLineEdit::Normal && candidate->isVisible()) {
+                    entry = candidate;
+                    break;
+                }
+            }
+            if (entry == nullptr) {
+                std::fprintf(stderr, "FAIL record sheet has no title field\n");
+                return;
+            }
+            entry->setText(QStringLiteral("Field notes"));
+            QApplication::processEvents();
+            if (!shots.isEmpty()) {
+                QDir().mkpath(shots);
+                window.grab().save(shots + "/record-prompt.png");
+            }
+            for (QPushButton* button : sheet->findChildren<QPushButton*>()) {
+                if (button->text().contains(QStringLiteral("Create"))) {
+                    button->click();
+                    return;
+                }
+            }
+            std::fprintf(stderr, "FAIL record sheet has no Create button\n");
+        });
+        window.beginNewRecord();
+        InWindowSheet::setTestDriver({});
+
+        QElapsedTimer clock;
+        clock.start();
+        while (window.recordWindow_ == nullptr && clock.elapsed() < 20000) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (window.recordWindow_ == nullptr) {
+            std::fprintf(stderr, "FAIL record editor did not open: %s\n",
+                qPrintable(window.galleryStatus_->text()));
+            return 72;
+        }
+        for (int i = 0; i < 60; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+        if (!shots.isEmpty()) {
+            QDir().mkpath(shots);
+            window.grab().save(shots + "/record-editor.png");
+        }
+
+        // Inside the editor: add a record (the same sheet prompt), then save.
+        QPushButton* addRecord = nullptr;
+        for (QPushButton* candidate : window.recordWindow_->findChildren<QPushButton*>()) {
+            if (candidate->accessibleName() == QStringLiteral("Add a record to this file")
+                || candidate->toolTip() == QStringLiteral("Add a record to this file")) {
+                addRecord = candidate;
+            }
+        }
+        if (addRecord == nullptr) {
+            std::fprintf(stderr, "FAIL editor has no Add record button\n");
+            return 73;
+        }
+        InWindowSheet::setTestDriver([](InWindowSheet* sheet) {
+            for (QLineEdit* entry : sheet->findChildren<QLineEdit*>()) {
+                if (entry->echoMode() == QLineEdit::Normal && entry->isVisible()) {
+                    entry->setText(QStringLiteral("Web Services"));
+                    break;
+                }
+            }
+            QApplication::processEvents();
+            for (QPushButton* button : sheet->findChildren<QPushButton*>()) {
+                if (button->text().contains(QStringLiteral("Save"))) { button->click(); return; }
+            }
+        });
+        addRecord->click();
+        InWindowSheet::setTestDriver({});
+        for (int i = 0; i < 40; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+
+        QPushButton* saveButton = nullptr;
+        for (QPushButton* candidate : window.recordWindow_->findChildren<QPushButton*>()) {
+            if (candidate->property("primary").toBool()) { saveButton = candidate; break; }
+        }
+        if (saveButton == nullptr) {
+            std::fprintf(stderr, "FAIL editor has no save button\n");
+            return 74;
+        }
+        saveButton->click();
+        for (int i = 0; i < 120; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+        if (!shots.isEmpty()) {
+            window.grab().save(shots + "/record-saved.png");
+        }
+        window.closeRecord();
+        for (int i = 0; i < 40; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+        std::printf("PASS new record: prompt, vault import, editor open, add record, save\n");
+        return 0;
+    }
+
     static int pluginFolder() {
         const auto scratch = qEnvironmentVariable("TMPDIR", QDir::tempPath());
         QTemporaryDir temp(scratch + QStringLiteral("/MVP-plugin-folder-XXXXXX"));
@@ -134,6 +270,77 @@ struct GalleryPerformanceTestAccess {
         window.pluginCatalogue_ = catalogue;
         window.rebuildPluginFolder();
         QApplication::processEvents();
+        if (!qEnvironmentVariableIsEmpty("MVP_MENU_SHOTS")) {
+            // The gallery context menu is a popup that runs its own event loop, so
+            // the shot is taken from a timer that then dismisses it.
+            const QString dir = qEnvironmentVariable("MVP_MENU_SHOTS");
+            QDir().mkpath(dir);
+            // The library itself (folder pane + rows), in both themes.
+            window.leavePluginFolder();
+            QApplication::processEvents();
+            const QByteArray onlyTheme = qEnvironmentVariable("MVP_MENU_THEME").toLatin1();
+            for (const char* mode : {"dark", "light"}) {
+                const bool darkMode = QByteArray(mode) == QByteArrayLiteral("dark");
+                if (!onlyTheme.isEmpty() && onlyTheme != QByteArray(mode)) {
+                    continue;
+                }
+                window.activateWindow();
+                QApplication::processEvents();
+                for (int i = 0; i < 20; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+                videovault::app::setThemeMode(darkMode
+                    ? videovault::app::ThemeMode::Dark
+                    : videovault::app::ThemeMode::Light);
+                QApplication::processEvents();
+                window.grab().save(dir + "/library-" + QString::fromLatin1(mode) + ".png");
+            }
+            window.enterPluginFolder(QStringLiteral("fixture"));
+            window.pluginCatalogue_ = catalogue;
+            window.rebuildPluginFolder();
+            QApplication::processEvents();
+            for (const char* mode : {"dark", "light"}) {
+                const bool darkMode = QByteArray(mode) == QByteArrayLiteral("dark");
+                if (!onlyTheme.isEmpty() && onlyTheme != QByteArray(mode)) {
+                    continue;
+                }
+                videovault::app::setThemeMode(darkMode
+                    ? videovault::app::ThemeMode::Dark
+                    : videovault::app::ThemeMode::Light);
+                QApplication::processEvents();
+                const QString name = QString::fromLatin1(mode);
+                QTimer::singleShot(250, [&window, dir, name] {
+                    if (auto* popup = QApplication::activePopupWidget()) {
+                        window.grab().save(dir + "/menu-over-window-" + name + ".png");
+                        popup->grab().save(dir + "/menu-" + name + ".png");
+                        popup->close();
+                    }
+                });
+                window.showGalleryContextMenu(window.mapToGlobal(QPoint(620, 430)));
+                QApplication::processEvents();
+            }
+            // The unlock card in a short window: it must scroll, never clip.
+            videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
+            window.resize(700, 420);
+            window.lockVault();
+            // Let the lock transition fade finish before capturing.
+            for (int i = 0; i < 40; ++i) { QApplication::processEvents(); QThread::msleep(10); }
+            window.grab().save(dir + "/login-short-light.png");
+            videovault::app::setThemeMode(videovault::app::ThemeMode::Dark);
+            QApplication::processEvents();
+            window.grab().save(dir + "/login-short-dark.png");
+            std::puts("menu screenshots written");
+            return 0;
+        }
+        if (!qEnvironmentVariableIsEmpty("MVP_FOLDER_SHOTS")) {
+            shootBothThemes(window, "provider-root");
+            window.pluginAlbumId_ = albumId;
+            window.pluginAlbumName_ = QStringLiteral("Fixture Album");
+            window.pluginAlbumTracks_ = catalogue.value(QStringLiteral("tracks")).toArray();
+            window.pluginAlbumPending_ = false;
+            window.rebuildPluginFolder();
+            shootBothThemes(window, "provider-album");
+            std::puts("screenshots written");
+            return 0;
+        }
 
         // 1. The root is one mixed list: album folders and song rows, no
         //    Songs/Albums/Artists level and no artists anywhere.
@@ -392,6 +599,7 @@ struct GalleryPerformanceTestAccess {
     static int run() {
         if (qEnvironmentVariableIsSet("MVP_VAULT_CREATION_TEST")) return creation();
         if (qEnvironmentVariableIsSet("MVP_PLUGIN_FOLDER_TEST")) return pluginFolder();
+        if (qEnvironmentVariableIsSet("MVP_NEW_RECORD_TEST")) return newRecord();
         const auto scratch = qEnvironmentVariable("TMPDIR", QDir::tempPath());
         QTemporaryDir temp(scratch + QStringLiteral("/MVP-gallery-XXXXXX"));
         core::Argon2Parameters parameters;

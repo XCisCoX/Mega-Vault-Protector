@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QSet>
+#include <QColor>
 #include <QString>
 #include <QVector>
 #include <QWidget>
@@ -127,6 +128,11 @@ private:
     QTimer* clipboardTimer_{nullptr};
     QString clipboardValue_;
     QString rowHoverStyle_;
+    // setStyleSheet() posts another StyleChange; without these two the handler
+    // below re-entered itself until the stack died (creating a record in light
+    // theme crashed the app).
+    bool restyling_{false};
+    QColor styledWindowColor_;
     QString disclosureColor_;
     int actionColumn_{0};
 

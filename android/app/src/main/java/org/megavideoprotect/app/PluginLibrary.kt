@@ -11,12 +11,14 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,6 +86,25 @@ internal fun PluginSearchEntry(manifest: PluginManifest, query: String, viewMode
 }
 
 /** Only the gallery body changes: VaultScreen keeps its header, footer and search. */
+
+/** The folder's back control: a real chevron asset, not a text glyph. */
+@Composable
+private fun PluginBackRow(label: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_lucide_arrow_left),
+            contentDescription = null,
+            tint = Mvp.accent,
+            modifier = Modifier.size(18.dp),
+        )
+        Text(label, color = Mvp.accent, fontSize = 14.sp, modifier = Modifier.padding(start = 6.dp))
+    }
+}
+
 @Composable
 internal fun PluginLibraryView(viewMode: Int, padding: PaddingValues, onPlay: (PluginSession) -> Unit) {
     val session = PluginLibrary.session ?: return
@@ -122,7 +143,7 @@ internal fun PluginLibraryView(viewMode: Int, padding: PaddingValues, onPlay: (P
             columns = GridCells.Fixed(3), contentPadding = padding,
             modifier = Modifier.fillMaxSize().background(Mvp.window),
         ) {
-            item(key = "provider-back") { FolderTile("‹ Back", { PluginLibrary.back() }, null, { false }) }
+            item(key = "provider-back") { PluginBackRow("Back", { PluginLibrary.back() }) }
             item(key = "provider-state", span = { GridItemSpan(3) }) {
                 ProviderStatus(status, session.catalogueBusy && !deadline, onRetry = { PluginLibrary.reload() }, showRetry = !session.catalogueBusy || deadline)
             }
@@ -136,10 +157,7 @@ internal fun PluginLibraryView(viewMode: Int, padding: PaddingValues, onPlay: (P
         }
     } else {
         LazyColumn(contentPadding = padding, modifier = Modifier.fillMaxSize().background(Mvp.window)) {
-            item(key = "provider-back") {
-                if (viewMode == 0) FolderDetailRow("‹ Back", "Previous folder", { PluginLibrary.back() }, null, { false })
-                else FolderListRow("‹ Back", "Previous folder", { PluginLibrary.back() }, null, { false })
-            }
+            item(key = "provider-back") { PluginBackRow("Back", { PluginLibrary.back() }) }
             item(key = "provider-state") {
                 ProviderStatus(status, session.catalogueBusy && !deadline, onRetry = { PluginLibrary.reload() }, showRetry = !session.catalogueBusy || deadline)
             }
@@ -177,16 +195,33 @@ private fun DownloadControl(state: String?, onDownload: () -> Unit) {
                 color = Mvp.description, fontSize = 12.sp, maxLines = 1,
             )
         }
-        "saved" -> Text("Saved", color = Mvp.description, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 10.dp))
-        null, "" -> Text(
-            "Download",
-            color = Mvp.accent,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .clickable(onClick = onDownload)
+        "saved" -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_lucide_check),
+                contentDescription = null, tint = Mvp.description, modifier = Modifier.size(14.dp),
+            )
+            Text("Saved", color = Mvp.description, fontSize = 12.sp, modifier = Modifier.padding(start = 5.dp))
+        }
+        null, "" -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clickable(onClick = onDownload)
                 .padding(horizontal = 10.dp, vertical = 6.dp),
-        )
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_lucide_download),
+                contentDescription = null, tint = Mvp.accent, modifier = Modifier.size(15.dp),
+            )
+            Text(
+                "Download",
+                color = Mvp.accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 5.dp),
+            )
+        }
         else -> Row(verticalAlignment = Alignment.CenterVertically) {
             Text(state, color = Mvp.errorText, fontSize = 11.sp, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
             Text(
@@ -254,7 +289,13 @@ private fun ProviderTrackTile(
 internal fun PluginLibraryBar() {
     val session = PluginLibrary.session ?: return
     Row(Modifier.fillMaxWidth().background(Mvp.inputBg).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { PluginLibrary.leave() }) { Text("‹ Back to library") }
+        TextButton(onClick = { PluginLibrary.leave() }) {
+            Icon(
+                painter = painterResource(R.drawable.ic_lucide_arrow_left),
+                contentDescription = null, tint = Mvp.accent, modifier = Modifier.size(16.dp),
+            )
+            Text("Back to library", color = Mvp.accent, modifier = Modifier.padding(start = 5.dp))
+        }
         Text("${session.manifest.name} / ${PluginLibrary.breadcrumb}", color = Mvp.text,
             fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     }

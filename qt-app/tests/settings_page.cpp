@@ -1,5 +1,7 @@
 // Offscreen settings regression tests. Only a generated vault and isolated INI settings.
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/proxy_settings.hpp"
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
@@ -14,6 +16,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTabBar>
@@ -215,41 +218,81 @@ int main(int argc, char** argv) {
         auto* proxySwitch = child.operator()<QCheckBox>("useProxy");
         auto* proxyList = child.operator()<QListWidget>("proxyList");
         check(proxyList->count() == 0 && !proxySwitch->isChecked(), "empty proxies start disabled");
+        // Validation is a pure function, so the rules are asserted without a dialog.
+        {
+            videovault::app::ProxySettings bad;
+            videovault::app::ProxyEntry badEntry;
+            badEntry.id = "x"; badEntry.server = "has space"; badEntry.port = 1080;
+            bad.entries.append(badEntry);
+            check(!videovault::app::validateProxySettings(bad).isEmpty(), "invalid server is rejected");
+            badEntry.server = "proxy.example.test"; badEntry.port = 70000;
+            bad.entries[0] = badEntry;
+            check(!videovault::app::validateProxySettings(bad).isEmpty(), "out-of-range port is rejected");
+        }
+        // The editor is an in-window sheet: the driver stands in for the user,
+        // exactly where a person would click, so the real save path runs.
+        QString shotFolder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
+        bool grabbed = false;
+        videovault::app::InWindowSheet::setTestDriver(
+            [&](videovault::app::InWindowSheet* sheet) {
+                auto* server = sheet->findChild<QLineEdit*>("proxyServer");
+                auto* port = sheet->findChild<QLineEdit*>("proxyPort");
+                auto* user = sheet->findChild<QLineEdit*>("proxyUsername");
+                auto* pass = sheet->findChild<QLineEdit*>("proxyPassword");
+                check(server && port && user && pass, "proxy sheet carries its fields");
+                check(pass->echoMode() == QLineEdit::Password, "proxy password is masked");
+                server->setText("proxy.example.test");
+                port->setText("1080");
+                user->setText("test-only-user");
+                pass->setText("test-only-secret");
+                app.processEvents();
+                if (!shotFolder.isEmpty() && !grabbed) {
+                    // The sheet covers the settings window: grab the window, which
+                    // is what a person sees, including the blurred backdrop.
+                    grabbed = true;
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-dark.png");
+                }
+                sheet->findChild<QPushButton*>("saveProxy")->click();
+            });
         child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
-        auto* proxyEditor = child.operator()<QDialog>("proxyEditor");
-        check(proxyEditor->isVisible(), "Telegram-style add proxy editor opens from settings");
-        auto editorField = [proxyEditor](const char* name) { auto* field = proxyEditor->findChild<QLineEdit*>(name); check(field, name); return field; };
-        proxyEditor->findChild<QPushButton*>("saveProxy")->click();
-        check(proxyEditor->isVisible() && !proxyEditor->findChild<QLabel*>("proxyEditorError")->text().isEmpty(), "invalid proxy stays in editor with error");
-        editorField("proxyServer")->setText("proxy.example.test"); editorField("proxyPort")->setText("1080");
-        editorField("proxyUsername")->setText("test-only-user"); editorField("proxyPassword")->setText("test-only-secret");
-        check(editorField("proxyPassword")->echoMode() == QLineEdit::Password, "proxy password is masked");
-        if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
-            const auto folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
-            proxyEditor->grab().save(folder + "/proxy-editor-dark.png");
+        check(proxyList->count() == 1, "proxy saved through the in-window sheet");
+        check(!page.window()->findChild<QWidget*>("inWindowSheet"), "sheet closes after saving");
+        proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
+        if (!shotFolder.isEmpty()) {
+            page.resize(480, 640); app.processEvents(); page.grab().save(shotFolder + "/proxy-list-dark-480.png");
         }
 #ifdef Q_OS_WIN
-        proxyEditor->findChild<QPushButton*>("saveProxy")->click(); app.processEvents();
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        check(proxyList->count() == 1, "proxy saved to list");
-        proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
-        if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
-            const auto folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
-            page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/proxy-list-dark-480.png");
-        }
+        videovault::app::InWindowSheet::setTestDriver(
+            [&](videovault::app::InWindowSheet* sheet) {
+                check(sheet->findChild<QLineEdit*>("proxyServer")->text() == "proxy.example.test", "edit restores server");
+                check(sheet->findChild<QLineEdit*>("proxyPassword")->text() == "test-only-secret", "edit restores securely stored password");
+                sheet->findChild<QRadioButton*>("proxyHttp")->setChecked(true);
+                sheet->findChild<QLineEdit*>("proxyPort")->setText("8080");
+                app.processEvents();
+                if (!shotFolder.isEmpty()) {
+                    // A short window is where a fixed-height card used to clip
+                    // half of every field; the body has to scroll instead.
+                    const QSize was = page.window()->size();
+                    page.window()->resize(460, 380);
+                    app.processEvents();
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-short.png");
+                    page.window()->resize(was);
+                    app.processEvents();
+                    page.window()->grab().save(shotFolder + "/proxy-sheet-light.png");
+                }
+                sheet->findChild<QPushButton*>("saveProxy")->click();
+            });
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
         child.operator()<QPushButton>("editProxy")->click(); app.processEvents();
-        proxyEditor = child.operator()<QDialog>("proxyEditor");
-        check(proxyEditor->findChild<QLineEdit*>("proxyServer")->text() == "proxy.example.test", "edit restores server");
-        check(proxyEditor->findChild<QLineEdit*>("proxyPassword")->text() == "test-only-secret", "edit restores securely stored password");
-        proxyEditor->findChild<QPushButton*>("proxyHttp")->click();
-        proxyEditor->findChild<QLineEdit*>("proxyPort")->setText("8080");
-        proxyEditor->findChild<QPushButton*>("saveProxy")->click(); app.processEvents();
         check(proxyList->item(0)->text().contains("8080") && proxyList->item(0)->text().contains("HTTP"), "edit updates protocol and port");
+        videovault::app::setThemeMode(videovault::app::ThemeMode::Dark);
+        app.processEvents();
         child.operator()<QPushButton>("deleteProxy")->click();
         check(proxyList->count() == 0 && !proxySwitch->isChecked(), "deleting active proxy disables use");
 #else
-        proxyEditor->reject();
+        child.operator()<QPushButton>("deleteProxy")->click();
 #endif
+        videovault::app::InWindowSheet::setTestDriver({});
         page.reject(); check(closes == 1 && page.isVisible(), "reject requests host navigation without destroying or hiding page");
         std::cout << "Settings page tests passed: switches, accessibility, updates, appearance, navigation, security, tags, thumbnails, persistence, responsive layout, live palette\n";
     } catch (const std::exception& error) {

@@ -76,17 +76,39 @@ jobs:
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
-
       # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
-      # vcpkg copies may not resolve. A FULL clone is required: a shallow
-      # clone does not contain the baseline commit, so `git show
-      # <baseline>:versions/baseline.json` fails ("failed to git show").
+      # vcpkg copies may not resolve, and resolving it needs vcpkg's own git
+      # history. That baseline never changes between builds, so the tool and its
+      # registry come back from cache instead of being cloned on every run.
+      - name: Cache the vcpkg tool and registry
+        id: vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg
+          key: vcpkg-tool-${{ runner.os }}-b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
-          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          $root = "$env:RUNNER_TEMP\vcpkg"
+          Write-Output "vcpkg tool cache: ${{ steps.vcpkg-tool.outputs.cache-hit == 'true' && 'hit' || 'miss' }}"
+          if (-not (Test-Path "$root\.git")) {
+            # A miss needs a FULL clone: a shallow one cannot resolve the baseline.
+            git clone https://github.com/microsoft/vcpkg.git $root
+          }
+          if (-not (Test-Path "$root\vcpkg.exe")) {
+            & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          }
 
+      # ffmpeg is the expensive port (15-20 minutes even with the release-only
+      # triplet). Caching the installed tree turns `vcpkg install` into a
+      # validation pass of seconds. The key follows the baseline, the manifest
+      # and the overlay triplet, so a dependency change starts a clean tree.
+      - name: Cache the built dependencies
+        id: vcpkg-installed
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01-${{ hashFiles('vcpkg.json', 'third_party/vcpkg-overlays/triplets/x64-windows-release.cmake') }}
       - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
         shell: pwsh
         env:
@@ -101,6 +123,7 @@ jobs:
           #    ffmpeg/openssl/etc. from cache instead of recompiling.
           VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
         run: |
+          Write-Output "dependency cache: ${{ steps.vcpkg-installed.outputs.cache-hit == 'true' && 'hit (verify only)' || 'miss (building)' }}"
           # --vcpkg-root overrides the runner's VS-installed VCPKG_ROOT env
           # (otherwise vcpkg detects the temp root and warns about the mismatch).
           & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
@@ -108,6 +131,7 @@ jobs:
             --triplet x64-windows-release `
             --overlay-triplets="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
             --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 
       # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
       # DLL export tables (same step as local builds; paths come from env).
@@ -124,7 +148,17 @@ jobs:
       # QNetworkAccessManager made — cloud sync, and the provider plugin — failed
       # before it was sent. Build the 1.1 runtime Qt expects and ship it beside
       # the exe; the app's own crypto keeps using OpenSSL 3 under different names.
+      # Building 1.1.1w costs several minutes and yields the same two DLLs every
+      # time, so the build output is cached by commit; a hit skips configure and
+      # nmake and only re-verifies the files.
+      - name: Cache OpenSSL 1.1 for Qt TLS
+        id: openssl11
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl11
+          key: openssl11-${{ runner.os }}-e04bd3433fd84e1861bf258ea37928d9845e6a86
       - name: Build OpenSSL 1.1 for Qt TLS
+        if: steps.openssl11.outputs.cache-hit != 'true'
         shell: pwsh
         env:
           OPENSSL_COMMIT: e04bd3433fd84e1861bf258ea37928d9845e6a86
@@ -144,6 +178,13 @@ jobs:
           foreach ($dll in @("libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll")) {
             if (-not (Test-Path "$src\$dll")) { throw "OpenSSL did not produce $dll" }
           }
+      - name: Verify the Qt TLS runtime
+        shell: pwsh
+        run: |
+          foreach ($dll in @("libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll")) {
+            if (-not (Test-Path "$env:RUNNER_TEMP\openssl11\$dll")) { throw "Qt TLS runtime missing: $dll" }
+          }
+          Write-Output "Qt TLS runtime ready (cache: ${{ steps.openssl11.outputs.cache-hit == 'true' && 'hit' || 'built' }})"
 
       - name: Configure (Release)
         shell: pwsh

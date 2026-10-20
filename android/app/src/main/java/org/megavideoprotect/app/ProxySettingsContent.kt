@@ -17,6 +17,13 @@ import kotlinx.coroutines.withContext
 import java.util.UUID
 
 /** Telegram-style list and editor; selection is not advertised as a connectivity test. */
+
+/** Small caption above a field, as on the desktop proxy sheet. */
+@Composable
+private fun FieldLabel(text: String) {
+    Text(text, color = Mvp.description, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+}
+
 @Composable
 fun ProxySettingsContent() {
     val scope = rememberCoroutineScope()
@@ -52,14 +59,14 @@ fun ProxySettingsContent() {
                 Text(value.name, color = Mvp.text, modifier = Modifier.clickable(enabled = !busy) { kind = value }.padding(end = 16.dp))
             }
         }
-        OutlinedTextField(host, { host = it }, label = { Text("Server") }, singleLine = true, enabled = !busy,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false), modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(port, { port = it }, label = { Text("Port") }, singleLine = true, enabled = !busy,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(username, { username = it }, label = { Text("Username (optional)") }, singleLine = true, enabled = !busy,
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(password, { password = it }, label = { Text("Password (optional)") }, singleLine = true, enabled = !busy,
-            visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), modifier = Modifier.fillMaxWidth())
+        FieldLabel("Server")
+        MvpInput(host, { host = it }, "proxy.example.com", enabled = !busy, keyboardType = KeyboardType.Uri)
+        FieldLabel("Port")
+        MvpInput(port, { port = it }, "1080", enabled = !busy, keyboardType = KeyboardType.Number)
+        FieldLabel("Username (optional)")
+        MvpInput(username, { username = it }, "Username", enabled = !busy)
+        FieldLabel("Password (optional)")
+        MvpInput(password, { password = it }, "Password", isPassword = true, enabled = !busy)
         Row {
             TextButton(enabled = !busy, onClick = { editing = false; password = ""; username = ""; error = null }) { Text("Cancel") }
             TextButton(enabled = !busy, onClick = {

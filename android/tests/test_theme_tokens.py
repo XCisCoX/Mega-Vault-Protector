@@ -16,6 +16,28 @@ PLAYERS = {"Theme.kt", "MusicScreen.kt", "PlayerScreen.kt", "RemoteHttpDataSourc
 
 
 class PaletteOnly(unittest.TestCase):
+    def test_lucide_vectors_are_the_icon_family(self):
+        """Every ic_lucide_* reference resolves to a generated vector, and no
+        retired bitmap icon is referenced any more."""
+        vectors = {
+            p.stem for p in (Path(__file__).resolve().parents[2] / "assets/icons/android/drawable").glob("*.xml")
+        }
+        self.assertGreater(len(vectors), 30, "Lucide vector set is missing")
+        referenced = set()
+        retired = {
+            "ic_ab_back", "msg_close", "msg_settings", "msg_add", "msg_download",
+            "outline_header_search", "outline_header_lock_24", "menu_tag_filter",
+            "files_folder", "msg_delete_filled", "checkbig", "msg_check_s",
+        }
+        for path in APP.glob("*.kt"):
+            text = path.read_text(encoding="utf-8")
+            referenced |= set(re.findall(r"R\.drawable\.(ic_lucide_[a-z0-9_]+)", text))
+            leftover = retired & set(re.findall(r"R\.drawable\.([a-z0-9_]+)", text))
+            self.assertFalse(leftover, f"{path.name} still uses retired bitmap icons: {sorted(leftover)}")
+        self.assertTrue(referenced, "no Lucide icon is used yet")
+        missing = sorted(referenced - vectors)
+        self.assertFalse(missing, f"vectors not generated: {missing}")
+
     def test_no_raw_colours_outside_the_palette_and_players(self):
         offenders = {}
         for path in sorted(APP.glob("*.kt")):

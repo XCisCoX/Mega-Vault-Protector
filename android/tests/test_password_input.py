@@ -36,11 +36,14 @@ class PasswordKeyboardGuards(unittest.TestCase):
                     )
                 else:
                     flag = mask.group(1)
+                    # The non-password branch may pass a keyboard kind through, so
+                    # only the masked branch is pinned: it must ask for the password
+                    # IME and suppress suggestions.
                     self.assertRegex(
                         code,
                         rf"keyboardOptions\s*=\s*if\s*\({flag}\)\s*KeyboardOptions\("
                         r"\s*keyboardType\s*=\s*KeyboardType\.Password,"
-                        r"\s*autoCorrectEnabled\s*=\s*false,?\s*\)\s*else\s*KeyboardOptions\.Default",
+                        r"\s*autoCorrectEnabled\s*=\s*false,?\s*\)",
                         "Masking alone does not identify a password field to the keyboard",
                     )
                 self.assertIn("import androidx.compose.foundation.text.KeyboardOptions", code)

@@ -48,6 +48,27 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.graphics.drawable.ColorDrawable
+import android.os.Build
+import android.view.WindowManager
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 
 /** Frosted panel: dark glass, hairline, large radius. */
 @Composable
@@ -129,6 +150,7 @@ fun MvpInput(
     isPassword: Boolean = false,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    keyboardType: KeyboardType = KeyboardType.Text,
 ) {
     OutlinedTextField(
         value = value,
@@ -143,7 +165,7 @@ fun MvpInput(
         keyboardOptions = if (isPassword) KeyboardOptions(
             keyboardType = KeyboardType.Password,
             autoCorrectEnabled = false,
-        ) else KeyboardOptions.Default,
+        ) else KeyboardOptions(keyboardType = keyboardType, autoCorrectEnabled = keyboardType == KeyboardType.Text),
         shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Mvp.title,
@@ -308,4 +330,118 @@ fun RowScope.ToolbarButton(
 ) {
     Spacer(Modifier.width(4.dp))
     MvpButton(text = text, onClick = onClick, primary = primary, modifier = Modifier.weight(1f))
+}
+
+/**
+ * Window-level look for every dialog: dimmed, and blurred behind on Android 12+
+ * (the platform drops the blur silently on devices that do not support it).
+ */
+@Composable
+fun BlurredDialogWindow(dim: Float = 0.55f) {
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.parent as? DialogWindowProvider)?.window ?: return@SideEffect
+        window.setDimAmount(dim)
+        window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            window.setBackgroundBlurRadius(70)
+        }
+    }
+}
+
+/**
+ * The one dialog surface of the app: a bottom sheet over the blurred library,
+ * matching the desktop's in-window sheets. Content scrolls, buttons stay put.
+ */
+@Composable
+fun MvpSheet(
+    title: String,
+    onDismiss: () -> Unit,
+    confirmLabel: String,
+    onConfirm: (() -> Unit)? = null,
+    confirmEnabled: Boolean = true,
+    dismissLabel: String = "Cancel",
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        BlurredDialogWindow()
+        val slide = remember { Animatable(0f) }
+        LaunchedEffect(Unit) { slide.animateTo(1f, tween(220)) }
+        Box(Modifier.fillMaxSize()) {
+            Box(
+                Modifier.fillMaxSize().clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+            )
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .graphicsLayer {
+                        alpha = slide.value
+                        translationY = (1f - slide.value) * 48.dp.toPx()
+                    }
+                    .fillMaxWidth()
+                    .imePadding()
+                    .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                    .background(Mvp.window)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {}
+                    .navigationBarsPadding(),
+            ) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = 8.dp)
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Mvp.description.copy(alpha = 0.35f)),
+                )
+                Text(
+                    title,
+                    color = Mvp.text,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp),
+                )
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    content = content,
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text(dismissLabel, color = Mvp.description, fontSize = 14.sp)
+                    }
+                    if (onConfirm != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = onConfirm,
+                            enabled = confirmEnabled,
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Mvp.accent,
+                                contentColor = Color.White,
+                            ),
+                        ) { Text(confirmLabel, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                    }
+                }
+            }
+        }
+    }
 }

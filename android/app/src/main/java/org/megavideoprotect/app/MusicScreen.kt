@@ -543,7 +543,7 @@ fun MusicScreen(
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Icon(
-                    painterResource(R.drawable.msg_close),
+                    painterResource(R.drawable.ic_lucide_x),
                     contentDescription = "Close",
                     tint = Color.White,
                     modifier = Modifier
@@ -863,7 +863,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    painterResource(R.drawable.msg_close),
+                    painterResource(R.drawable.ic_lucide_x),
                     contentDescription = "Close",
                     tint = Color(0xFF8B9BA8),
                     modifier = Modifier.size(16.dp),

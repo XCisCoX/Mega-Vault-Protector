@@ -95,6 +95,7 @@
 #include <QToolButton>
 #include <QScrollBar>
 #include <QSet>
+#include <QScrollArea>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QThread>
@@ -243,12 +244,19 @@ QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
 
 
 QPixmap musicPlaceholder(const int side) {
-    const QPixmap cover = scaledIcon(":/icons/nocover.png", std::max(1, side));
-    if (!cover.isNull()) {
-        return cover;
-    }
-    QPixmap plate(std::max(1, side), std::max(1, side));
-    plate.fill(QColor(0x1C, 0x1C, 0x1E));
+    // A track row's art plate is painted from the palette, so a song on a light
+    // row does not carry a black square into the light theme.
+    const int s = std::max(24, side);
+    QPixmap plate(s, s);
+    const bool dark = isDarkTheme();
+    plate.fill(dark ? QColor(0x24, 0x24, 0x26) : QColor(0xEA, 0xEA, 0xEF));
+    QPainter painter(&plate);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(dark ? QColor(0xA8, 0xA8, 0xAE) : QColor(0x8E, 0x8E, 0x93));
+    QFont font(QStringLiteral("Segoe UI"));
+    font.setPixelSize(std::max(12, s / 3));
+    painter.setFont(font);
+    painter.drawText(plate.rect(), Qt::AlignCenter, QStringLiteral("♪"));
     return plate;
 }
 
@@ -682,10 +690,13 @@ QString pluginRowButtonStyle(const QString& look, const bool dark) {
     }
     return QStringLiteral(
         "QToolButton { border: 1px solid %1; border-radius: %2px; background: %3; color: %4;"
-        " font-family: \"Segoe UI\"; font-size: 11px; padding: 0 6px; }")
+        " font-family: \"Segoe UI\"; font-size: 11px; padding: 0 6px; }"
+        "QToolButton:hover { background: %5; }"
+        "QToolButton:disabled { color: %4; }")
         .arg(border)
         .arg(kRowButtonHeight / 2)
-        .arg(fill, ink);
+        .arg(fill, ink)
+        .arg(dark ? QStringLiteral("rgba(255,255,255,26)") : QStringLiteral("rgba(0,0,0,16)"));
 }
 
 bool isPdfFileName(const QString& name) {
@@ -1331,11 +1342,32 @@ QFrame* cardFor(QWidget* page) {
 }
 
 void placeCard(QWidget* page, QFrame* card) {
+    // A short window scrolls the card instead of squeezing it: a compressed card
+    // is what cut the bottom half off the path and password fields.
     auto* outer = new QVBoxLayout(page);
-    outer->setContentsMargins(48, 48, 48, 48);
-    outer->addStretch();
-    outer->addWidget(card, 0, Qt::AlignHCenter);
-    outer->addStretch();
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* area = new QScrollArea(page);
+    area->setObjectName(QStringLiteral("authScroll"));
+    area->setWidgetResizable(true);
+    area->setFrameShape(QFrame::NoFrame);
+    area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    area->viewport()->setAutoFillBackground(false);
+    area->setStyleSheet(QStringLiteral(
+        "QScrollArea#authScroll { background: transparent; border: none; }"));
+    auto* host = new QWidget;
+    host->setObjectName(QStringLiteral("authHost"));
+    host->setStyleSheet(QStringLiteral("QWidget#authHost { background: transparent; }"));
+    auto* inner = new QVBoxLayout(host);
+    inner->setContentsMargins(48, 48, 48, 48);
+    inner->addStretch();
+    inner->addWidget(card, 0, Qt::AlignHCenter);
+    inner->addStretch();
+    area->setWidget(host);
+    outer->addWidget(area);
+    // The scroll area's own size hint is small, which let the window shrink to
+    // below the card once the auth page was shown. Hold the window at the card's
+    // size, as the plain centred layout used to.
+    page->setMinimumSize(card->sizeHint().grownBy(QMargins(96, 96, 96, 96)));
 }
 
 core::Argon2Parameters selectedParameters(const int profile) {
@@ -1353,20 +1385,35 @@ class CommandPopup final : public QDialog {
 public:
     explicit CommandPopup(QWidget* parent)
         : QDialog(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint) {
+        // The popup is its own top-level window, so it does not inherit the themed
+        // palette of the window that opened it: in light theme it painted the
+        // application's dark palette, i.e. a black card with black text.
+        const QPalette themed = parent != nullptr ? parent->palette() : QApplication::palette();
+        setPalette(themed);
+        card_ = themed.color(QPalette::Base);
+        border_ = card_.lightness() < 128 ? QColor(255, 255, 255, 30) : QColor(0, 0, 0, 20);
         setAttribute(Qt::WA_TranslucentBackground);
         setObjectName(QStringLiteral("commandPopup"));
+        setMinimumWidth(210);
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(8, 8, 8, 8);
         layout->setSpacing(2);
+        // Hug the commands: an unconstrained popup used to open as a large empty
+        // card, which is what a black rectangle over the library turned out to be.
+        layout->setSizeConstraint(QLayout::SetFixedSize);
         setAutoFillBackground(false);
+        // Authored in the dark palette: the theme manager rewrites widget sheets
+        // for light mode, and a hand-computed light colour would be rewritten too
+        // (that is how a light card kept white labels).
         setStyleSheet(QStringLiteral(
             "QDialog#commandPopup { background: transparent; border: none; }"
             "QPushButton#menuCommand, QPushButton#menuDanger {"
-            "  color: white; background: transparent; border: none; border-radius: 10px;"
-            "  text-align: left; padding: 0 16px; min-height: 36px; font-size: 10pt; }"
-            "QPushButton#menuCommand:hover { background: rgba(51, 144, 236, 90); }"
-            "QPushButton#menuDanger { color: #ff453a; }"
-            "QPushButton#menuDanger:hover { background: rgba(255, 69, 58, 42); }"));
+            "  color: #f2f2f7; background: transparent; border: none;"
+            "  border-radius: 10px; text-align: left; padding: 0 16px;"
+            "  min-height: 36px; font-size: 10pt; }"
+            "QPushButton#menuCommand:hover, QPushButton#menuDanger:hover {"
+            "  background: #3390ec; color: #ffffff; }"
+            "QPushButton#menuDanger { color: #ff453a; }"));
     }
 
     QPushButton* addCommand(const QString& text, const int result, const bool danger = false) {
@@ -1375,8 +1422,7 @@ public:
             auto* line = new QWidget(this);
             line->setFixedHeight(1);
             line->setAttribute(Qt::WA_StyledBackground, true);
-            line->setStyleSheet(QStringLiteral(
-                "background: rgba(255, 255, 255, 28); margin: 4px 8px;"));
+            line->setStyleSheet(QStringLiteral("background: palette(mid); margin: 4px 8px;"));
             layout->addSpacing(4);
             layout->addWidget(line);
             layout->addSpacing(4);
@@ -1394,14 +1440,22 @@ public:
         return button;
     }
 
+    [[nodiscard]] bool empty() const {
+        return layout() == nullptr || layout()->count() == 0;
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(QColor(255, 255, 255, 36)));
-        painter.setBrush(QColor(28, 28, 30));
+        painter.setPen(QPen(border_));
+        painter.setBrush(card_);
         painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 14, 14);
     }
+
+private:
+    QColor card_;
+    QColor border_;
 };
 
 void fadeInWidget(QWidget* widget) {
@@ -2001,6 +2055,14 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::PaletteChange) {
+        // Overlay widgets paint themselves from a stylesheet, so a theme switch
+        // has to repaint the provider row buttons as well.
+        syncPluginRowButtons();
+        // Row art is a pixmap painted with the palette; rebuild the folder so a
+        // song's plate follows the new theme instead of keeping the old one.
+        if (pluginFolder_) rebuildPluginFolder();
+    }
     if (event->type() == QEvent::WindowStateChange) {
         if (captionBar_ != nullptr) {
             captionBar_->setVisible(!isFullScreen());
@@ -2184,12 +2246,24 @@ QWidget* MainWindow::buildSetupPage() {
     auto* locationRow = new QHBoxLayout();
     setupLocation_ = new QLineEdit(card);
     setupLocation_->setPlaceholderText(QStringLiteral("Vault storage folder"));
-    auto* browse = new QPushButton(QStringLiteral("Browse…"), card);
+    setupLocation_->setTextMargins(10, 0, 8, 0);
+    setupLocation_->setMinimumHeight(38);
+    setupLocation_->setCursorPosition(0);
+    // Icon-only: "Browse…" cost the path field enough width to cut its last
+    // characters off, which is what made the field look clipped.
+    auto* browse = new QPushButton(card);
+    browse->setObjectName(QStringLiteral("browseButton"));
+    browse->setFixedSize(38, 38);
+    browse->setIconSize(QSize(16, 16));
+    browse->setToolTip(QStringLiteral("Choose the vault folder"));
+    browse->setAccessibleName(QStringLiteral("Choose the vault folder"));
+    icons::apply(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(setupLocation_, 1);
     locationRow->addWidget(browse);
     layout->addLayout(locationRow);
 
     setupPassword_ = new QLineEdit(card);
+    setupPassword_->setMinimumHeight(38);
     setupPassword_->setEchoMode(QLineEdit::Password);
     setupPassword_->setPlaceholderText(QStringLiteral("Password"));
     setupConfirmation_ = new QLineEdit(card);
@@ -2237,7 +2311,16 @@ QWidget* MainWindow::buildLoginPage() {
     locationRow->setContentsMargins(0, 0, 0, 0);
     loginLocation_ = new QLineEdit(loginLocationRow_);
     loginLocation_->setPlaceholderText(QStringLiteral("Vault storage folder"));
-    auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
+    loginLocation_->setTextMargins(10, 0, 8, 0);
+    loginLocation_->setMinimumHeight(38);
+    loginLocation_->setCursorPosition(0);
+    auto* browse = new QPushButton(loginLocationRow_);
+    browse->setObjectName(QStringLiteral("browseButton"));
+    browse->setFixedSize(38, 38);
+    browse->setIconSize(QSize(16, 16));
+    browse->setToolTip(QStringLiteral("Choose the vault folder"));
+    browse->setAccessibleName(QStringLiteral("Choose the vault folder"));
+    icons::apply(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
     // The remembered vault path is longer than this field, and a line edit that
@@ -2275,6 +2358,7 @@ QWidget* MainWindow::buildLoginPage() {
 #endif
 
     loginPassword_ = new QLineEdit(card);
+    loginPassword_->setMinimumHeight(38);
     loginPassword_->setEchoMode(QLineEdit::Password);
     loginPassword_->setPlaceholderText(QStringLiteral("Password"));
     layout->addWidget(loginPassword_);
@@ -2556,17 +2640,20 @@ QWidget* MainWindow::buildUnlockedPage() {
     folderPane_->setObjectName(QStringLiteral("folderPane"));
     // Plain QWidget needs this for the stylesheet background and divider to paint.
     folderPane_->setAttribute(Qt::WA_StyledBackground, true);
+    // Palette roles: the pane and its tree have to read correctly in both themes.
     folderPane_->setStyleSheet(QStringLiteral(
-        "QWidget#folderPane { background: rgba(255, 255, 255, 8);"
-        " border-right: 1px solid rgba(255, 255, 255, 22); }"
-        "QTreeWidget#folderTree { background: transparent; border: none; color: #d8d8dc; }"
+        "QWidget#folderPane { background: palette(window);"
+        " border-right: 1px solid palette(midlight); }"
+        "QTreeWidget#folderTree { background: transparent; border: none; color: palette(text); }"
         "QTreeWidget#folderTree::item { min-height: 26px; border-radius: 6px; }"
-        "QTreeWidget#folderTree::item:selected { background: rgba(51, 144, 236, 110); color: white; }"
-        "QLabel#folderPaneTitle { color: rgba(255, 255, 255, 150); font-size: 9pt;"
+        "QTreeWidget#folderTree::item:hover { background: palette(alternate-base); }"
+        "QTreeWidget#folderTree::item:selected { background: palette(highlight);"
+        " color: palette(highlighted-text); }"
+        "QLabel#folderPaneTitle { color: palette(mid); font-size: 9pt;"
         " font-weight: 600; background: transparent; }"
-        "QPushButton#folderPaneToggle { color: #8ec8ff; background: transparent;"
-        " border: none; font-size: 12pt; padding: 0; }"
-        "QPushButton#folderPaneToggle:hover { color: white; }"));
+        "QPushButton#folderPaneToggle { background: transparent; border: none; padding: 0; }"
+        "QPushButton#folderPaneToggle:hover { background: palette(alternate-base);"
+        " border-radius: 6px; }"));
     auto* paneLayout = new QVBoxLayout(folderPane_);
     paneLayout->setContentsMargins(6, 6, 6, 6);
     paneLayout->setSpacing(4);
@@ -2575,10 +2662,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     paneHeader->setSpacing(2);
     folderPaneLabel_ = new QLabel(QStringLiteral("Folders"), folderPane_);
     folderPaneLabel_->setObjectName(QStringLiteral("folderPaneTitle"));
-    folderPaneToggle_ = new QPushButton(QStringLiteral("‹"), folderPane_);
+    folderPaneToggle_ = new QPushButton(folderPane_);
     folderPaneToggle_->setObjectName(QStringLiteral("folderPaneToggle"));
+    folderPaneToggle_->setAccessibleName(QStringLiteral("Collapse the folder pane"));
     folderPaneToggle_->setToolTip(QStringLiteral("Collapse the folder pane"));
-    folderPaneToggle_->setFixedSize(20, 20);
+    folderPaneToggle_->setFixedSize(22, 22);
+    folderPaneToggle_->setIconSize(QSize(16, 16));
+    // icons::apply re-tints on a theme change, so the chevron follows both themes.
+    icons::apply(folderPaneToggle_, QStringLiteral("chevron-left"));
     folderPaneToggle_->setFocusPolicy(Qt::NoFocus);
     folderPaneToggle_->setCursor(Qt::PointingHandCursor);
     paneHeader->addWidget(folderPaneLabel_, 1);
@@ -2702,6 +2793,7 @@ QWidget* MainWindow::buildUnlockedPage() {
         menu.addCommand(QStringLiteral("Import package…"), 6);
         menu.addCommand(QStringLiteral("Export package…"), 7);
         const QPoint origin = importButton_->mapToGlobal(QPoint(0, importButton_->height()));
+        if (menu.empty()) { return; }
         placePopup(&menu, origin);
         switch (menu.exec()) {
         case 1:
@@ -3463,7 +3555,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     if (on_item && kind == kKindPhone) {
         menu.addCommand(QStringLiteral("Open"), 1);
         menu.addCommand(QStringLiteral("Disconnect phone"), 2, true);
-        placePopup(&menu, global_position);
+        if (menu.empty()) { return; }
+        if (menu.empty()) { return; }
+    placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
             openPeerBrowser();
@@ -3486,7 +3580,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         if (!cutItems_.empty()) {
             menu.addCommand(QStringLiteral("Paste"), 5);
         }
-        placePopup(&menu, global_position);
+        if (menu.empty()) { return; }
+        if (menu.empty()) { return; }
+    placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
             beginNewFolder();
@@ -3519,7 +3615,9 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         menu.addCommand(QStringLiteral("Move to…"), 3);
         menu.addCommand(QStringLiteral("Export as package…"), 5);
         menu.addCommand(QStringLiteral("Remove folder"), 4, true);
-        placePopup(&menu, global_position);
+        if (menu.empty()) { return; }
+        if (menu.empty()) { return; }
+    placePopup(&menu, global_position);
         switch (menu.exec()) {
         case 1:
             openFolder(folder_id);
@@ -3580,6 +3678,7 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     menu.addCommand(count > 1
         ? QStringLiteral("Remove") + countText
         : QStringLiteral("Remove"), 6, true);
+    if (menu.empty()) { return; }
     placePopup(&menu, global_position);
     switch (menu.exec()) {
     case 1:
@@ -4435,6 +4534,12 @@ void MainWindow::syncPluginRowButtons() {
             button->setProperty("rowLook", look);
             button->setStyleSheet(pluginRowButtonStyle(look, dark));
         }
+        // A theme switch changes only the colours: the look name stays the same,
+        // so the stylesheet has to be keyed on the theme as well.
+        if (button->property("rowDark").isValid() != true || button->property("rowDark").toBool() != dark) {
+            button->setProperty("rowDark", dark);
+            button->setStyleSheet(pluginRowButtonStyle(look, dark));
+        }
         button->setGeometry(slot.rect.right() - kRowButtonReserve + 8,
             slot.rect.center().y() - kRowButtonHeight / 2, kRowButtonWidth, kRowButtonHeight);
         button->show();
@@ -4931,16 +5036,13 @@ void MainWindow::offerUpdateRestart() {
     release.url = QUrl(updateUrl_);
     release.size = updateSize_;
 
-    QMessageBox box(this);
-    box.setWindowTitle(QStringLiteral("Update ready"));
-    box.setText(QStringLiteral("Version %1 has been downloaded.").arg(release.version));
-    box.setInformativeText(QStringLiteral(
-        "MegaVaultProtect closes, replaces its files and starts again."));
-    QPushButton* restart = box.addButton(QStringLiteral("Restart and install"), QMessageBox::AcceptRole);
-    box.addButton(QStringLiteral("Later"), QMessageBox::RejectRole);
-    box.setDefaultButton(restart);
-    box.exec();
-    if (box.clickedButton() != restart) {
+    InWindowSheet confirm(this);
+    confirm.setTitle(QStringLiteral("Update ready"));
+    confirm.setMessage(QStringLiteral("Version %1 has been downloaded. "
+        "MegaVaultProtect closes, replaces its files and starts again.").arg(release.version));
+    confirm.addButton(QStringLiteral("Later"), 0, false);
+    confirm.addButton(QStringLiteral("Restart and install"), 1, true, QStringLiteral("refresh-cw"));
+    if (confirm.run() != 1) {
         showStatus(QStringLiteral("Version %1 is ready. Use the update button when you want to install.").arg(release.version), false);
         return;
     }
@@ -5921,9 +6023,8 @@ void MainWindow::setFolderPaneCollapsed(const bool collapsed) {
         folderPaneLabel_->setVisible(!collapsed);
     }
     if (folderPaneToggle_ != nullptr) {
-        folderPaneToggle_->setIcon(icons::lucideSolid(
-            collapsed ? QStringLiteral("chevron-right") : QStringLiteral("chevron-left"),
-            qApp->palette().color(QPalette::ButtonText)));
+        icons::apply(folderPaneToggle_,
+            collapsed ? QStringLiteral("chevron-right") : QStringLiteral("chevron-left"));
         folderPaneToggle_->setToolTip(collapsed
             ? QStringLiteral("Show the folder pane")
             : QStringLiteral("Collapse the folder pane"));
@@ -6328,13 +6429,16 @@ void MainWindow::beginNewRecord() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
-    bool accepted = false;
-    const QString entered = QInputDialog::getText(this, QStringLiteral("New record"),
-        QStringLiteral("Title"), QLineEdit::Normal, QString(), &accepted);
-    if (!accepted) {
+    InWindowSheet prompt(this);
+    prompt.setTitle(QStringLiteral("New record"));
+    prompt.setMessage(QStringLiteral("A record file holds a list of typed records."));
+    QLineEdit* titleEntry = prompt.addTextEntry(QLineEdit::Normal, {}, QStringLiteral("Title"));
+    prompt.addButton(QStringLiteral("Cancel"), 0, false);
+    prompt.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
+    if (prompt.run() != 1) {
         return;
     }
-    const QString title = entered.trimmed();
+    const QString title = titleEntry->text().trimmed();
     if (title.isEmpty()) {
         showStatus(QStringLiteral("A record needs a title."), true);
         return;

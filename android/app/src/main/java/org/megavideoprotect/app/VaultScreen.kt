@@ -1666,6 +1666,7 @@ fun VaultScreen(
     if (showTags) {
         val chosen = videos.filter { it.id in selectedIds }
         Dialog(onDismissRequest = { if (!actionBusy) showTags = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Tag")
                 MvpDescription(
@@ -1715,6 +1716,7 @@ fun VaultScreen(
 
     if (confirmRemove) {
         Dialog(onDismissRequest = { if (!actionBusy) confirmRemove = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Remove ${selectedIds.size} item(s)?")
                 MvpDescription("Removal deletes the encrypted packages. This cannot be undone.")
@@ -1737,6 +1739,7 @@ fun VaultScreen(
     // Per-item action sheet: remove (permanent) or export a plaintext copy.
     actionTarget?.let { target ->
         Dialog(onDismissRequest = { if (!actionBusy) actionTarget = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(target.name)
                 MvpDescription("${target.sizeText} · ${target.tags.joinToString(", ")}")
@@ -1812,6 +1815,7 @@ fun VaultScreen(
 
     folderMenu?.takeIf { it.id == PEER_FOLDER_ID }?.let { folder ->
         Dialog(onDismissRequest = { folderMenu = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(folder.name)
                 MvpDescription(
@@ -1830,6 +1834,7 @@ fun VaultScreen(
 
     folderMenu?.takeIf { it.id != PEER_FOLDER_ID }?.let { folder ->
         Dialog(onDismissRequest = { folderMenu = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(folder.name)
                 MvpDescription("Removing a folder deletes the files and folders inside it.")
@@ -1866,6 +1871,7 @@ fun VaultScreen(
         val tree = folderSubtree(folders, folder.id)
         val inside = videos.count { it.folderId in tree }
         Dialog(onDismissRequest = { if (!actionBusy) folderDelete = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Remove \"${folder.name}\"?")
                 MvpDescription(
@@ -1918,6 +1924,7 @@ fun VaultScreen(
     var mediaPick by remember { mutableStateOf<DevicePick?>(null) }
     if (showAdd) {
         Dialog(onDismissRequest = { showAdd = false }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Add")
                 MvpButton("Gallery", onClick = {
@@ -1988,6 +1995,7 @@ fun VaultScreen(
 
     if (linkingPc) {
         Dialog(onDismissRequest = {}) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Swap with PC")
                 Row(
@@ -2011,6 +2019,7 @@ fun VaultScreen(
         var compress by remember { mutableStateOf(true) }
         var problem by remember { mutableStateOf<String?>(null) }
         Dialog(onDismissRequest = { packagePlan = null; packagePassword = "" }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Export package")
                 MvpDescription(problem ?: "This password locks the package. It is separate from the vault password.")
@@ -2048,6 +2057,7 @@ fun VaultScreen(
         var password by remember { mutableStateOf("") }
         var problem by remember { mutableStateOf<String?>(null) }
         Dialog(onDismissRequest = { packageImportUri = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Import package")
                 MvpDescription(problem ?: "Enter the password that was set when this package was created.")
@@ -2070,6 +2080,7 @@ fun VaultScreen(
     namePrompt?.let { prompt ->
         var draft by remember(prompt) { mutableStateOf(prompt.initial) }
         Dialog(onDismissRequest = { namePrompt = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle(prompt.title)
                 MvpInput(draft, { draft = it }, "Name")
@@ -2103,6 +2114,7 @@ fun VaultScreen(
             moveChoices(folders, currentFolderId, request.folders)
         }
         Dialog(onDismissRequest = { moveTarget = null }) {
+            BlurredDialogWindow()
             MvpCard(Modifier.fillMaxWidth()) {
                 MvpTitle("Move to")
                 MvpDescription(
@@ -2205,7 +2217,7 @@ private fun MusicLibrary(
             Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HeaderIcon("Close", R.drawable.msg_close, onClose)
+            HeaderIcon("Close", R.drawable.ic_lucide_x, onClose)
             Column(Modifier.weight(1f)) {
                 Text("Music", color = Mvp.title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Text(
@@ -2239,7 +2251,7 @@ private fun MusicLibrary(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                painterResource(R.drawable.outline_header_search),
+                painterResource(R.drawable.ic_lucide_search),
                 contentDescription = null,
                 tint = Mvp.placeholder,
                 modifier = Modifier.size(18.dp),
@@ -2348,7 +2360,7 @@ private fun GalleryHeader(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                HeaderIcon("Clear selection", R.drawable.msg_close, onClearSelection)
+                HeaderIcon("Clear selection", R.drawable.ic_lucide_x, onClearSelection)
                 Text(
                     selectionTitle,
                     color = Mvp.title,
@@ -2363,8 +2375,8 @@ private fun GalleryHeader(
                 }
                 HeaderIcon("Move", R.drawable.msg_forward, onMove, enabled = actionsEnabled)
                 HeaderIcon("Tag", R.drawable.menu_tag_plus, onTag, enabled = actionsEnabled)
-                HeaderIcon("Restore", R.drawable.msg_download, onRestore, enabled = actionsEnabled)
-                HeaderIcon("Remove", R.drawable.msg_delete_filled, onRemove, enabled = actionsEnabled, iconTint = Mvp.errorText)
+                HeaderIcon("Restore", R.drawable.ic_lucide_download, onRestore, enabled = actionsEnabled)
+                HeaderIcon("Remove", R.drawable.ic_lucide_trash, onRemove, enabled = actionsEnabled, iconTint = Mvp.errorText)
             }
         } else {
         Row(
@@ -2391,7 +2403,7 @@ private fun GalleryHeader(
                 )
             }
             if (updateReady) {
-                HeaderIcon("Update", R.drawable.msg_download, onUpdate)
+                HeaderIcon("Update", R.drawable.ic_lucide_download, onUpdate)
             }
             Text(
                 "Music",
@@ -2403,9 +2415,9 @@ private fun GalleryHeader(
                     .clickable(onClick = onMusic)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
-            HeaderIcon("Add", R.drawable.msg_add, onImport, filled = true)
-            HeaderIcon("Settings", R.drawable.msg_settings, onSettings)
-            HeaderIcon("Lock", R.drawable.outline_header_lock_24, onLock)
+            HeaderIcon("Add", R.drawable.ic_lucide_plus, onImport, filled = true)
+            HeaderIcon("Settings", R.drawable.ic_lucide_settings, onSettings)
+            HeaderIcon("Lock", R.drawable.ic_lucide_lock, onLock)
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -2423,7 +2435,7 @@ private fun GalleryHeader(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    painterResource(R.drawable.outline_header_search),
+                    painterResource(R.drawable.ic_lucide_search),
                     contentDescription = null,
                     tint = Mvp.placeholder,
                     modifier = Modifier.size(16.dp),
@@ -2455,7 +2467,7 @@ private fun GalleryHeader(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            painterResource(R.drawable.msg_close),
+                            painterResource(R.drawable.ic_lucide_x),
                             contentDescription = "Clear search",
                             tint = Mvp.description,
                             modifier = Modifier.size(14.dp),
@@ -2527,9 +2539,10 @@ private fun TagFilterButton(
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     Box {
-        ViewModeButton(R.drawable.menu_tag_filter, "Filter by tags", selected.isNotEmpty()) { open = true }
+        ViewModeButton(R.drawable.ic_lucide_list, "Filter by tags", selected.isNotEmpty()) { open = true }
         if (open) {
             Dialog(onDismissRequest = { open = false }) {
+                BlurredDialogWindow()
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -2611,7 +2624,7 @@ private fun TagFilterButton(
                                 Spacer(Modifier.width(10.dp))
                                 if (tag.id in selected) {
                                     Icon(
-                                        painterResource(R.drawable.msg_check_s),
+                                        painterResource(R.drawable.ic_lucide_check),
                                         contentDescription = "Selected",
                                         tint = Mvp.accent,
                                         modifier = Modifier.size(18.dp),
@@ -3010,7 +3023,7 @@ private fun FolderBar(
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Icon(
-                    painterResource(R.drawable.ic_ab_back),
+                    painterResource(R.drawable.ic_lucide_arrow_left),
                     contentDescription = "Up",
                     tint = Mvp.accent,
                     modifier = Modifier.size(14.dp),
@@ -3058,7 +3071,7 @@ private fun Crumb(
 @Composable
 private fun FolderGlyph(modifier: Modifier = Modifier) {
     Icon(
-        painterResource(R.drawable.files_folder),
+        painterResource(R.drawable.ic_lucide_folder),
         contentDescription = null,
         tint = Mvp.accent,
         modifier = modifier,
@@ -3996,7 +4009,7 @@ private fun IconGridView(
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            painterResource(R.drawable.checkbig),
+                            painterResource(R.drawable.ic_lucide_check),
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(14.dp),

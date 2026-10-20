@@ -20,6 +20,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -102,13 +103,21 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
         }
     }
     consent?.let { manifest ->
-        AlertDialog(onDismissRequest = { consent = null }, title = { Text("Enable ${manifest.name}?") }, text = {
-            Text(if(PluginProviderRegistry.protocol(manifest.protocol).music)
-                "Network: ${manifest.allowedHosts.joinToString()} over HTTPS. Your searches are sent to this service.\n\nPermissions: audio playback and encrypted vault import. Download is manual unless you separately enable auto-save after actual playback begins.\n\n${manifest.sourceNotice}"
-                else "This extension contains JavaScript commands that run locally in a bounded sandbox. No network, filesystem, vault keys or host APIs are exposed. Only the text you enter is passed to a fresh runtime.\n\n${manifest.sourceNotice}")
-        }, confirmButton = { TextButton(onClick = {
-            manager.save(manifest,manager.options(manifest).copy(enabled=true)); consent=null; revision++
-        }) { Text("Approve and enable") } }, dismissButton = { TextButton(onClick = { consent=null }) { Text("Cancel") } })
+        MvpSheet(
+            title = "Enable ${manifest.name}?",
+            onDismiss = { consent = null },
+            confirmLabel = "Approve and enable",
+            onConfirm = {
+                manager.save(manifest, manager.options(manifest).copy(enabled = true)); consent = null; revision++
+            },
+        ) {
+            Text(
+                if (PluginProviderRegistry.protocol(manifest.protocol).music)
+                    "Network: ${manifest.allowedHosts.joinToString()} over HTTPS. Your searches are sent to this service.\n\nPermissions: audio playback and encrypted vault import. Download is manual unless you separately enable auto-save after actual playback begins.\n\n${manifest.sourceNotice}"
+                    else "This extension contains JavaScript commands that run locally in a bounded sandbox. No network, filesystem, vault keys or host APIs are exposed. Only the text you enter is passed to a fresh runtime.\n\n${manifest.sourceNotice}",
+                color = Mvp.description, fontSize = 13.sp, lineHeight = 19.sp,
+            )
+        }
     }
     configure?.let { manifest ->
         if(PluginProviderRegistry.protocol(manifest.protocol).music) {
@@ -124,17 +133,28 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
 @Composable
 private fun ExtensionSettingsDialog(manifest: PluginManifest, initial: Map<String,Boolean>, onDismiss: () -> Unit, onSave: (Map<String,Boolean>) -> Unit) {
     var values by remember(manifest.id,manifest.version) {mutableStateOf(initial)}
-    AlertDialog(onDismissRequest=onDismiss,title={Text("${manifest.name} settings")},text={
-        Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            Text("${manifest.id} · ${manifest.version}",style=MaterialTheme.typography.bodySmall)
-            Text("Boolean preferences are isolated to this extension version and vault. Only these declared values accompany submitted text; no secrets or host APIs enter the sandbox.",style=MaterialTheme.typography.bodySmall)
-            manifest.settings.forEach {setting -> Row(verticalAlignment=Alignment.CenterVertically) {
-                Text(setting.title,modifier=Modifier.weight(1f))
-                Switch(checked=values[setting.id] ?: setting.defaultValue,onCheckedChange={values=values+(setting.id to it)})
-            } }
-            if(manifest.settings.isEmpty())Text("This extension declares no settings.")
+    MvpSheet(
+        title = "${manifest.name} settings",
+        onDismiss = onDismiss,
+        confirmLabel = "Save",
+        onConfirm = { onSave(values) },
+    ) {
+        Text("${manifest.id} · ${manifest.version}", color = Mvp.description, fontSize = 12.sp)
+        Text(
+            "Boolean preferences are isolated to this extension version and vault. Only these declared values accompany submitted text; no secrets or host APIs enter the sandbox.",
+            color = Mvp.description, fontSize = 12.sp, lineHeight = 18.sp,
+        )
+        manifest.settings.forEach { setting ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(setting.title, color = Mvp.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Switch(
+                    checked = values[setting.id] ?: setting.defaultValue,
+                    onCheckedChange = { values = values + (setting.id to it) },
+                )
+            }
         }
-    },confirmButton={TextButton(onClick={onSave(values)}){Text("Save")}},dismissButton={TextButton(onClick=onDismiss){Text("Cancel")}})
+        if (manifest.settings.isEmpty()) Text("This extension declares no settings.", color = Mvp.description, fontSize = 13.sp)
+    }
 }
 
 @Composable
@@ -155,30 +175,60 @@ private fun PluginSettingsDialog(name: String, initial: PluginOptions, onDismiss
         }
         return "Vault / " + parts.joinToString(" / ")
     }
-    AlertDialog(onDismissRequest=onDismiss,title={ Text("$name settings") },text={
-        Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment=Alignment.CenterVertically) {
-                Checkbox(settings.autoSave,onCheckedChange={ settings=settings.copy(autoSave=it) })
-                Text("Auto-save only after playback starts")
-            }
-            Text("Destination is scoped to this vault. No search history, audio files or artwork caches are persisted.", style=MaterialTheme.typography.bodySmall)
-            TextButton(onClick={ chooseFolder=true }) {
-                Text(if (settings.folderId==0L) "Destination: Vault root" else folders.firstOrNull { it.id==settings.folderId }?.let(::folderPath) ?: "Destination missing — choose another folder")
-            }
-            Text("Audio RAM limit (default 32 MiB)")
-            Row { listOf(32,64,128).forEach { limit ->
-                FilterChip(selected=settings.memoryMiB==limit,onClick={settings=settings.copy(memoryMiB=limit)},label={Text("$limit MiB")},modifier=Modifier.padding(end=4.dp))
-            } }
-            Text("One track at a time. Decoder/JVM/native overhead is additional; higher limits can exhaust low-memory devices.",style=MaterialTheme.typography.bodySmall)
-            if (error.isNotEmpty()) Text(error,color=MaterialTheme.colorScheme.error)
+    MvpSheet(
+        title = "$name settings",
+        onDismiss = onDismiss,
+        confirmLabel = "Save",
+        onConfirm = { onSave(settings) },
+        confirmEnabled = error.isEmpty() && (settings.folderId == 0L || folders.any { it.id == settings.folderId }),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(settings.autoSave, onCheckedChange = { settings = settings.copy(autoSave = it) })
+            Text("Auto-save only after playback starts", color = Mvp.text, fontSize = 14.sp)
         }
-    },confirmButton={ TextButton(onClick={onSave(settings)},enabled=error.isEmpty() && (settings.folderId==0L || folders.any{it.id==settings.folderId})) {Text("Save")} },dismissButton={TextButton(onClick=onDismiss){Text("Cancel")}})
-    if (chooseFolder) AlertDialog(onDismissRequest={chooseFolder=false},title={Text("Choose encrypted vault folder")},text={
-        LazyColumn(Modifier.heightIn(max=360.dp)) {
-            item { TextButton(onClick={settings=settings.copy(folderId=0);chooseFolder=false}){Text("Vault root")} }
-            items(folders,key={it.id}) { folder -> TextButton(onClick={settings=settings.copy(folderId=folder.id);chooseFolder=false}) {Text(folderPath(folder))} }
+        Text(
+            "Destination is scoped to this vault. No search history, audio files or artwork caches are persisted.",
+            color = Mvp.description, fontSize = 12.sp, lineHeight = 18.sp,
+        )
+        TextButton(onClick = { chooseFolder = true }) {
+            Text(
+                if (settings.folderId == 0L) "Destination: Vault root"
+                else folders.firstOrNull { it.id == settings.folderId }?.let(::folderPath) ?: "Destination missing — choose another folder",
+                color = Mvp.accent, fontSize = 13.sp,
+            )
         }
-    },confirmButton={TextButton(onClick={chooseFolder=false}){Text("Close")}})
+        Text("Audio RAM limit (default 32 MiB)", color = Mvp.text, fontSize = 13.sp)
+        Row {
+            listOf(32, 64, 128).forEach { limit ->
+                FilterChip(
+                    selected = settings.memoryMiB == limit,
+                    onClick = { settings = settings.copy(memoryMiB = limit) },
+                    label = { Text("$limit MiB") },
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+            }
+        }
+        Text(
+            "One track at a time. Decoder/JVM/native overhead is additional; higher limits can exhaust low-memory devices.",
+            color = Mvp.description, fontSize = 12.sp, lineHeight = 18.sp,
+        )
+        if (error.isNotEmpty()) Text(error, color = Mvp.errorText, fontSize = 12.sp)
+    }
+    if (chooseFolder) MvpSheet(
+        title = "Choose encrypted vault folder",
+        onDismiss = { chooseFolder = false },
+        confirmLabel = "Close",
+        onConfirm = { chooseFolder = false },
+    ) {
+        TextButton(onClick = { settings = settings.copy(folderId = 0); chooseFolder = false }) {
+            Text("Vault root", color = Mvp.accent, fontSize = 13.sp)
+        }
+        folders.forEach { folder ->
+            TextButton(onClick = { settings = settings.copy(folderId = folder.id); chooseFolder = false }) {
+                Text(folderPath(folder), color = Mvp.text, fontSize = 13.sp)
+            }
+        }
+    }
 }
 
 @Composable

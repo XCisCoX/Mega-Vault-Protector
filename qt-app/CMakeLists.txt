@@ -342,7 +342,7 @@ if(MVP_BUILD_TESTS)
 
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
         src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/icons.cpp
-        src/sync_state.cpp resources/icons.qrc
+        src/sync_state.cpp src/proxy_settings.cpp resources/icons.qrc
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/sync_state.hpp)
     target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
