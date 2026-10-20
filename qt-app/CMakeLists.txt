@@ -65,6 +65,7 @@ set(MVP_APP_SOURCES
     src/settings_dialog.cpp
     src/tag_filter_button.cpp
     src/theme.cpp
+    src/icons.cpp
     src/batch_worker.cpp
     src/share_server.cpp
     src/share_tls.cpp
@@ -83,12 +84,14 @@ set(MVP_APP_SOURCES
     include/videovault/app/record_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/tag_filter_button.hpp
+    include/videovault/app/icons.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
     include/videovault/app/share_tls.hpp
     include/videovault/app/peer_link.hpp
     include/videovault/app/peer_browser.hpp
     resources/resources.qrc
+    resources/icons.qrc
 )
 
 add_library(MegaVaultNetwork STATIC src/proxy_settings.cpp)
@@ -338,7 +341,8 @@ if(MVP_BUILD_TESTS)
     mvp_copy_runtime_dlls(VideoVaultAppUpdateTests)
 
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
-        src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/sync_state.cpp
+        src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/icons.cpp
+        src/sync_state.cpp resources/icons.qrc
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/sync_state.hpp)
     target_include_directories(VideoVaultSettingsTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

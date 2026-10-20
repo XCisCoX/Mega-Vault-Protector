@@ -178,11 +178,14 @@ public:
     // search, sharing and password-change behavior. The caller decides the
     // content format; the core stores it as opaque bytes. Identical content
     // returns the item already in the vault, exactly as import_file does.
+    // `already_present`, when given, is set to true in that case so a caller can
+    // tell the user instead of leaving them wondering where the new item went.
     // `display_name` follows the folder/file naming rule (1–120 characters).
     [[nodiscard]] Result<std::int64_t> import_bytes(
         std::span<const unsigned char> bytes,
         std::string_view display_name,
-        std::int64_t folder_id = 0);
+        std::int64_t folder_id = 0,
+        bool* already_present = nullptr);
 
     // Replaces an existing item's content in place. A new package is sealed and
     // the row, its wrapped key and the content hash are updated in one

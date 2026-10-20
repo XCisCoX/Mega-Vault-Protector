@@ -1,14 +1,6 @@
 <RCC>
     <qresource prefix="/icons">
         <file>app.png</file>
-        <file>bar_add.png</file>
-        <file>bar_settings.png</file>
-        <file>bar_lock.png</file>
-        <file>bar_share.png</file>
-        <file>bar_details.png</file>
-        <file>bar_icons.png</file>
-        <file>bar_list.png</file>
-        <file>files_folder.png</file>
         <file>media_doc_blue.png</file>
         <file>nocover.png</file>
         <file>chevron_down.png</file>

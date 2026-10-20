@@ -4,6 +4,8 @@
 #include "videovault/app/sync_page.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
+
+#include "videovault/app/icons.hpp"
 #include "videovault/app/music_window.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
@@ -211,23 +213,6 @@ QPixmap scaledIcon(const char* resource, const int side) {
 
 // The update glyph: the download arrow the phone shows in its library header.
 // Drawn here (like the cloud browser's green tick) so the button needs no asset.
-QIcon updateGlyph() {
-    QPixmap plate(22, 22);
-    plate.fill(Qt::transparent);
-    QPainter painter(&plate);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    QPen pen(Qt::white);
-    pen.setWidthF(1.9);
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(pen);
-    painter.drawLine(QPointF(11.0, 3.5), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(6.5, 9.0), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(15.5, 9.0), QPointF(11.0, 13.5));
-    painter.drawLine(QPointF(4.5, 18.5), QPointF(17.5, 18.5));
-    return QIcon(plate);
-}
-
 // What the background update check found, handed back through a QFutureWatcher.
 struct UpdateCheckOutcome {
     QString version;
@@ -256,13 +241,6 @@ QPixmap tintedIcon(const QPixmap& source, const QColor& color) {
     return plate;
 }
 
-void setChromeIcon(QAbstractButton* button, const QIcon& source) {
-    const auto apply = [button, source](const QPalette& palette) {
-        button->setIcon(QIcon(tintedIcon(source.pixmap(32, 32), palette.color(QPalette::ButtonText))));
-    };
-    apply(qApp->palette());
-    QObject::connect(qApp, &QApplication::paletteChanged, button, apply);
-}
 
 QPixmap musicPlaceholder(const int side) {
     const QPixmap cover = scaledIcon(":/icons/nocover.png", std::max(1, side));
@@ -594,7 +572,6 @@ struct LoadedText {
 struct TextSaveOutcome {
     bool ok{false};
     bool already{false};
-    bool removed{false};
     std::int64_t id{0};
     qlonglong size{0};
     QString error;
@@ -1863,8 +1840,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
                     ? QStringLiteral("Delete %1 folder(s) and everything inside them? This cannot be undone.")
                         .arg(folder_ids.size())
                     : QStringLiteral("Delete the selected folders, the files inside them, and the selected items? This cannot be undone."));
-                confirm.addButton(QStringLiteral("Cancel"), 0, false);
-                confirm.addButton(QStringLiteral("Delete"), 1, true);
+                confirm.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+                confirm.addButton(QStringLiteral("Delete"), 1, true, QStringLiteral("trash"));
                 if (confirm.run() != 1) {
                     return true;
                 }
@@ -2353,10 +2330,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
-    const auto makeIconButton = [](QWidget* parent, const QIcon& icon, const QString& tip, const bool filled) {
+    const auto makeIconButton = [](QWidget* parent, const QString& icon, const QString& tip,
+                                   const bool filled) {
         auto* button = new QPushButton(parent);
-        if (filled) button->setIcon(icon);
-        else setChromeIcon(button, icon);
+        if (filled) {
+            button->setIcon(icons::lucideSolid(icon, QColor(0xff, 0xff, 0xff)));
+        } else {
+            icons::apply(button, icon, icons::Tone::Normal);
+        }
         button->setIconSize(QSize(22, 22));
         button->setFixedSize(36, 36);
         button->setCursor(Qt::PointingHandCursor);
@@ -2376,20 +2357,20 @@ QWidget* MainWindow::buildUnlockedPage() {
     };
     // Offered only once GitHub has a newer release, the way the phone puts a
     // download icon in its library header.
-    updateButton_ = makeIconButton(toolbar, updateGlyph(),
+    updateButton_ = makeIconButton(toolbar, QStringLiteral("download"),
         QStringLiteral("Check for a newer version"), false);
     updateButton_->hide();
-    importButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_add.png")),
-        QStringLiteral("Add"), true);
+    importButton_ = makeIconButton(toolbar, QStringLiteral("plus"),
+        QStringLiteral("Add files to this vault"), true);
     // Folder import uses the same button. Both stay in step while a batch runs.
     importFolderButton_ = importButton_;
-    shareButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_share.png")),
+    shareButton_ = makeIconButton(toolbar, QStringLiteral("wifi"),
         QStringLiteral("Share this vault on Wi-Fi over an encrypted connection. "
                        "The phone must enter the vault password. Locking this PC does not stop sharing."),
         false);
-    settingsButton_ = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_settings.png")),
+    settingsButton_ = makeIconButton(toolbar, QStringLiteral("settings"),
         QStringLiteral("Change the password, manage tags, and adjust player settings"), false);
-    auto* lockButton = makeIconButton(toolbar, QIcon(QStringLiteral(":/icons/bar_lock.png")),
+    auto* lockButton = makeIconButton(toolbar, QStringLiteral("lock"),
         QStringLiteral("Lock this PC. A phone that already entered the password keeps access until you stop sharing."),
         false);
 
@@ -2458,11 +2439,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     auto* detailsMode = new QPushButton(modeHost);
     auto* iconsMode = new QPushButton(modeHost);
     auto* listMode = new QPushButton(modeHost);
-    setChromeIcon(detailsMode, QIcon(QStringLiteral(":/icons/bar_details.png")));
+    icons::apply(detailsMode, QStringLiteral("rows-3"));
     detailsMode->setToolTip(QStringLiteral("Details"));
-    setChromeIcon(iconsMode, QIcon(QStringLiteral(":/icons/bar_icons.png")));
+    icons::apply(iconsMode, QStringLiteral("layout-grid"));
     iconsMode->setToolTip(QStringLiteral("Icons"));
-    setChromeIcon(listMode, QIcon(QStringLiteral(":/icons/bar_list.png")));
+    icons::apply(listMode, QStringLiteral("list"));
     listMode->setToolTip(QStringLiteral("List"));
     viewModeGroup_ = new QButtonGroup(toolbar);
     viewModeGroup_->setExclusive(true);
@@ -3358,8 +3339,8 @@ void MainWindow::finishEditTags() {
     list->setMinimumHeight(220);
     layout->addWidget(list, 1);
     layout->addLayout(inputRow);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
-    dialog.addButton(QStringLiteral("Save"), 1, true);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    dialog.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
 
     connect(addButton, &QPushButton::clicked, &dialog, [list, input] {
         const QString name = input->text().trimmed();
@@ -5097,7 +5078,7 @@ PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
         compress->setChecked(true);
         dialog.body()->addWidget(compress);
     }
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     auto* ok = new QPushButton(exporting
         ? QStringLiteral("Export")
         : QStringLiteral("Import"));
@@ -5940,7 +5921,9 @@ void MainWindow::setFolderPaneCollapsed(const bool collapsed) {
         folderPaneLabel_->setVisible(!collapsed);
     }
     if (folderPaneToggle_ != nullptr) {
-        folderPaneToggle_->setText(collapsed ? QStringLiteral("›") : QStringLiteral("‹"));
+        folderPaneToggle_->setIcon(icons::lucideSolid(
+            collapsed ? QStringLiteral("chevron-right") : QStringLiteral("chevron-left"),
+            qApp->palette().color(QPalette::ButtonText)));
         folderPaneToggle_->setToolTip(collapsed
             ? QStringLiteral("Show the folder pane")
             : QStringLiteral("Collapse the folder pane"));
@@ -6187,8 +6170,8 @@ void MainWindow::beginNewFolder() {
     prompt.setTitle(QStringLiteral("New folder"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, QString(), QStringLiteral("Folder name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Create"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
     if (prompt.run() != 1) {
         return;
     }
@@ -6218,8 +6201,8 @@ void MainWindow::beginRenameFolder(const std::int64_t folder_id) {
     prompt.setTitle(QStringLiteral("Rename folder"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Folder name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Rename"), 1, true, QStringLiteral("pencil"));
     if (prompt.run() != 1) {
         return;
     }
@@ -6270,7 +6253,7 @@ void MainWindow::beginRemoveFolder(const std::int64_t folder_id) {
     box.setMessage(QStringLiteral("Remove \"%1\"?\n\n%2").arg(name, inside > 0
         ? QStringLiteral("Delete %1 file(s) inside this folder? This cannot be undone.").arg(inside)
         : QStringLiteral("This folder is empty.")));
-    box.addButton(QStringLiteral("Cancel"), 0, false);
+    box.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     box.addButton(inside > 0 ? QStringLiteral("Delete") : QStringLiteral("Remove folder"), 1, true);
     if (box.run() != 1) {
         return;
@@ -6325,8 +6308,8 @@ void MainWindow::beginRenameVideo(const std::int64_t video_id) {
     prompt.setTitle(QStringLiteral("Rename"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, current, QStringLiteral("Name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Rename"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Rename"), 1, true, QStringLiteral("pencil"));
     if (prompt.run() != 1) {
         return;
     }
@@ -6358,11 +6341,11 @@ void MainWindow::beginNewRecord() {
     }
 
     // The item is created before the editor opens, so it appears in this folder
-    // immediately — the same shape as creating a folder. The content is an
-    // empty record, which keeps the item recognisable as a record before its
-    // first edit; a zero-byte item could not be routed to the editor.
+    // immediately — the same shape as creating a folder. The content is an empty
+    // file of records, which keeps the item recognisable as a record before its
+    // first record is added; a zero-byte item could not be routed to the editor.
+    // The title lives on the library item, not inside the content.
     RecordDocument document;
-    document.title = title;
     const QByteArray bytes = serializeRecord(document);
 
     const auto vault = vault_;
@@ -6548,8 +6531,8 @@ bool MainWindow::chooseFolder(const QString& title, const std::vector<std::int64
     }
     list->setMinimumHeight(240);
     layout->addWidget(list);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
-    dialog.addButton(QStringLiteral("Move"), 1, true);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    dialog.addButton(QStringLiteral("Move"), 1, true, QStringLiteral("arrow-right"));
     connect(list, &QListWidget::itemDoubleClicked, &dialog, [&dialog] { dialog.finish(1); });
     if (dialog.run() != 1 || list->currentItem() == nullptr) {
         return false;
@@ -8125,8 +8108,8 @@ void MainWindow::beginRemoveSelected(const bool ask) {
         confirm.setTitle(QStringLiteral("Remove items"));
         confirm.setMessage(QStringLiteral("Remove %1 item(s) from the vault? This cannot be undone.")
             .arg(ids.size()));
-        confirm.addButton(QStringLiteral("Cancel"), 0, false);
-        confirm.addButton(QStringLiteral("Remove"), 1, true);
+        confirm.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        confirm.addButton(QStringLiteral("Remove"), 1, true, QStringLiteral("trash"));
         if (confirm.run() != 1) {
             return;
         }
@@ -8175,7 +8158,7 @@ void MainWindow::beginChangePassword() {
     dialog.body()->addWidget(next);
     dialog.body()->addWidget(confirmation);
     dialog.body()->addWidget(profile);
-    dialog.addButton(QStringLiteral("Cancel"), 0, false);
+    dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     dialog.addButton(QStringLiteral("Change"), 1, true);
     if (dialog.run() != 1) {
         return;
@@ -8674,8 +8657,8 @@ void MainWindow::beginNewNote() {
     prompt.setTitle(QStringLiteral("New note"));
     prompt.setMessage(QStringLiteral("Name"));
     prompt.addTextEntry(QLineEdit::Normal, QStringLiteral("Note.txt"), QStringLiteral("Name"));
-    prompt.addButton(QStringLiteral("Cancel"), 0, false);
-    prompt.addButton(QStringLiteral("Create"), 1, true);
+    prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    prompt.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
     if (prompt.run() != 1) {
         return;
     }
@@ -8772,11 +8755,16 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
         LoadedText loaded;
         QByteArray data;
         std::uint64_t offset = 0U;
+        bool read_failed = false;
         while (static_cast<std::uint64_t>(data.size()) < cap) {
             const auto room = cap - static_cast<std::uint64_t>(data.size());
             const auto want = std::min<std::uint64_t>(256U * 1024U, room);
             auto chunk = vault->read_video_range(video_id, offset, static_cast<std::size_t>(want));
-            if (!chunk || chunk.value().empty()) {
+            if (!chunk) {
+                read_failed = true;
+                break;
+            }
+            if (chunk.value().empty()) {
                 break;
             }
             const auto& bytes = chunk.value();
@@ -8784,11 +8772,21 @@ void MainWindow::beginText(const std::int64_t video_id, const QString& title) {
             data.append(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(take));
             offset += take;
             if (take < bytes.size()) {
-                loaded.truncated = true;
                 break;
             }
-            if (bytes.size() < want) {
-                break;
+        }
+        // Neither stopping at the cap nor a short read proves the end of the
+        // file: a file of exactly the cap leaves nothing more to read, while a
+        // longer one can only be recognised by looking. One byte past what was
+        // read decides it, because treating a partial read as complete would let
+        // Save write back a shortened copy. A read that failed leaves the length
+        // unknown, which is equally unsafe to edit.
+        if (read_failed) {
+            loaded.truncated = true;
+        } else {
+            auto probe = vault->read_video_range(video_id, offset, 1U);
+            if (!probe || !probe.value().empty()) {
+                loaded.truncated = true;
             }
         }
         loaded.body = QString::fromUtf8(data);
@@ -8814,9 +8812,9 @@ bool MainWindow::closeText(const bool force) {
         InWindowSheet prompt(this);
         prompt.setTitle(QStringLiteral("Save note"));
         prompt.setMessage(QStringLiteral("Save changes to %1?").arg(openTextTitle_));
-        prompt.addButton(QStringLiteral("Cancel"), 0, false);
-        prompt.addButton(QStringLiteral("Discard"), 2, false);
-        prompt.addButton(QStringLiteral("Save"), 1, true);
+        prompt.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        prompt.addButton(QStringLiteral("Discard"), 2, false, QStringLiteral("undo-2"));
+        prompt.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));
         const int answer = prompt.run();
         if (answer == 0) {
             return false;
@@ -8850,6 +8848,9 @@ void MainWindow::saveOpenText(const bool closeAfter) {
     const QString title = openTextTitle_.isEmpty() ? QStringLiteral("Note.txt") : openTextTitle_;
     const std::int64_t previous = openTextId_;
     const std::int64_t folderId = openTextFolderId_;
+    // A note that is already in the vault keeps the name it has; only a new one
+    // is sanitized into a safe name.
+    const QString safeTitle = previous > 0 ? title : noteFileName(title);
     const int generation = page->generation();
     closeTextAfterSave_ = closeAfter;
     openTextBusy_ = true;
@@ -8876,24 +8877,6 @@ void MainWindow::saveOpenText(const bool closeAfter) {
             resetAutoLock();
             return;
         }
-        if (outcome.removed) {
-            if (auto* icon = findListItemById(iconList_, previous)) {
-                delete iconList_->takeItem(iconList_->row(icon));
-            }
-            if (auto* tree = findTreeItemById(detailsTree_, previous)) {
-                delete detailsTree_->takeTopLevelItem(detailsTree_->indexOfTopLevelItem(tree));
-            }
-            if (galleryCache_ != nullptr) {
-                galleryCache_->thumbs.erase(previous);
-                galleryCache_->iconRows.erase(previous);
-                galleryCache_->treeRows.erase(previous);
-                auto& order = galleryCache_->thumbOrder;
-                order.erase(std::remove(order.begin(), order.end(), previous), order.end());
-                galleryCache_->media.erase(previous);
-                galleryCache_->kinds.erase(previous);
-            }
-            decoratedIds_.erase(previous);
-        }
         const bool collapsed = outcome.already && outcome.id != previous;
         if (current) {
             page->markSaved();
@@ -8905,7 +8888,11 @@ void MainWindow::saveOpenText(const bool closeAfter) {
                 openTextTitle_ = title;
             }
         }
-        if (!collapsed && findListItemById(iconList_, outcome.id) == nullptr) {
+        if (previous > 0 && outcome.id == previous) {
+            // Edited in place: the row is already listed, but the size it shows
+            // and the library total are now stale.
+            refreshGallery();
+        } else if (!collapsed && findListItemById(iconList_, outcome.id) == nullptr) {
             revealVideo(
                 outcome.id,
                 title,
@@ -8927,41 +8914,39 @@ void MainWindow::saveOpenText(const bool closeAfter) {
             lockVault();
         }
     });
-    watcher->setFuture(QtConcurrent::run([vault, title, utf8, previous, folderId] {
+    watcher->setFuture(QtConcurrent::run([vault, safeTitle, utf8, previous, folderId] {
         TextSaveOutcome outcome;
         try {
-        const QString safe = noteFileName(title);
-        std::error_code mkdirError;
-        const auto directory = std::filesystem::temp_directory_path() / "mvp-notes";
-        std::filesystem::create_directories(directory, mkdirError);
-        const auto source = directory / safe.toStdWString();
-        QFile file(QString::fromStdWString(source.wstring()));
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            outcome.error = QStringLiteral("The note could not be saved.");
-            return outcome;
-        }
-        if (file.write(utf8) != utf8.size()) {
-            file.close();
-            std::filesystem::remove(source, mkdirError);
-            outcome.error = QStringLiteral("The note could not be saved.");
-            return outcome;
-        }
-        file.close();
-        bool already = false;
-        auto imported = vault->import_file(source, {}, folderId, &already);
-        std::filesystem::remove(source, mkdirError);
-        if (!imported) {
-            outcome.error = vaultErrorText(imported.error());
-            return outcome;
-        }
-        outcome.ok = true;
-        outcome.already = already;
-        outcome.id = imported.value();
-        outcome.size = utf8.size();
-        if (previous > 0 && outcome.id != previous) {
-            auto gone = vault->remove_video(previous);
-            outcome.removed = static_cast<bool>(gone);
-        }
+            // The content goes to the core in memory. A note is never written to
+            // disk in the clear, not even for a moment in the system temp folder.
+            const std::span<const unsigned char> content(
+                reinterpret_cast<const unsigned char*>(utf8.constData()),
+                static_cast<std::size_t>(utf8.size()));
+            const std::string name = safeTitle.toStdString();
+            if (previous > 0) {
+                // Editing the note that is open: rewrite it in place, so the
+                // item keeps its id, folder, tags and place in the library
+                // instead of being replaced by a copy of itself.
+                const auto replaced = vault->replace_video_content(previous, content, name);
+                if (!replaced) {
+                    outcome.error = vaultErrorText(replaced.error());
+                    return outcome;
+                }
+                outcome.ok = true;
+                outcome.id = previous;
+                outcome.size = utf8.size();
+                return outcome;
+            }
+            bool already = false;
+            auto imported = vault->import_bytes(content, name, folderId, &already);
+            if (!imported) {
+                outcome.error = vaultErrorText(imported.error());
+                return outcome;
+            }
+            outcome.ok = true;
+            outcome.already = already;
+            outcome.id = imported.value();
+            outcome.size = utf8.size();
         } catch (const std::exception&) {
             outcome = {};
             outcome.error = QStringLiteral("The note could not be saved.");
@@ -9053,7 +9038,7 @@ void MainWindow::openShare() {
             InWindowSheet notice(this);
             notice.setTitle(QStringLiteral("Share with phone"));
             notice.setMessage(error, true);
-            notice.addButton(QStringLiteral("OK"), 1, true);
+            notice.addButton(QStringLiteral("OK"), 1, true, QStringLiteral("check"));
             notice.run();
             return;
         }

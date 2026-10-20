@@ -24,7 +24,10 @@ public:
     [[nodiscard]] QVBoxLayout* body() const noexcept { return body_; }
     [[nodiscard]] QHBoxLayout* buttons() const noexcept { return buttons_; }
     QLineEdit* addTextEntry(int echoMode, const QString& initial, const QString& placeholder);
-    QPushButton* addButton(const QString& label, int result, bool primary);
+    // `icon` is a Lucide name (see docs/icon-strategy.md); empty keeps the button
+    // text-only, which is the right default for anything without an obvious glyph.
+    QPushButton* addButton(const QString& label, const int result, const bool primary,
+        const QString& icon = QString());
     // Blocks until a button, Escape, or a click outside the card finishes it.
     int run();
     void finish(int result);
@@ -33,6 +36,9 @@ public:
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // The dimmed backdrop is painted, not styled: a type selector cannot match this
+    // class (it has no Q_OBJECT, so Qt knows it as a plain QWidget).
+    void paintEvent(QPaintEvent* event) override;
 
 private:
     QFrame* card_{nullptr};

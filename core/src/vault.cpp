@@ -1127,7 +1127,8 @@ Result<std::int64_t> Vault::import_file(
 Result<std::int64_t> Vault::import_bytes(
     const std::span<const unsigned char> bytes,
     const std::string_view display_name,
-    const std::int64_t folder_id) {
+    const std::int64_t folder_id,
+    bool* already_present) {
     std::unique_lock<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
@@ -1155,6 +1156,9 @@ Result<std::int64_t> Vault::import_bytes(
         return known.error();
     }
     if (known.value()) {
+        if (already_present != nullptr) {
+            *already_present = true;
+        }
         return known.value().value();
     }
 
