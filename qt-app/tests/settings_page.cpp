@@ -32,6 +32,14 @@
 #include <vector>
 
 namespace {
+
+// Progress marks keep a CI timeout diagnosable: the last mark names the stage
+// that stopped answering, which no assertion message can do once it hangs.
+static void stageMark(const char* stage) {
+    std::fprintf(stderr, "[stage] %s\n", stage);
+    std::fflush(stderr);
+}
+
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -55,6 +63,7 @@ int main(int argc, char** argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
+        stageMark("start");
 #ifdef Q_OS_WIN
         const auto root = std::filesystem::path(temporary.path().toStdWString()) / L"vault";
 #else
@@ -75,6 +84,7 @@ int main(int argc, char** argv) {
         check(tabs->count() == 6 && sections->count() == 6, "six settings sections");
         check(tabs->tabText(0) == "Updates" && tabs->tabText(4) == "Library", "section order");
         page.resize(480, 640); page.show(); app.processEvents();
+        stageMark("page shown");
         int preferences = 0, libraryChanges = 0, appearanceChanges = 0, checks = 0, closes = 0;
         QObject::connect(&page, &videovault::app::SettingsDialog::updatePreferencesChanged, [&] { ++preferences; });
         QObject::connect(&page, &videovault::app::SettingsDialog::settingsChanged, [&] { ++libraryChanges; });
@@ -104,6 +114,7 @@ int main(int argc, char** argv) {
         manual->click(); check(checks == 1, "busy check cannot fire");
         check(child.operator()<QLabel>("updateStatus")->text() == "Checking test release", "inline update state");
         page.setUpdateStatus("Up to date"); check(manual->isEnabled(), "manual check restored");
+        stageMark("updates section");
         tabs->setCurrentIndex(1); app.processEvents();
         check(child.operator()<QPushButton>("theme_dark")->isChecked(), "default dark appearance");
         for (const auto& theme : {QString("light"), QString("system"), QString("dark")}) {
@@ -113,10 +124,12 @@ int main(int argc, char** argv) {
             check(QSettings().value("appearance/theme").toString() == theme, "appearance saved");
         }
         check(appearanceChanges == 3 && libraryChanges == 0, "appearance isolated signal");
+        stageMark("appearance section");
         tabs->setCurrentIndex(2); app.processEvents();
         check(page.findChild<QWidget*>("pluginManager") != nullptr, "real data-only plugin manager");
         check(!child.operator()<QCheckBox>("pluginEnable_org.megavault.monochrome")->isChecked(), "Monochrome starts disabled");
         check(child.operator()<QPushButton>("installPlugin")->isVisible(), "manifest installer reachable");
+        stageMark("extensions section");
         tabs->setCurrentIndex(3); app.processEvents();
         auto* lock = child.operator()<QComboBox>("autoLockMinutes");
         check(lock->currentData().toInt() == 5 && lock->count() == 5, "auto-lock choices and default");
@@ -139,6 +152,7 @@ int main(int argc, char** argv) {
         check(rotate->isEnabled() && child.operator()<QLabel>("settingsStatus")->text() == "Password changed.", "real generated vault password rotation completes");
         check(current->text().isEmpty() && next->text().isEmpty() && confirm->text().isEmpty(), "password fields cleared after rotation");
         check(bool(videovault::core::Vault::validate_password(root, "new-test-password")), "new password opens generated vault");
+        stageMark("security section");
         tabs->setCurrentIndex(4); app.processEvents();
         auto* tagList = child.operator()<QListWidget>("tagList");
         child.operator()<QLineEdit>("newTag")->setText("Settings test tag"); child.operator()<QPushButton>("addTag")->click();
@@ -160,6 +174,7 @@ int main(int argc, char** argv) {
             check(reopened.findChild<QComboBox*>("autoLockMinutes")->currentData().toInt() == 15, "auto-lock survives new page");
             check(reopened.findChild<QPushButton*>("theme_dark")->isChecked(), "appearance survives new page");
         }
+        stageMark("library section");
         for (const auto size : {QSize(1100, 760), QSize(480, 640)}) {
             page.resize(size);
             for (int index = 0; index < tabs->count(); ++index) {
@@ -191,6 +206,7 @@ int main(int argc, char** argv) {
         // This goes through the real engine, which is what the app does: setting
         // a palette directly and hoping Qt re-resolves style-sheet colours is
         // exactly the path that differs between Qt 5.15 builds.
+        stageMark("responsive layout");
         videovault::app::initializeTheme(app);
         videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
         tabs->setCurrentIndex(0);
@@ -229,6 +245,7 @@ int main(int argc, char** argv) {
             bad.entries[0] = badEntry;
             check(!videovault::app::validateProxySettings(bad).isEmpty(), "out-of-range port is rejected");
         }
+        stageMark("theme switch");
         // The editor is an in-window sheet: the driver stands in for the user,
         // exactly where a person would click, so the real save path runs.
         QString shotFolder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
