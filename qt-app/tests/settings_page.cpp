@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QDialog>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <iostream>
 #include <algorithm>
@@ -248,7 +249,18 @@ int main(int argc, char** argv) {
         stageMark("theme switch");
         // The editor is an in-window sheet: the driver stands in for the user,
         // exactly where a person would click, so the real save path runs.
-        QString shotFolder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
+        // Proxy credentials are sealed by an OS store. A headless Linux runner has
+        // no secret-tool, so every save is refused and the editor reopens with that
+        // error: the save path cannot be exercised there, only the refusal.
+        const bool sealedStore =
+#ifdef Q_OS_WIN
+            true;
+#elif defined(Q_OS_MACOS)
+            true;
+#else
+            !QStandardPaths::findExecutable(QStringLiteral("secret-tool")).isEmpty();
+#endif
+        QString shotFolder = sealedStore ? qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS") : QString();
         bool grabbed = false;
         videovault::app::InWindowSheet::setTestDriver(
             [&](videovault::app::InWindowSheet* sheet) {
@@ -271,14 +283,19 @@ int main(int argc, char** argv) {
                 }
                 sheet->findChild<QPushButton*>("saveProxy")->click();
             });
-        child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
-        check(proxyList->count() == 1, "proxy saved through the in-window sheet");
-        check(!page.window()->findChild<QWidget*>("inWindowSheet"), "sheet closes after saving");
-        proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
+        if (sealedStore) {
+            child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
+            check(proxyList->count() == 1, "proxy saved through the in-window sheet");
+            check(!page.window()->findChild<QWidget*>("inWindowSheet"), "sheet closes after saving");
+            proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
+        } else {
+            stageMark("proxy save skipped: no OS keyring");
+        }
         if (!shotFolder.isEmpty()) {
             page.resize(480, 640); app.processEvents(); page.grab().save(shotFolder + "/proxy-list-dark-480.png");
         }
 #ifdef Q_OS_WIN
+        if (sealedStore) {
         videovault::app::InWindowSheet::setTestDriver(
             [&](videovault::app::InWindowSheet* sheet) {
                 check(sheet->findChild<QLineEdit*>("proxyServer")->text() == "proxy.example.test", "edit restores server");
@@ -306,6 +323,7 @@ int main(int argc, char** argv) {
         app.processEvents();
         child.operator()<QPushButton>("deleteProxy")->click();
         check(proxyList->count() == 0 && !proxySwitch->isChecked(), "deleting active proxy disables use");
+        }
 #else
         child.operator()<QPushButton>("deleteProxy")->click();
 #endif
