@@ -29,4 +29,8 @@ QIcon lucideSolid(const QString& name, const QColor& color);
 // follows a theme switch without the call site doing anything.
 void apply(QAbstractButton* button, const QString& name, Tone tone = Tone::Normal);
 
+// Adds an icon *beside* the label. Primary and destructive actions keep their
+// words: a glyph alone is not enough for "Delete permanently" or "Create a vault".
+void withText(QAbstractButton* button, const QString& name, int size = 15);
+
 } // namespace videovault::app::icons

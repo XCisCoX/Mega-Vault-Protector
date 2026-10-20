@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/cloud_browser.hpp"
 
 #include <QComboBox>
@@ -460,7 +461,9 @@ CloudBrowser::CloudBrowser(QWidget* parent) : QWidget(parent) {
     layout->addWidget(list_, 1);
     auto* buttons = new QHBoxLayout();
     auto* remove = new QPushButton(QStringLiteral("Delete"), this);
+    icons::withText(remove, QStringLiteral("trash"));
     auto* leave = new QPushButton(QStringLiteral("Leave"), this);
+    icons::withText(leave, QStringLiteral("log-out"));
     buttons->addWidget(remove);
     buttons->addWidget(leave);
     layout->addLayout(buttons);

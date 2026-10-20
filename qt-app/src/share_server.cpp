@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/app/share_tls.hpp"
 #include "videovault/app/glass.hpp"
@@ -1233,6 +1234,7 @@ void ShareServer::showDialog(QWidget* parent) {
     title->setFont(titleFont);
     title->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
     auto* done = new QPushButton(QStringLiteral("Done"), sheet);
+    icons::withText(done, QStringLiteral("check"));
     done->setObjectName(QStringLiteral("shareDone"));
     done->setCursor(Qt::PointingHandCursor);
     done->setFocusPolicy(Qt::NoFocus);
@@ -1272,6 +1274,7 @@ void ShareServer::showDialog(QWidget* parent) {
     address->setFont(bodyFont);
     address->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
     auto* copy = new QPushButton(QStringLiteral("Copy"), addressBar);
+    icons::withText(copy, QStringLiteral("copy"));
     copy->setObjectName(QStringLiteral("shareCopy"));
     copy->setCursor(Qt::PointingHandCursor);
     copy->setFocusPolicy(Qt::NoFocus);
@@ -1331,6 +1334,7 @@ void ShareServer::showDialog(QWidget* parent) {
     QObject::connect(done, &QPushButton::clicked, dialog, &QWidget::close);
 
     auto* stop = new QPushButton(QStringLiteral("Stop sharing"), sheet);
+    icons::withText(stop, QStringLiteral("wifi-off"));
     stop->setObjectName(QStringLiteral("shareStop"));
     stop->setCursor(Qt::PointingHandCursor);
     stop->setFocusPolicy(Qt::NoFocus);

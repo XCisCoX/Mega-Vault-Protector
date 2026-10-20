@@ -95,7 +95,7 @@ set(MVP_APP_SOURCES
 )
 
 add_library(MegaVaultSync STATIC
-    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp
+    src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp src/icons.cpp
     include/videovault/app/sync_state.hpp
     include/videovault/app/sync_client.hpp
     include/videovault/app/sync_engine.hpp
@@ -305,18 +305,27 @@ if(MVP_BUILD_TESTS)
     add_test(NAME sync_state COMMAND VideoVaultSyncStateTests)
     add_test(NAME sync_engine COMMAND VideoVaultSyncEngineTests)
     set_tests_properties(sync_engine PROPERTIES SKIP_RETURN_CODE 77)
+    # The page draws Lucide glyphs, and resources from a static library are not
+    # carried into the binary: the qrc has to be compiled into the test itself.
+    target_sources(VideoVaultSyncDialogTests PRIVATE resources/icons.qrc)
+    set_target_properties(VideoVaultSyncDialogTests PROPERTIES AUTORCC ON)
     add_test(NAME sync_page COMMAND VideoVaultSyncDialogTests)
     set_tests_properties(sync_page PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    # player_window.cpp draws Lucide glyphs, so the test compiles the helper and the
+    # resources itself: a static library does not carry its qrc into the binary.
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp
         src/player_window.cpp
+        src/icons.cpp
+        resources/icons.qrc
         include/videovault/app/media_decoder.hpp
         include/videovault/app/player_window.hpp
     )
     set_target_properties(VideoVaultPlaybackTests PROPERTIES
         AUTOMOC ON
+        AUTORCC ON
     )
     target_link_libraries(VideoVaultPlaybackTests
         PRIVATE
