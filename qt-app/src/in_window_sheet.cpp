@@ -137,10 +137,14 @@ void InWindowSheet::captureBackdrop() {
     if (host == nullptr || host->size().isEmpty()) {
         return;
     }
+    std::fprintf(stderr, "[sheet] backdrop: grab\n");
+    std::fflush(stderr);
     const QPixmap shot = host->grab();
     if (shot.isNull()) {
         return;
     }
+    std::fprintf(stderr, "[sheet] backdrop: blur\n");
+    std::fflush(stderr);
     QGraphicsScene scene;
     QGraphicsPixmapItem item(shot);
     QGraphicsBlurEffect blur;
@@ -235,16 +239,23 @@ int InWindowSheet::run() {
     if (host == nullptr) {
         return 0;
     }
+    std::fprintf(stderr, "[sheet] run '%s'\n",
+        qPrintable(title_ != nullptr ? title_->text() : QString()));
+    std::fflush(stderr);
     setGeometry(host->rect());
     host->installEventFilter(this);
     // Captured before the sheet is shown, so the backdrop is the window itself.
     backdrop_ = QPixmap();
     captureBackdrop();
+    std::fprintf(stderr, "[sheet] fit before show\n");
+    std::fflush(stderr);
     fitCard();
     show();
     raise();
     // Showing polishes the layout; fit once more so the card is not a line short.
     fitCard();
+    std::fprintf(stderr, "[sheet] shown\n");
+    std::fflush(stderr);
     if (entry_ != nullptr) {
         entry_->setFocus();
         entry_->selectAll();
