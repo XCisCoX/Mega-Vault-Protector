@@ -234,7 +234,7 @@ fun TransferBar(onOpen: () -> Unit) {
             Spacer(Modifier.width(6.dp))
             Text(
                 if (line != null) "$line · ${sync.label}" else sync.label,
-                color = Color.White,
+                color = Mvp.text,
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -243,7 +243,7 @@ fun TransferBar(onOpen: () -> Unit) {
         } else {
             Text(
                 line.orEmpty(),
-                color = Color.White,
+                color = Mvp.text,
                 fontSize = 13.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -322,7 +322,7 @@ private fun TransferRow(item: TransferItem) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(item.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(item.title, color = Mvp.title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(item.detail, color = Mvp.description, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (alive) {

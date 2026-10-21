@@ -25,6 +25,9 @@
 #include <QDir>
 #include <QCheckBox>
 #include <QPushButton>
+#include <QMenu>
+#include <QLayout>
+#include <QAction>
 #include <QToolButton>
 #include <QJsonArray>
 #include <QLineEdit>
@@ -34,6 +37,71 @@
 
 namespace videovault::app {
 struct GalleryPerformanceTestAccess {
+    // Inspect real command widgets without showing a window or opening a menu.
+    static int libraryCommands() {
+        MainWindow window;
+        auto require = [](bool ok, const char* message) {
+            if (!ok) std::fprintf(stderr, "FAIL library commands: %s\n", message);
+            return ok;
+        };
+        auto* add = window.importButton_;
+        auto* more = window.findChild<QPushButton*>(QStringLiteral("libraryMore"));
+        if (!require(add->text() == QStringLiteral("Add") && !add->icon().isNull()
+                && !add->accessibleName().isEmpty() && add->focusPolicy() != Qt::NoFocus,
+                "primary Add must have a plus icon, visible text and keyboard focus")) return 80;
+        if (!require(more && more->text() == QStringLiteral("More") && more->menu()
+                && !more->accessibleName().isEmpty() && more->focusPolicy() != Qt::NoFocus,
+                "labelled, accessible More menu is missing")) return 81;
+        auto* row = add->parentWidget()->layout()->itemAt(0)->layout();
+        int buttonCount = 0;
+        for (int i = 0; row && i < row->count(); ++i) {
+            if (qobject_cast<QPushButton*>(row->itemAt(i)->widget())) ++buttonCount;
+        }
+        if (!require(buttonCount == 2, "title row must contain only Add and More buttons")) return 82;
+        auto* addMenu = add->menu();
+        if (!require(addMenu && addMenu->actions().size() == 5,
+                "Add menu must contain the five supported add/create actions")) return 83;
+        const QStringList expected{
+            QStringLiteral("Photos, videos, music or other files…"), QStringLiteral("Add a folder…"),
+            QStringLiteral("New note"), QStringLiteral("New record list"), QStringLiteral("New folder")};
+        for (int i = 0; i < expected.size(); ++i) {
+            if (!require(addMenu->actions().at(i)->text() == expected.at(i),
+                    "Add contains an unexpected or jargon-heavy action")) return 84;
+        }
+        auto* moreMenu = more->menu();
+        auto hasAction = [](QMenu* menu, const QString& text) {
+            for (auto* action : menu->actions()) if (action->text() == text) return true;
+            return false;
+        };
+        for (const QString& label : {QStringLiteral("Music"), QStringLiteral("Sync…"),
+                QStringLiteral("Settings…"), QStringLiteral("Lock this PC"),
+                QStringLiteral("Share with phone…"), QStringLiteral("Updates…")}) {
+            if (!require(hasAction(moreMenu, label), "an existing secondary action was lost")) return 85;
+        }
+        auto* backups = moreMenu->findChild<QMenu*>(QStringLiteral("encryptedBackups"));
+        if (!require(backups && backups->actions().size() == 2
+                && backups->title().contains(QStringLiteral(".mvpk")),
+                "encrypted backup submenu must explain the format")) return 86;
+        for (auto* action : backups->actions()) {
+            if (!require(action->text().contains(QStringLiteral("encrypted"))
+                    && action->toolTip().contains(QStringLiteral(".mvpk")),
+                    "backup actions must explain encrypted .mvpk packages")) return 87;
+        }
+        add->setEnabled(false);
+        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
+        if (!require(!backups->menuAction()->isEnabled(),
+                "moving backups out of Add must not bypass disabled import state")) return 88;
+        add->setEnabled(true);
+        window.batchBusy_ = true;
+        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
+        if (!require(!backups->menuAction()->isEnabled(), "backup actions must stay disabled during a batch")) return 89;
+        window.batchBusy_ = false;
+        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
+        if (!require(backups->menuAction()->isEnabled(), "backup actions must recover after a batch")) return 90;
+        std::printf("PASS library commands: Add/More labels, beginner actions, preserved destinations, encrypted backups and busy state\n");
+        return 0;
+    }
+
     static int creation() {
         QTemporaryDir temp(qEnvironmentVariable("TMPDIR", QDir::tempPath())
             + QStringLiteral("/MVP-creation-XXXXXX"));
@@ -816,5 +884,7 @@ int main(int argc, char** argv) {
         QSettings().setValue(QStringLiteral("appearance/theme"), qEnvironmentVariable("MVP_GALLERY_THEME"));
     }
     videovault::app::initializeTheme(app);
+    if (qEnvironmentVariableIsSet("MVP_LIBRARY_COMMANDS_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::libraryCommands();
     return videovault::app::GalleryPerformanceTestAccess::run();
 }

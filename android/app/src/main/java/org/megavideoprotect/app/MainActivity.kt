@@ -63,6 +63,13 @@ class MainActivity : ComponentActivity() {
         AppSession.screen = next
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Coming back to a vault that is already open is the best moment to
+        // catch up: no pass was running while the phone was in someone's pocket.
+        if (unlocked() && !RemoteVault.connected()) SyncV4Auto.syncNow()
+    }
+
     private fun unlocked(): Boolean =
         RemoteVault.connected() || runCatching { CoreBridge.nativeIsUnlocked() }.getOrDefault(false)
 
@@ -73,6 +80,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lockNow() {
+        SyncV4Auto.detach()
         PluginLibrary.close()
         PluginRuntime.close()
         if (MusicHub.active) {
@@ -126,6 +134,8 @@ class MainActivity : ComponentActivity() {
         }
         acceptShare(intent)
         openMusicFromNotification(intent)
+        // A cold start that lands straight in the vault starts the watcher too.
+        if (open && !RemoteVault.connected()) SyncV4Auto.attach(this, vaultRoot)
 
         setContent {
             MvpTheme {
@@ -194,6 +204,11 @@ class MainActivity : ComponentActivity() {
                             onUnlocked = {
                                 shareHoldsVault = false
                                 show(Screen.Vault)
+                                // The library is up: let the vault keep itself
+                                // in step from here, with no button to press.
+                                if (!RemoteVault.connected()) {
+                                    SyncV4Auto.attach(this@MainActivity, vaultRoot)
+                                }
                             },
                             onBack = { show(Screen.Setup) },
                         )

@@ -9,6 +9,7 @@ metadata row that the client wrote.  See ``docs/sync-mega-plan.md``.
 """
 import argparse
 import getpass
+import hmac
 import ipaddress
 import json
 import os
@@ -26,8 +27,9 @@ from .store import (CHUNK_BYTES, HEX64, PROTOCOL, RECORD_ID, SESSION_SECONDS, VA
                     Problem, Store, digest)
 
 COOKIE = 'mv_session'
-CSP = ("default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; "
-       "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+CSP = ("default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; style-src 'self'; "
+       "script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; object-src 'none'; "
+       "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 DIGITS = re.compile(r'[0-9]{1,19}')
 EMAIL = re.compile(r'[^@\s]{1,64}@[^@\s.]{1,63}(\.[^@\s.]{1,63})+')
 OPERATION = re.compile(r'[A-Za-z0-9._:-]{1,128}')
@@ -35,6 +37,10 @@ STATIC = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/index.html': ('index.html', 'text/html; charset=utf-8'),
     '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+    '/files-model.js': ('files-model.js', 'text/javascript; charset=utf-8'),
+    '/package-crypto.js': ('package-crypto.js', 'text/javascript; charset=utf-8'),
+    '/vendor/sodium.js': ('vendor/sodium.js', 'text/javascript; charset=utf-8'),
+    '/vendor/sodium-wrappers.js': ('vendor/sodium-wrappers.js', 'text/javascript; charset=utf-8'),
     '/style.css': ('style.css', 'text/css; charset=utf-8'),
     '/icon.svg': ('icon.svg', 'image/svg+xml'),
 }
@@ -202,8 +208,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def same_origin(self):
         """Reject a cookie-authenticated write aimed at us from another site."""
-        origin = self.headers.get('Origin')
-        if origin is not None and urlsplit(origin).netloc != self.headers.get('Host', ''):
+        origins = self.headers.get_all('Origin', [])
+        expected = ('https' if self.secure() else 'http') + '://' + self.headers.get('Host', '')
+        if origins and (len(origins) != 1 or origins[0] != expected):
             raise Problem(403, {'error': 'cross-origin request refused'})
 
     def authenticate(self, bearer_only=False):
@@ -222,6 +229,22 @@ class Handler(BaseHTTPRequestHandler):
             return account
         raise Problem(401, {'error': 'unauthorized'})
 
+    def browser_account(self):
+        """Browser auth never falls back to a native Authorization bearer."""
+        token = self.cookies().get(COOKIE)
+        account = self.store.session_account(token) if token else None
+        if not account:
+            raise Problem(401, {'error': 'browser session required'})
+        sites = self.headers.get_all('Sec-Fetch-Site', [])
+        if sites and (len(sites) != 1 or sites[0] not in ('same-origin', 'none')):
+            raise Problem(403, {'error': 'cross-site browser request refused'})
+        return account
+
+    def csrf_token(self):
+        # Domain separation prevents this value being usable as a session or
+        # device token. It changes with the session, not with every request.
+        return digest('mvpk-browser-csrf-v1:' + self.cookies()[COOKIE])
+
     # -- routes -----------------------------------------------------------
 
     def dispatch(self):
@@ -237,6 +260,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.static(path)
         if path == '/v1/vaults' or path.startswith('/v1/vaults/'):
             return self.vault_route(path, query)
+        if path == '/browser/capabilities':
+            self.only('GET', 'HEAD')
+            self.browser_account()
+            return self.reply(200, {'protocol': PROTOCOL,
+                                    'max_file_bytes': self.server.max_file_bytes,
+                                    'chunk_bytes': CHUNK_BYTES})
+        if path.startswith('/browser/vaults/'):
+            return self.browser_route(path, query)
         raise Problem(404, {'error': 'not found'})
 
     def static(self, path):
@@ -298,7 +329,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if tail == 'session':
             self.only('GET', 'HEAD')
-            return self.reply(200, {'account': self.store.account(self.authenticate())})
+            return self.reply(200, {'account': self.store.account(self.browser_account()),
+                                    'csrf': self.csrf_token()})
 
         if tail == 'password':
             # Re-authenticate with the current password: a session left open on
@@ -381,10 +413,34 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- vaults, records and blobs ----------------------------------------
 
+    def browser_route(self, path, query):
+        account = self.browser_account()
+        if self.command not in ('GET', 'HEAD'):
+            self.same_origin()
+            supplied = self.headers.get_all('X-CSRF-Token', [])
+            if len(supplied) != 1 or not supplied[0] or not hmac.compare_digest(
+                    supplied[0].encode('utf-8'), self.csrf_token().encode('ascii')):
+                raise Problem(403, {'error': 'valid X-CSRF-Token required'})
+        # Do not normalize away empty/encoded path segments: one exact vault
+        # id owned by this cookie account is the authorization boundary.
+        parts = path[len('/browser/vaults/'):].split('/')
+        if not parts or not VAULT_ID.fullmatch(parts[0]) or self.store.vault(account, parts[0]) is None:
+            raise Problem(404, {'error': 'no such vault'})
+        if len(parts) > 1 and parts[1] == 'records':
+            return self.record_route(parts[0], parts, query)
+        if len(parts) > 1 and parts[1] == 'blobs':
+            # Packages arrive already encrypted by the client. No form/JSON
+            # upload, server-side key, plaintext import or decrypt endpoint.
+            kind = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+            if self.command == 'PUT' and kind != 'application/octet-stream':
+                raise Problem(415, {'error': 'application/octet-stream ciphertext required'})
+            return self.blob_route(parts[0], account, parts, query)
+        raise Problem(404, {'error': 'not found'})
+
     def vault_route(self, path, query):
         parts = [part for part in path[len('/v1/vaults'):].split('/') if part]
-        # Records and packages belong to devices, which hold a bearer token.
-        # The website has no vault key, so its cookie is not accepted for them.
+        # Native protocol records/packages require device bearers. Browser
+        # cookie access is deliberately isolated under the /browser routes.
         device_only = len(parts) > 1 and parts[1] in ('records', 'blobs')
         account = self.authenticate(bearer_only=device_only)
         if not parts:

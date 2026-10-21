@@ -139,12 +139,12 @@ fun SetupScreen(
             verticalArrangement = Arrangement.Center,
         ) {
             MvpCard(Modifier.widthIn(max = 420.dp).fillMaxWidth()) {
-                MvpTitle(if (pcCode == null) "Create your encrypted vault" else "Unlock")
+                MvpTitle(if (pcCode == null) "Create your vault" else "Unlock")
                 MvpDescription(
                     if (pcCode == null) {
-                        "Choose where the vault lives and a strong password. The password is never stored."
+                        "Pick a password you will remember. It is the only key to your files — nobody, including us, can recover it."
                     } else {
-                        "PC code ready. This password opens the shared vault."
+                        "Your PC is ready. This is the same password as there."
                     }
                 )
                 if (pcCode != null) {
@@ -202,7 +202,7 @@ fun SetupScreen(
                         CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
                         Text(
                             if (checkingPc) "Checking the password with the PC…"
-                            else "Creating the vault — deriving the key…",
+                            else "Setting up your vault…",
                             color = Mvp.description,
                             fontSize = 12.sp,
                         )

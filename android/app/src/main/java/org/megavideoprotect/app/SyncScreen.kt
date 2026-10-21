@@ -213,6 +213,9 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
                 }
                 link = fresh
                 status = ""
+                // From here the phone keeps itself in step without this page.
+                SyncV4Auto.adopt(fresh)
+                SyncV4Auto.syncNow()
             } catch (failure: Throwable) {
                 fail(failure)
             } finally {
@@ -231,6 +234,7 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
             link = updated
             summary = text
             status = ""
+            SyncV4Auto.adopt(updated)
             scope.launch { reloadItems(updated) }
             GalleryCache.clear()
         }
@@ -239,6 +243,7 @@ fun SyncScreen(vaultRoot: String, onClose: () -> Unit) {
     fun disconnect() {
         scope.launch {
             withContext(Dispatchers.IO) { store.clear() }
+            SyncV4Auto.adopt(null)
             link = null
             signedIn = false
             vaults = emptyList()

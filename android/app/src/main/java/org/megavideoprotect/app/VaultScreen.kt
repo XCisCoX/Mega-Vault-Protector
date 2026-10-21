@@ -112,6 +112,7 @@ import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationExceptio
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -417,6 +418,12 @@ fun VaultScreen(
         }
     }
 
+    // A background sync changed what this vault holds: re-read the index instead
+    // of leaving the grid showing yesterday's rows until the next visit.
+    LaunchedEffect(SyncV4Auto.remoteRevision) {
+        if (SyncV4Auto.remoteRevision > 0) refresh()
+    }
+
     // Cached rows render instantly when the same vault is re-entered (returning
     // from the player); the list is refetched only when the vault really changed.
     LaunchedEffect(vaultLocation) {
@@ -560,6 +567,7 @@ fun VaultScreen(
             }
             actionBusy = false
             if (res.ok) {
+                SyncV4Auto.markDirty()
                 actionTarget = null
                 selectedIds = selectedIds - target.id
                 refresh()
@@ -866,7 +874,12 @@ fun VaultScreen(
             importProgress = null
             importLabel = ""
             packagePassword = ""
-            if (failure != null) error = failure else refresh()
+            if (failure != null) {
+                error = failure
+            } else {
+                SyncV4Auto.markDirty()
+                refresh()
+            }
         }
     }
     /**
@@ -960,8 +973,8 @@ fun VaultScreen(
         bottom = with(density) { bottomInset.toDp() },
     )
     val glass = HazeStyle(
-        backgroundColor = Mvp.scrim,
-        tints = listOf(HazeTint(Color.Black.copy(alpha = 0.28f))),
+        backgroundColor = Mvp.barBg,
+        tints = listOf(HazeTint(Mvp.barTint)),
         blurRadius = 32.dp,
         noiseFactor = 0.03f,
     )
@@ -1078,6 +1091,7 @@ fun VaultScreen(
             val failedVideos = ArrayList<Long>()
             val failedFolders = ArrayList<Long>()
             var failure = ""
+            SyncV4Auto.markDirty()
             withContext(Dispatchers.Default) {
                 for (folderId in movingFolders) {
                     val result = runCatching {
@@ -1561,10 +1575,26 @@ fun VaultScreen(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            // A path here would tell anyone reading the screen where the
+            // encrypted vault lives. The footer names the location instead;
+            // the real path stays on the Settings page, by choice.
+            val place = remember(vaultLocation) {
+                if (vaultLocation.startsWith("/")) {
+                    VaultLocation.shortName(context, vaultLocation).substringBefore(" (")
+                } else {
+                    vaultLocation
+                }
+            }
+            Text(place, color = Mvp.barText.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             val itemCount = if (PluginLibrary.folderOpen) PluginLibrary.target?.visibleRows(PluginLibrary.session?.rows.orEmpty())?.size ?: 0
                 else childFolders.size + filtered.size + discoverProviders.size
-            Text("$itemCount items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
+            SyncStatusPill(onOpen = onOpenSync)
+            Text(
+                "$itemCount items",
+                color = Mvp.barText.copy(alpha = 0.86f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 10.dp),
+            )
         }
         }
 
@@ -1629,6 +1659,47 @@ fun VaultScreen(
                 )
             }
         }
+        // An empty vault used to be a blank field with nothing to read: the one
+        // moment someone needs a sentence, and there was none.
+        val nothingHere = !PluginLibrary.folderOpen &&
+            childFolders.isEmpty() &&
+            filtered.isEmpty() &&
+            discoverProviders.isEmpty() &&
+            search.isBlank()
+        if (nothingHere) {
+            Column(
+                Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 40.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "Nothing here yet",
+                    color = Mvp.title,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "Photos, videos, music and documents you add are locked with your password and stay on this phone.",
+                    color = Mvp.description,
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+                Text(
+                    "Add your first file",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .padding(top = 22.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Mvp.primary)
+                        .clickable { showAdd = true }
+                        .padding(horizontal = 22.dp, vertical = 12.dp),
+                )
+            }
+        }
         if (showMusic) {
             MusicLibrary(
                 videos = videos,
@@ -1648,7 +1719,7 @@ fun VaultScreen(
             }
             Text(
                 message,
-                color = Color.White,
+                color = Mvp.barText,
                 fontSize = 13.sp,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1656,7 +1727,7 @@ fun VaultScreen(
                     .padding(horizontal = 28.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .hazeEffect(state = haze, style = glass)
-                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+                    .border(1.dp, Mvp.cardBorder, RoundedCornerShape(16.dp))
                     .clickable { error = null }
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             )
@@ -2099,6 +2170,7 @@ fun VaultScreen(
                         if (!result.ok) {
                             error = result.detail.ifBlank { result.error }
                         } else {
+                            SyncV4Auto.markDirty()
                             namePrompt = null
                             refresh()
                         }
@@ -2405,16 +2477,31 @@ private fun GalleryHeader(
             if (updateReady) {
                 HeaderIcon("Update", R.drawable.ic_lucide_download, onUpdate)
             }
-            Text(
-                "Music",
-                color = Mvp.accent,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
+            // "Music" used to be a bare accent word sitting between icon
+            // buttons, so it read like a caption for the plus beside it. A chip
+            // with a mark and a tint says "this opens a place".
+            Row(
+                Modifier
                     .clip(RoundedCornerShape(16.dp))
+                    .background(Mvp.accent.copy(alpha = 0.12f))
                     .clickable(onClick = onMusic)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            )
+                    .padding(start = 8.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painterResource(R.drawable.msg_media),
+                    contentDescription = null,
+                    tint = Mvp.accent,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    "Music",
+                    color = Mvp.accent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 5.dp),
+                )
+            }
             HeaderIcon("Add", R.drawable.ic_lucide_plus, onImport, filled = true)
             HeaderIcon("Settings", R.drawable.ic_lucide_settings, onSettings)
             HeaderIcon("Lock", R.drawable.ic_lucide_lock, onLock)
@@ -2508,7 +2595,7 @@ private fun ViewModeButton(
         label = "viewMode",
     )
     val tint by animateColorAsState(
-        if (selected) Color.White else Mvp.description,
+        if (selected) Mvp.title else Mvp.description,
         tween(180),
         label = "viewModeTint",
     )
@@ -2525,6 +2612,58 @@ private fun ViewModeButton(
             contentDescription = label,
             tint = tint,
             modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/**
+ * The cloud line in the footer: what the background sync is doing, in one
+ * glance. It is silent when nothing is linked, quiet while up to date, and
+ * turns into a retry when the relay cannot be reached. Tapping it opens the
+ * full Sync page — the pill never interrupts browsing.
+ */
+@Composable
+private fun SyncStatusPill(onOpen: () -> Unit) {
+    val phase = SyncV4Auto.phase
+    if (phase is SyncV4Auto.Phase.Off) return
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val busy = phase is SyncV4Auto.Phase.Busy
+    val failed = phase is SyncV4Auto.Phase.Failed
+    val tint = when {
+        failed -> Mvp.errorText
+        busy -> Mvp.accent
+        else -> Mvp.barText.copy(alpha = 0.72f)
+    }
+    val text = when (phase) {
+        is SyncV4Auto.Phase.Busy -> phase.label
+        is SyncV4Auto.Phase.Failed -> "Sync paused · tap"
+        else -> SyncV4Auto.statusText(now)
+    }
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (busy) "\u27F3" else if (failed) "\u26A0" else "\u2713",
+            color = tint,
+            fontSize = 11.sp,
+        )
+        Text(
+            text,
+            color = tint,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 4.dp),
         )
     }
 }
@@ -3032,7 +3171,11 @@ private fun FolderBar(
             }
             Text("/", color = Mvp.description, fontSize = 13.sp)
         }
-        Crumb("Library", current = currentFolderId == 0L, onClick = { onOpen(0L) }, onDrop = { onDrop(it, 0L) })
+        // At the root the page title already says "Library"; a crumb that
+        // repeats it is noise. Inside a folder the trail is the way back.
+        if (currentFolderId != 0L) {
+            Crumb("Library", current = false, onClick = { onOpen(0L) }, onDrop = { onDrop(it, 0L) })
+        }
         crumb.forEach { folder ->
             Text("/", color = Mvp.description, fontSize = 13.sp)
             Crumb(
@@ -3055,7 +3198,7 @@ private fun Crumb(
     var hot by remember { mutableStateOf(false) }
     Text(
         text,
-        color = if (current || hot) Color.White else Mvp.accent,
+        color = if (hot) Color.White else if (current) Mvp.title else Mvp.accent,
         fontSize = 13.sp,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -3231,7 +3374,7 @@ internal fun FolderTile(
         ) {
             Text(
                 name,
-                color = Color.White,
+                color = Mvp.tileText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -3335,6 +3478,7 @@ private suspend fun importBatch(
             CoreBridge.Result.parse(CoreBridge.nativeImportInto(tmp.absolutePath, folderId)).also { parsed ->
                 if (parsed.ok && !parsed.duplicate && parsed.id > 0L) {
                     LibraryArrivals.addFile(parsed.id, name, tmp.length(), folderId)
+                    SyncV4Auto.markDirty()
                 }
             }
         } catch (e: Exception) {
@@ -3362,13 +3506,13 @@ private fun CloudBar() {
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         if (people.isNotBlank()) {
-            Text(people, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp, maxLines = 2)
+            Text(people, color = Mvp.text.copy(alpha = 0.9f), fontSize = 12.sp, maxLines = 2)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             listOf("slow" to "Slow", "normal" to "Normal", "fast" to "Fast").forEach { (id, label) ->
                 Text(
                     label,
-                    color = if (speed == id) Mvp.accent else Color.White.copy(alpha = 0.55f),
+                    color = if (speed == id) Mvp.accent else Mvp.text.copy(alpha = 0.55f),
                     fontSize = 13.sp,
                     modifier = Modifier.clickable {
                         speed = id

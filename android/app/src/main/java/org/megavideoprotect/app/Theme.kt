@@ -1,6 +1,8 @@
 package org.megavideoprotect.app
 
+import android.app.Activity
 import android.content.Context
+import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -11,6 +13,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 /**
  * One palette's worth of colours. The dark instance is the original Telegram
@@ -62,6 +67,12 @@ data class MvpPalette(
     val scrim: Color,
     /** Quiet progress groove on cards (transfers, imports). */
     val progressTrack: Color,
+    /** Frosted field behind the library's top/bottom chrome (haze bars). */
+    val barBg: Color,
+    /** Extra tint layered into the haze blur of those bars. */
+    val barTint: Color,
+    /** Labels painted on a bar filled with barBg — never plain white in light. */
+    val barText: Color,
 )
 
 val MvpDarkPalette = MvpPalette(
@@ -105,6 +116,9 @@ val MvpDarkPalette = MvpPalette(
     tileText = Color(0xFFDCDCE0),
     scrim = Color(0xC4101014),
     progressTrack = Color(0xFF2A2A2E),
+    barBg = Color(0xC4101014),
+    barTint = Color(0x47000000),
+    barText = Color(0xDBFFFFFF),
 )
 
 val MvpLightPalette = MvpPalette(
@@ -148,6 +162,9 @@ val MvpLightPalette = MvpPalette(
     tileText = Color(0xFF3C3C43),
     scrim = Color(0x99000000),
     progressTrack = Color(0xFFE5E5EA),
+    barBg = Color(0xE8F5F5F8),
+    barTint = Color(0x59FFFFFF),
+    barText = Color(0xFF1C1C1E),
 )
 
 /** System is the default so a phone already in light mode is not forced dark. */
@@ -282,6 +299,9 @@ object Mvp {
     val tileText: Color get() = p.tileText
     val scrim: Color get() = p.scrim
     val progressTrack: Color get() = p.progressTrack
+    val barBg: Color get() = p.barBg
+    val barTint: Color get() = p.barTint
+    val barText: Color get() = p.barText
     val glass: Color get() = p.glass
     val glassStroke: Color get() = p.glassStroke
     val inputBg: Color get() = p.inputBg
@@ -367,5 +387,17 @@ fun MvpTheme(content: @Composable () -> Unit) {
     // Loaded once by the activity before the first frame; calling it again here
     // only re-checks the flag, never mutates during composition.
     SideEffect { MvpThemeState.systemDark = systemDark }
+    // The window and the system bar icons follow the palette too. Without this a
+    // light page sat under white status-bar glyphs (invisible) and a dark
+    // windowBackground (#0c0f15 from themes.xml) showed through every gap.
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.context as? Activity)?.window ?: return@SideEffect
+        window.setBackgroundDrawable(ColorDrawable(Mvp.window.toArgb()))
+        WindowCompat.getInsetsController(window, view).apply {
+            isAppearanceLightStatusBars = !MvpThemeState.dark
+            isAppearanceLightNavigationBars = !MvpThemeState.dark
+        }
+    }
     MaterialTheme(colorScheme = mvpColorScheme(), content = content)
 }

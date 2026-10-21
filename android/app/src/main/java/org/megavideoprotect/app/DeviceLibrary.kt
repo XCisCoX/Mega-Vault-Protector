@@ -119,7 +119,7 @@ fun DeviceLibraryScreen(
                 Icon(
                     painterResource(R.drawable.ic_lucide_arrow_left),
                     contentDescription = "Back",
-                    tint = Color.White,
+                    tint = Mvp.title,
                     modifier = Modifier.size(22.dp),
                 )
             }

@@ -125,8 +125,8 @@ fun LoginScreen(
                 MvpDescription(
                     when {
 
-                        pcCode == null -> "Enter the vault password."
-                        else -> "PC code ready. This password opens the shared vault."
+                        pcCode == null -> "Type your password to open your files."
+                        else -> "Your PC is ready. This is the same password as there."
                     }
                 )
                 if (pcCode != null) {
@@ -168,7 +168,7 @@ fun LoginScreen(
                             when {
 
                                 checkingPc -> "Checking the password with the PC…"
-                                else -> "Unlocking — deriving the key from your password…"
+                                else -> "Opening your vault…"
                             },
                             color = Mvp.description,
                             fontSize = 12.sp,
@@ -182,7 +182,7 @@ fun LoginScreen(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                MvpDescription("Encrypted sync setup is available after unlocking a local vault, from Add → Encrypted sync. PC sharing remains separate.")
+                MvpDescription("Your files never leave this phone, and only this password opens them.")
                 MvpButton("Back", onClick = onBack, enabled = !busy, modifier = Modifier.fillMaxWidth())
                 if (showFolderPicker) {
                     FolderPickerDialog(

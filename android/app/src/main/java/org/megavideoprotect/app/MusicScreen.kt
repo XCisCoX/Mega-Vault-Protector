@@ -252,12 +252,12 @@ fun MusicScreen(
         duration > 0L -> (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
         else -> 0f
     }
-    val icon = if (repeat == 2) Color(0xFF3390EC) else if (repeat == 1 || shuffle) Mvp.accent else Color.White
+    val icon = if (repeat == 2 || repeat == 1 || shuffle) Mvp.accent else Mvp.text
 
     Column(
         Modifier
             .fillMaxSize()
-            .background(Color(0xFF1C1C1D))
+            .background(Mvp.window)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
@@ -270,7 +270,7 @@ fun MusicScreen(
             Column(Modifier.weight(1f).padding(end = 12.dp, top = 2.dp)) {
                 Text(
                     if (pluginSession != null) shownName else trackTitle(shownName),
-                    color = Color.White,
+                    color = Mvp.title,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
@@ -279,7 +279,7 @@ fun MusicScreen(
                 Text(
                     if (pluginSession != null) pluginSession.selected?.subtitle?.ifBlank { "Provider audio · RAM only" } ?: "Provider audio"
                     else shownName.substringAfterLast('.', "Audio").uppercase(),
-                    color = Color(0xFF8B9BA8),
+                    color = Mvp.description,
                     fontSize = 13.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -290,7 +290,7 @@ fun MusicScreen(
                 Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFF2C2C2E))
+                    .background(Mvp.tileBg)
                     .clickable { showCover = true },
                 contentAlignment = Alignment.Center,
             ) {
@@ -320,7 +320,7 @@ fun MusicScreen(
         if (pluginSession != null) {
             if (pluginSession.playbackBusy) {
                 androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text("Loading provider audio…", color = Color(0xFF8B9BA8), modifier = Modifier.padding(horizontal = 20.dp))
+                Text("Loading provider audio…", color = Mvp.description, modifier = Modifier.padding(horizontal = 20.dp))
             }
             val canDownload = pluginSession.canDownload
             Text(
@@ -329,7 +329,7 @@ fun MusicScreen(
                     pluginSession.saved -> "Saved to encrypted vault"
                     else -> "Download to vault"
                 },
-                color = if (canDownload) Mvp.accent else Color(0xFF8B9BA8),
+                color = if (canDownload) Mvp.accent else Mvp.description,
                 modifier = Modifier.clickable(enabled = canDownload) { pluginSession.download() }
                     .padding(horizontal = 20.dp, vertical = 10.dp),
             )
@@ -355,14 +355,14 @@ fun MusicScreen(
         ) {
             Text(
                 formatClock(if (scrubbing) (scrub * duration).toLong() else position),
-                color = Color(0xFF8B9BA8),
+                color = Mvp.description,
                 fontSize = 12.sp,
             )
             Spacer(Modifier.weight(1f))
             Box {
                 Text(
                     speedLabel(speed),
-                    color = Color(0xFF8B9BA8),
+                    color = Mvp.description,
                     fontSize = 13.sp,
                     modifier = Modifier
                         .tgPress(
@@ -387,7 +387,7 @@ fun MusicScreen(
                     ).forEach { (value, label) ->
                         DropdownMenuItem(
                             text = {
-                                Text(label, color = if (abs(speed - value) < 0.05f) Mvp.accent else Color.White)
+                                Text(label, color = if (abs(speed - value) < 0.05f) Mvp.accent else Mvp.text)
                             },
                             onClick = {
                                 player?.setPlaybackSpeed(value)
@@ -400,7 +400,7 @@ fun MusicScreen(
             }
             Text(
                 formatClock(duration),
-                color = Color(0xFF8B9BA8),
+                color = Mvp.description,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(end = 8.dp),
             )
@@ -430,7 +430,7 @@ fun MusicScreen(
                 )
                 DropdownMenu(expanded = showRepeat, onDismissRequest = { showRepeat = false }) {
                     DropdownMenuItem(
-                        text = { Text("Repeat song", color = if (repeat == 2) Mvp.accent else Color.White) },
+                        text = { Text("Repeat song", color = if (repeat == 2) Mvp.accent else Mvp.text) },
                         onClick = {
                             val mode = if (repeat == 2) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                             if (pluginSession != null) pluginSession.setRepeat(mode) else player?.repeatMode = mode
@@ -438,7 +438,7 @@ fun MusicScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("Repeat list", color = if (repeat == 1) Mvp.accent else Color.White) },
+                        text = { Text("Repeat list", color = if (repeat == 1) Mvp.accent else Mvp.text) },
                         onClick = {
                             val mode = if (repeat == 1) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ALL
                             if (pluginSession != null) pluginSession.setRepeat(mode) else player?.repeatMode = mode
@@ -446,7 +446,7 @@ fun MusicScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("Shuffle", color = if (shuffle) Mvp.accent else Color.White) },
+                        text = { Text("Shuffle", color = if (shuffle) Mvp.accent else Mvp.text) },
                         onClick = {
                             val enabled = !shuffle
                             shuffle = enabled
@@ -455,7 +455,7 @@ fun MusicScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("Reverse order", color = Color.White) },
+                        text = { Text("Reverse order", color = Mvp.text) },
                         onClick = {
                             val exo = player
                             if (pluginSession != null) {
@@ -494,7 +494,7 @@ fun MusicScreen(
                 Icon(
                     painterResource(R.drawable.ic_action_previous),
                     contentDescription = "Previous",
-                    tint = Color.White,
+                    tint = Mvp.text,
                     modifier = Modifier
                         .size(48.dp)
                         .tgPress(
@@ -512,7 +512,7 @@ fun MusicScreen(
                 Icon(
                     painterResource(if (playing) R.drawable.ic_action_pause else R.drawable.ic_action_play),
                     contentDescription = "Play",
-                    tint = Color.White,
+                    tint = Mvp.text,
                     modifier = Modifier
                         .size(48.dp)
                         .clickable {
@@ -530,7 +530,7 @@ fun MusicScreen(
                 Icon(
                     painterResource(R.drawable.ic_action_next),
                     contentDescription = "Next",
-                    tint = Color.White,
+                    tint = Mvp.text,
                     modifier = Modifier
                         .size(48.dp)
                         .tgPress(
@@ -545,7 +545,7 @@ fun MusicScreen(
                 Icon(
                     painterResource(R.drawable.ic_lucide_x),
                     contentDescription = "Close",
-                    tint = Color.White,
+                    tint = Mvp.text,
                     modifier = Modifier
                         .size(48.dp)
                         .clickable(onClick = onBack)
@@ -581,21 +581,21 @@ fun MusicScreen(
                     Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp)) {
                         Text(
                             if (pluginSession != null) track.name else trackTitle(track.name),
-                            color = if (current) Mvp.accent else Color.White,
+                            color = if (current) Mvp.accent else Mvp.title,
                             fontSize = 16.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
                             if (pluginSession != null) track.pluginItem?.subtitle.orEmpty() else track.name.substringAfterLast('.', "Audio").uppercase(),
-                            color = Color(0xFF8B9BA8),
+                            color = Mvp.description,
                             fontSize = 13.sp,
                             maxLines = 1,
                         )
                     }
                     val known = if (pluginSession == null) GalleryCache.videos.firstOrNull { it.id == track.vaultId }?.takeIf { it.durationMs > 0 }?.durationText else null
                     if (!known.isNullOrBlank()) {
-                        Text(known, color = Color(0xFF8B9BA8), fontSize = 13.sp)
+                        Text(known, color = Mvp.description, fontSize = 13.sp)
                     }
                 }
             }
@@ -693,7 +693,7 @@ private fun TgSeek(
                 .fillMaxWidth()
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(Color(0xFF3A4550)),
+                .background(Mvp.sliderGroove),
         )
         Box(
             Modifier
@@ -707,7 +707,7 @@ private fun TgSeek(
                 .wrapContentWidth(Alignment.End)
                 .size(12.dp)
                 .clip(CircleShape)
-                .background(Color.White),
+                .background(Mvp.primary),
         )
     }
 }
@@ -751,7 +751,7 @@ private fun SongThumb(id: Long, modifier: Modifier) {
             bmp = decoded
         }
     }
-    Box(modifier.background(Color(0xFF2C2C2E)), contentAlignment = Alignment.Center) {
+    Box(modifier.background(Mvp.tileBg), contentAlignment = Alignment.Center) {
         val art = bmp
         if (art == null) {
             Image(
@@ -809,7 +809,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .height(36.dp)
-            .background(Color(0xFF1C1C1E))
+            .background(Mvp.card)
             .clickable(onClick = onOpen),
     ) {
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
@@ -828,13 +828,13 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
                 Icon(
                     painterResource(if (playing) R.drawable.ic_action_pause else R.drawable.ic_action_play),
                     contentDescription = "Play",
-                    tint = Color.White,
+                    tint = Mvp.text,
                     modifier = Modifier.size(18.dp),
                 )
             }
             Text(
                 title,
-                color = Color.White,
+                color = Mvp.title,
                 fontSize = 15.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -842,7 +842,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
             )
             Text(
                 speedText,
-                color = Color(0xFF8B9BA8),
+                color = Mvp.description,
                 fontSize = 13.sp,
                 modifier = Modifier
                     .clickable {
@@ -865,7 +865,7 @@ fun TelegramMusicBar(onOpen: () -> Unit) {
                 Icon(
                     painterResource(R.drawable.ic_lucide_x),
                     contentDescription = "Close",
-                    tint = Color(0xFF8B9BA8),
+                    tint = Mvp.description,
                     modifier = Modifier.size(16.dp),
                 )
             }
