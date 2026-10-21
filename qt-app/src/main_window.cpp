@@ -2936,7 +2936,23 @@ void MainWindow::layoutLibraryChrome() {
     if (page == nullptr || libraryTop_ == nullptr || libraryBottom_ == nullptr) {
         return;
     }
-    const int topHeight = std::max(libraryTop_->sizeHint().height(), 44);
+    // The bar's height is computed from a size *hint*, and a hint taken while one of its rows is
+    // momentarily empty comes back short. Qt then clips every row in the bar rather than laying it
+    // out smaller, so the title, the search field and the path collapse together, and the bar stays
+    // that way until some later pass happens to re-lay it out -- which is why a second drag can put
+    // it back. A drag rewrites the crumbs' stylesheets on every move, a rebuild empties the crumb
+    // row, and either can catch the hint in that window.
+    //
+    // So the barrier is removed from the hint: the bar is never allowed below what its own layout
+    // requires, measured after activating it. Rows that are hidden do not count, so the bar still
+    // shrinks when a row legitimately goes away.
+    int required = 0;
+    if (auto* layout = libraryTop_->layout()) {
+        layout->activate();
+        required = layout->sizeHint().height();
+        libraryTop_->setMinimumHeight(required);
+    }
+    const int topHeight = std::max({required, libraryTop_->sizeHint().height(), 44});
     const int bottomHeight = std::max(libraryBottom_->sizeHint().height(), 28);
     const bool details = galleryStack_->currentWidget() == detailsTree_;
     const bool paneVisible = folderPane_ != nullptr && folderPane_->isVisibleTo(page);
