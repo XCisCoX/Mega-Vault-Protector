@@ -6,6 +6,8 @@
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/record_window.hpp"
+#include "videovault/app/share_server.hpp"
+#include "videovault/app/peer_link.hpp"
 #include "videovault/core/vault.hpp"
 #include <QApplication>
 #include <QElapsedTimer>
@@ -23,6 +25,7 @@
 #include <QTimer>
 #include <QFile>
 #include <QDir>
+#include <QDialog>
 #include <QCheckBox>
 #include <QPushButton>
 #include <QMenu>
@@ -37,7 +40,77 @@
 
 namespace videovault::app {
 struct GalleryPerformanceTestAccess {
-    // Inspect real command widgets without showing a window or opening a menu.
+    static int shareUnlock() {
+        QTemporaryDir temp(qEnvironmentVariable("TMPDIR", QDir::tempPath())
+            + QStringLiteral("/MVP-share-unlock-XXXXXX"));
+        if (!temp.isValid()) return 100;
+        const auto root = std::filesystem::path(temp.path().toStdWString()) / L"vault";
+        auto created = core::Vault::create(root, "share-unlock-fixture", {8192, 1, 1});
+        if (!created) return 101;
+        QSettings().setValue(QStringLiteral("updates/checkAutomatically"), false);
+        MainWindow window;
+        auto original = std::make_shared<core::Vault>(std::move(created.value()));
+        window.vault_ = original;
+        window.ensureShareServer();
+        window.shareServer_->setLocalVault(original);
+        QString error;
+        if (!window.shareServer_->start(root, &error)) {
+            std::fprintf(stderr, "FAIL share listener: %s\n", qPrintable(error));
+            return 102;
+        }
+        // Simulate the already-approved peer's state, not a network handshake.
+        // The listener, vault, lock screen and password worker are production code.
+        window.shareServer_->peer()->open(QStringLiteral("Generated phone"));
+        const auto port = window.shareServer_->port();
+        window.showUnlocked();
+        drain(window);
+        window.lockVault();
+        if (window.vault_ != original || !window.shareServer_->running()
+            || !window.peerLinked() || window.pages_->currentWidget() != window.loginPage_) return 103;
+        auto login = [&](const std::filesystem::path& path, const QString& password) {
+            window.loginLocation_->setText(QString::fromStdWString(path.wstring()));
+            window.loginPassword_->setText(password);
+            window.beginOpen();
+            QElapsedTimer timer;
+            timer.start();
+            while (window.watcher_ && timer.elapsed() < 15000) {
+                QApplication::processEvents();
+                QThread::msleep(5);
+            }
+            return window.watcher_ == nullptr;
+        };
+        const auto alias = root.parent_path() / L"." / root.filename();
+        if (!login(alias, QStringLiteral("wrong-password"))
+            || window.pages_->currentWidget() != window.loginPage_
+            || window.loginError_->text().contains(QStringLiteral("Stop sharing"))) {
+            std::fprintf(stderr, "FAIL equivalent share path rejected before password validation: %s\n",
+                qPrintable(window.loginError_->text()));
+            return 104;
+        }
+        if (!login(alias, QStringLiteral("share-unlock-fixture"))
+            || window.pages_->currentWidget() != window.unlockedPage_
+            || window.vault_ != original || !window.peerLinked()
+            || !window.shareServer_->running() || window.shareServer_->port() != port) {
+            std::fprintf(stderr, "FAIL shared vault did not resume: %s\n", qPrintable(window.loginError_->text()));
+            return 105;
+        }
+        drain(window);
+        window.lockVault();
+        const auto other = root.parent_path() / L"other-vault";
+        std::filesystem::create_directory(other);
+        if (!login(other, QStringLiteral("share-unlock-fixture"))
+            || !window.loginError_->text().contains(QStringLiteral("Stop sharing"))
+            || window.vault_ != original || !window.peerLinked()) return 106;
+        window.shareServer_->unlinkPeer();
+        window.shareServer_->stop();
+        window.lockVault();
+        if (!login(root, QStringLiteral("share-unlock-fixture"))
+            || window.pages_->currentWidget() != window.unlockedPage_) return 107;
+        drain(window);
+        std::printf("PASS share lock/unlock: equivalent path, password verification, retained peer/listener, other-vault refusal, fresh reopen\n");
+        return 0;
+    }
+    // Inspect the current toolbar and drive its real command popup.
     static int libraryCommands() {
         MainWindow window;
         auto require = [](bool ok, const char* message) {
@@ -45,60 +118,46 @@ struct GalleryPerformanceTestAccess {
             return ok;
         };
         auto* add = window.importButton_;
-        auto* more = window.findChild<QPushButton*>(QStringLiteral("libraryMore"));
-        if (!require(add->text() == QStringLiteral("Add") && !add->icon().isNull()
-                && !add->accessibleName().isEmpty() && add->focusPolicy() != Qt::NoFocus,
-                "primary Add must have a plus icon, visible text and keyboard focus")) return 80;
-        if (!require(more && more->text() == QStringLiteral("More") && more->menu()
-                && !more->accessibleName().isEmpty() && more->focusPolicy() != Qt::NoFocus,
-                "labelled, accessible More menu is missing")) return 81;
+        if (!require(add->text().isEmpty() && !add->icon().isNull()
+                && add->toolTip().contains(QStringLiteral("Add files")),
+                "primary Add must have a plus icon and an explanatory tooltip")) return 80;
         auto* row = add->parentWidget()->layout()->itemAt(0)->layout();
-        int buttonCount = 0;
+        QList<QPushButton*> buttons;
         for (int i = 0; row && i < row->count(); ++i) {
-            if (qobject_cast<QPushButton*>(row->itemAt(i)->widget())) ++buttonCount;
+            if (auto* button = qobject_cast<QPushButton*>(row->itemAt(i)->widget())) buttons.append(button);
         }
-        if (!require(buttonCount == 2, "title row must contain only Add and More buttons")) return 82;
-        auto* addMenu = add->menu();
-        if (!require(addMenu && addMenu->actions().size() == 5,
-                "Add menu must contain the five supported add/create actions")) return 83;
-        const QStringList expected{
-            QStringLiteral("Photos, videos, music or other files…"), QStringLiteral("Add a folder…"),
-            QStringLiteral("New note"), QStringLiteral("New record list"), QStringLiteral("New folder")};
-        for (int i = 0; i < expected.size(); ++i) {
-            if (!require(addMenu->actions().at(i)->text() == expected.at(i),
-                    "Add contains an unexpected or jargon-heavy action")) return 84;
-        }
-        auto* moreMenu = more->menu();
-        auto hasAction = [](QMenu* menu, const QString& text) {
-            for (auto* action : menu->actions()) if (action->text() == text) return true;
-            return false;
+        if (!require(buttons.contains(window.shareButton_) && buttons.contains(window.settingsButton_)
+                && buttons.contains(window.updateButton_) && buttons.contains(window.pluginMusicButton_)
+                && buttons.contains(window.extensionToolsButton_)
+                && window.findChild<QPushButton*>(QStringLiteral("syncSection")),
+                "a secondary toolbar destination was lost")) return 81;
+        bool hasLock = false;
+        for (auto* button : buttons) hasLock |= button->toolTip().startsWith(QStringLiteral("Lock this PC"));
+        if (!require(hasLock, "lock command is missing")) return 82;
+        const QStringList expected{QStringLiteral("Import files…"), QStringLiteral("Import folder…"),
+            QStringLiteral("New note"), QStringLiteral("New record"), QStringLiteral("New folder"),
+            QStringLiteral("Import package…"), QStringLiteral("Export package…")};
+        auto inspectPopup = [&] {
+            bool opened = false;
+            QStringList labels;
+            QTimer::singleShot(0, &window, [&] {
+                auto* popup = window.findChild<QDialog*>(QStringLiteral("commandPopup"));
+                if (!popup) return;
+                opened = popup->isVisible();
+                for (auto* command : popup->findChildren<QPushButton*>()) labels.append(command->text());
+                popup->reject(); // Inspect without importing or exporting anything.
+            });
+            add->click();
+            return opened && labels == expected;
         };
-        for (const QString& label : {QStringLiteral("Music"), QStringLiteral("Sync…"),
-                QStringLiteral("Settings…"), QStringLiteral("Lock this PC"),
-                QStringLiteral("Share with phone…"), QStringLiteral("Updates…")}) {
-            if (!require(hasAction(moreMenu, label), "an existing secondary action was lost")) return 85;
-        }
-        auto* backups = moreMenu->findChild<QMenu*>(QStringLiteral("encryptedBackups"));
-        if (!require(backups && backups->actions().size() == 2
-                && backups->title().contains(QStringLiteral(".mvpk")),
-                "encrypted backup submenu must explain the format")) return 86;
-        for (auto* action : backups->actions()) {
-            if (!require(action->text().contains(QStringLiteral("encrypted"))
-                    && action->toolTip().contains(QStringLiteral(".mvpk")),
-                    "backup actions must explain encrypted .mvpk packages")) return 87;
-        }
+        if (!require(inspectPopup(), "Add popup must retain all seven import/create/package actions")) return 83;
         add->setEnabled(false);
-        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
-        if (!require(!backups->menuAction()->isEnabled(),
-                "moving backups out of Add must not bypass disabled import state")) return 88;
+        add->click();
+        if (!require(!window.findChild<QDialog*>(QStringLiteral("commandPopup")),
+                "disabled Add must not expose package actions during imports")) return 84;
         add->setEnabled(true);
-        window.batchBusy_ = true;
-        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
-        if (!require(!backups->menuAction()->isEnabled(), "backup actions must stay disabled during a batch")) return 89;
-        window.batchBusy_ = false;
-        QMetaObject::invokeMethod(moreMenu, "aboutToShow", Qt::DirectConnection);
-        if (!require(backups->menuAction()->isEnabled(), "backup actions must recover after a batch")) return 90;
-        std::printf("PASS library commands: Add/More labels, beginner actions, preserved destinations, encrypted backups and busy state\n");
+        if (!require(inspectPopup(), "Add and package actions must recover when enabled")) return 85;
+        std::printf("PASS library commands: icon toolbar, preserved destinations, real Add popup and disabled-state recovery\n");
         return 0;
     }
 
@@ -886,5 +945,7 @@ int main(int argc, char** argv) {
     videovault::app::initializeTheme(app);
     if (qEnvironmentVariableIsSet("MVP_LIBRARY_COMMANDS_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::libraryCommands();
+    if (qEnvironmentVariableIsSet("MVP_SHARE_UNLOCK_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::shareUnlock();
     return videovault::app::GalleryPerformanceTestAccess::run();
 }

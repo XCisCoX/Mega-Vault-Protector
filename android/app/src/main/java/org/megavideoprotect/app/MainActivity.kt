@@ -46,6 +46,8 @@ import androidx.core.view.WindowCompat
 private object AppSession {
     var screen: Screen = Screen.Login
     var leftAt: Long = 0L
+    // Retained with the native/remote session across activity recreation, not process death.
+    var vaultIdentity by mutableStateOf(VaultIdentity())
 }
 
 class MainActivity : ComponentActivity() {
@@ -54,6 +56,22 @@ class MainActivity : ComponentActivity() {
     private var pendingShare by mutableStateOf<List<Uri>>(emptyList())
     /** The lock screen is up, but the vault stays open so a swap can keep going. */
     private var shareHoldsVault = false
+
+    private fun openedLocalVault(root: String) {
+        AppSession.vaultIdentity = AppSession.vaultIdentity.openedLocal(root)
+        VaultLocation.save(this, root)
+        shareHoldsVault = false
+        GalleryCache.clear()
+        show(Screen.Vault)
+        SyncV4Auto.attach(this, root)
+    }
+
+    private fun openedRemoteVault() {
+        SyncV4Auto.detach()
+        AppSession.vaultIdentity = AppSession.vaultIdentity.connectedRemote()
+        shareHoldsVault = false
+        show(Screen.Vault)
+    }
 
     private fun show(next: Screen) {
         // The library and its provider player share the same RAM-only session.
@@ -118,12 +136,13 @@ class MainActivity : ComponentActivity() {
         // The saved appearance is read once, before the first frame.
         MvpThemeState.loadOnce(this)
 
-        val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
+        // Only a locked-screen picker hint. Never use preferences to identify an open vault.
+        val initialLocation = VaultLocation.saved(this) ?: filesDir.absolutePath
         val locationOptions = runCatching { VaultLocation.options(this) }
             .getOrDefault(listOf(filesDir.absolutePath))
-        val vaultExists = runCatching { CoreBridge.nativeVaultExists(vaultRoot) }.getOrDefault(false)
+        val vaultExists = runCatching { CoreBridge.nativeVaultExists(initialLocation) }.getOrDefault(false)
         val open = unlocked()
-        if (open && awayTooLong()) {
+        if (open && (awayTooLong() || (!RemoteVault.connected() && AppSession.vaultIdentity.activeLocalRoot == null))) {
             lockNow()
         } else if (open && AppSession.screen !is Screen.Login && AppSession.screen !is Screen.Setup) {
             show(AppSession.screen)
@@ -134,8 +153,10 @@ class MainActivity : ComponentActivity() {
         }
         acceptShare(intent)
         openMusicFromNotification(intent)
-        // A cold start that lands straight in the vault starts the watcher too.
-        if (open && !RemoteVault.connected()) SyncV4Auto.attach(this, vaultRoot)
+        // A recreated activity reattaches to the actual retained local session.
+        if (unlocked() && !RemoteVault.connected() && screen !is Screen.Login && screen !is Screen.Setup) {
+            AppSession.vaultIdentity.activeLocalRoot?.let { root -> SyncV4Auto.attach(this, root) }
+        }
 
         setContent {
             MvpTheme {
@@ -193,31 +214,29 @@ class MainActivity : ComponentActivity() {
                     ) { current ->
                     when (current) {
                         is Screen.Setup -> SetupScreen(
-                            vaultLocation = vaultRoot,
+                            vaultLocation = initialLocation,
                             locationOptions = locationOptions,
-                            onCreated = { show(Screen.Vault) },
+                            onCreated = { root -> openedLocalVault(root) },
+                            onRemoteConnected = { openedRemoteVault() },
                             onOpenExisting = { show(Screen.Login) },
                         )
                         is Screen.Login -> LoginScreen(
-                            vaultLocation = vaultRoot,
+                            vaultLocation = initialLocation,
                             locationOptions = locationOptions,
-                            onUnlocked = {
-                                shareHoldsVault = false
-                                show(Screen.Vault)
-                                // The library is up: let the vault keep itself
-                                // in step from here, with no button to press.
-                                if (!RemoteVault.connected()) {
-                                    SyncV4Auto.attach(this@MainActivity, vaultRoot)
-                                }
-                            },
+                            onUnlocked = { root -> openedLocalVault(root) },
+                            onRemoteConnected = { openedRemoteVault() },
                             onBack = { show(Screen.Setup) },
                         )
-                        is Screen.Vault -> VaultScreen(
-                            vaultLocation = RemoteVault.label() ?: vaultRoot,
+                        is Screen.Vault -> {
+                            // Outgoing animated content may recompose after a remote disconnect.
+                            val location = if (RemoteVault.connected()) RemoteVault.label() ?: "PC vault"
+                                else AppSession.vaultIdentity.activeLocalRoot
+                            if (location != null) VaultScreen(
+                            vaultLocation = location,
                             onLock = { lockNow() },
                             onOpenPeer = { show(Screen.Peer) },
-                            onOpenSync = { show(Screen.Sync) },
-                            onOpenPlugins = { show(Screen.Plugins) },
+                            onOpenSync = { if (!RemoteVault.connected()) show(Screen.Sync) },
+                            onOpenPlugins = { if (!RemoteVault.connected()) show(Screen.Plugins) },
                             onPlayPlugin = { show(Screen.PluginMusic) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
@@ -272,11 +291,15 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             },
-                        )
-                        is Screen.Plugins -> PluginScreen(
-                            vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
-                            onClose = { show(Screen.Vault) },
-                        )
+                            )
+                        }
+                        is Screen.Plugins -> {
+                            val root = AppSession.vaultIdentity.activeLocalRoot
+                            if (!RemoteVault.connected() && root != null) PluginScreen(
+                                vaultRoot = root,
+                                onClose = { show(Screen.Vault) },
+                            ) else LaunchedEffect(Unit) { show(Screen.Vault) }
+                        }
                         is Screen.PluginMusic -> {
                             val session = PluginLibrary.session
                             if (session == null) {
@@ -290,10 +313,13 @@ class MainActivity : ComponentActivity() {
                                 pluginSession = session,
                             )
                         }
-                        is Screen.Sync -> SyncScreen(
-                            vaultRoot = VaultLocation.saved(this@MainActivity) ?: vaultRoot,
-                            onClose = { show(Screen.Vault) },
-                        )
+                        is Screen.Sync -> {
+                            val root = AppSession.vaultIdentity.activeLocalRoot
+                            if (!RemoteVault.connected() && root != null) SyncScreen(
+                                vaultRoot = root,
+                                onClose = { show(Screen.Vault) },
+                            ) else LaunchedEffect(Unit) { show(Screen.Vault) }
+                        }
                         is Screen.Peer -> PeerScreen(onClose = { show(Screen.Vault) })
                         is Screen.Player -> PlayerScreen(
                             videoId = current.videoId,

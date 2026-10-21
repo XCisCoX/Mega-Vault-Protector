@@ -39,7 +39,8 @@ import kotlinx.coroutines.withContext
 fun SetupScreen(
     vaultLocation: String,
     locationOptions: List<String>,
-    onCreated: () -> Unit,
+    onCreated: (String) -> Unit,
+    onRemoteConnected: () -> Unit,
     onOpenExisting: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -83,12 +84,13 @@ fun SetupScreen(
             else -> 256 * 1024
         }
         val iters = if (profile.startsWith("High")) 4 else 3
+        val openedRoot = location
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(location, password, memKib, iters, 1))
+                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(openedRoot, password, memKib, iters, 1))
             }
             busy = false
-            if (res.ok) onCreated() else error = res.error.ifBlank { res.detail }
+            if (res.ok) onCreated(openedRoot) else error = res.error.ifBlank { res.detail }
         }
     }
 
@@ -108,7 +110,7 @@ fun SetupScreen(
             checkingPc = false
             if (failure == null) {
                 GalleryCache.clear()
-                onCreated()
+                onRemoteConnected()
             } else {
                 error = failure
             }

@@ -256,7 +256,7 @@ int InWindowSheet::run() {
         if (parentWidget() != nullptr) {
             parentWidget()->removeEventFilter(this);
         }
-        return 1;
+        return result_;
     }
     // A modal sheet that never finishes must not hang a headless run forever;
     // the trace names it so a CI log is diagnosable.

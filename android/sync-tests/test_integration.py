@@ -1,4 +1,4 @@
-"""Static integration guards for the protocol 3 Android sync client.
+"""Static integration guards for the legacy protocol 3 and active protocol 4 clients.
 
 These read the sources; they are not Android instrumentation and cannot show
 runtime behaviour. Runtime evidence is the standalone Kotlin suite and the
@@ -42,20 +42,66 @@ class IntegrationGuards(unittest.TestCase):
     def test_protocol_2_identity_and_revision_state_is_gone(self):
         code = '\n'.join(
             source(name) for name in
-            ('SyncPolicy.kt', 'SyncHttp.kt', 'SyncEngine.kt', 'SyncScreen.kt', 'AndroidSyncStore.kt')
+            # Protocol 3 has no account identity; the active protocol 4 screen
+            # legitimately uses device tokens and tombstones, so guard it below.
+            ('SyncPolicy.kt', 'SyncHttp.kt', 'SyncEngine.kt', 'AndroidSyncStore.kt')
         )
         for banned in (r'/v2/', r'\bdevice_id\b', r'\btoken\b', r'\brevision\b',
                        r'\boperation_id\b', r'\bconflict\b', r'\btombstone', r'\bpairing\b', r'\bpair\b'):
             self.assertIsNone(re.search(banned, code), banned)
 
-    def test_one_small_screen_section_without_a_retry_loop(self):
+    def test_active_screen_uses_protocol_4_without_legacy_pairing(self):
         screen = source('SyncScreen.kt')
-        self.assertEqual(screen.count('MvpButton("Sync"'), 1)
+        client = source('SyncV4Client.kt')
+        for banned in (r'/v2/', r'\bdevice_id\b', r'\boperation_id\b', r'\brevision\b',
+                       r'\bpairing\b', r'\bpair\b'):
+            self.assertIsNone(re.search(banned, screen + client, re.IGNORECASE), banned)
+        self.assertIn('const val PROTOCOL = 4', client)
+        self.assertIn('client.protocol()', screen)
+        self.assertIn('client.login(email, password)', screen)
+        self.assertIn('client.issueToken("phone")', screen)
+        self.assertIn('store.save(created)', screen)
+        self.assertIn('SyncV4Auto.adopt(fresh)', screen)
+
+    def test_manual_sync_is_process_owned_and_not_a_screen_retry_loop(self):
+        screen = source('SyncScreen.kt')
+        self.assertEqual(len(re.findall(r'else\s+"Sync now"', screen)), 1)
+        self.assertRegex(screen, r'onClick\s*=\s*onSync,[\s\S]*?enabled\s*=\s*!busy\s*&&\s*!running')
+        self.assertIn('onSync = { syncNow() }', screen)
+        self.assertIn('if (busy || SyncV4Run.running) return', screen)
+        self.assertIn('SyncV4Run.start(context, store, current)', screen)
         self.assertNotIn('delay(', screen)
         self.assertNotIn('repeatOnLifecycle', screen)
-        self.assertNotIn('Pair', screen)
-        self.assertIn('Library key', screen)
-        self.assertLess(len(screen.splitlines()), 260)
+
+    def test_account_and_package_passwords_are_separate_and_masked(self):
+        screen = source('SyncScreen.kt')
+        self.assertRegex(screen, r'MvpInput\(password,\s*onPassword,[^\n]*isPassword\s*=\s*true')
+        self.assertRegex(screen, r'MvpInput\(\s*packageSecret,\s*onSecret,[\s\S]*?isPassword\s*=\s*true')
+        self.assertIn('if (packageSecret.isBlank())', screen)
+        self.assertIn('enabled = !busy && chosen != null && packageSecret.isNotBlank()', screen)
+        self.assertIn('packageSecret = packageSecret', screen)
+        disconnect = screen.split('fun disconnect() {', 1)[1].split('LaunchedEffect', 1)[0]
+        for cleanup in ('store.clear()', 'SyncV4Auto.adopt(null)', 'link = null',
+                        'packageSecret = ""', 'password = ""', 'items = emptyList()'):
+            self.assertIn(cleanup, disconnect)
+
+    def test_protocol_4_credentials_are_keystore_sealed_and_namespace_bound(self):
+        store = source('SyncV4State.kt')
+        for marker in ('AndroidKeyStore', 'AES/GCM/NoPadding', 'GCMParameterSpec(128',
+                       'cipher.updateAAD(namespace.toByteArray', 'cipher.doFinal(',
+                       'prefs.edit().remove(namespace)'):
+            self.assertIn(marker, store)
+        self.assertNotIn('putString("token"', store)
+        self.assertNotIn('putString("packageSecret"', store)
+
+    def test_permanent_deletion_has_a_separate_confirmation_action(self):
+        screen = source('SyncScreen.kt')
+        self.assertRegex(screen, r'text\s*=\s*"Delete forever",\s*onClick\s*=\s*onAskPurge')
+        confirmation = screen.split('if (askingPurge) {', 1)[1].split('Spacer(Modifier.height(14.dp))', 1)[0]
+        self.assertIn('onClick = onCancelPurge', confirmation)
+        self.assertIn('onClick = onConfirmPurge', confirmation)
+        self.assertIn('onAskPurge = { askingPurge = true }', screen)
+        self.assertIn('act { engine -> engine.purgeItems(ids) }', screen)
 
     def test_ledger_and_native_bridge(self):
         adapter = source('AndroidSyncStore.kt')

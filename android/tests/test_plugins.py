@@ -32,6 +32,9 @@ class PluginBoundaries(unittest.TestCase):
   self.assertTrue((A/'java/org/megavideoprotect/app/ExtensionActionPanel.kt').exists())
  def test_navigation(self):
   s=(A/'java/org/megavideoprotect/app/MainActivity.kt').read_text()
-  self.assertIn('is Screen.Plugins -> PluginScreen(',s)
+  plugins=s.split('is Screen.Plugins -> {',1)[1].split('is Screen.PluginMusic ->',1)[0]
+  self.assertIn('PluginScreen(',plugins)
+  self.assertIn('!RemoteVault.connected() && root != null',plugins)
+  self.assertIn('vaultRoot = root',plugins)
   self.assertIn('PluginRuntime.close()',s)
 if __name__=='__main__': unittest.main()

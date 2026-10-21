@@ -85,6 +85,16 @@ int main(int argc, char** argv) {
         check(tabs->tabText(0) == "Updates" && tabs->tabText(4) == "Library", "section order");
         page.resize(480, 640); page.show(); app.processEvents();
         stageMark("page shown");
+        {
+            videovault::app::InWindowSheet sheet(&page);
+            sheet.setTitle(QStringLiteral("Generated cancellation check"));
+            sheet.addButton(QStringLiteral("Cancel"), 0, false);
+            videovault::app::InWindowSheet::setTestDriver([](videovault::app::InWindowSheet* currentSheet) {
+                currentSheet->finish(0);
+            });
+            check(sheet.run() == 0, "sheet driver must preserve cancellation instead of reporting Save");
+            videovault::app::InWindowSheet::setTestDriver({});
+        }
         int preferences = 0, libraryChanges = 0, appearanceChanges = 0, checks = 0, closes = 0;
         QObject::connect(&page, &videovault::app::SettingsDialog::updatePreferencesChanged, [&] { ++preferences; });
         QObject::connect(&page, &videovault::app::SettingsDialog::settingsChanged, [&] { ++libraryChanges; });
@@ -248,10 +258,29 @@ int main(int argc, char** argv) {
         stageMark("theme switch");
         // The editor is an in-window sheet: the driver stands in for the user,
         // exactly where a person would click, so the real save path runs.
+        // Linux CI has no OS keyring. Test its refusal/cancel path instead of
+        // clicking Save forever when secure credential persistence is unavailable.
+        QString credentialError;
+        const bool canSealCredentials = videovault::app::saveProxySettings({}, &credentialError);
+#ifdef Q_OS_WIN
+        check(canSealCredentials, "Windows DPAPI credential storage must be available");
+#endif
         QString shotFolder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
         bool grabbed = false;
+        int editorVisits = 0;
         videovault::app::InWindowSheet::setTestDriver(
             [&](videovault::app::InWindowSheet* sheet) {
+                ++editorVisits;
+                check(editorVisits <= 2, "proxy editor must not enter an unbounded save retry loop");
+                if (editorVisits == 2) {
+                    check(!canSealCredentials, "proxy save unexpectedly failed with an available credential store");
+                    bool showsError = false;
+                    for (auto* label : sheet->findChildren<QLabel*>())
+                        showsError |= label->text().contains(credentialError);
+                    check(!credentialError.isEmpty() && showsError, "unavailable credential store must be explained inline");
+                    sheet->findChild<QPushButton*>("cancelProxy")->click();
+                    return;
+                }
                 auto* server = sheet->findChild<QLineEdit*>("proxyServer");
                 auto* port = sheet->findChild<QLineEdit*>("proxyPort");
                 auto* user = sheet->findChild<QLineEdit*>("proxyUsername");
@@ -272,6 +301,13 @@ int main(int argc, char** argv) {
                 sheet->findChild<QPushButton*>("saveProxy")->click();
             });
         child.operator()<QPushButton>("addProxy")->click(); app.processEvents();
+        if (!canSealCredentials) {
+            check(editorVisits == 2 && proxyList->count() == 0 && !proxySwitch->isChecked(),
+                "unavailable keyring must reject saving and allow cancellation without enabling a proxy");
+            check(QSettings().value("network/proxyStore").toByteArray().isEmpty(),
+                "failed credential sealing must not persist plaintext settings");
+            check(!page.window()->findChild<QWidget*>("inWindowSheet"), "cancel closes failed proxy editor");
+        } else {
         check(proxyList->count() == 1, "proxy saved through the in-window sheet");
         check(!page.window()->findChild<QWidget*>("inWindowSheet"), "sheet closes after saving");
         proxySwitch->click(); check(proxySwitch->isChecked(), "saved proxy enables switch");
@@ -309,6 +345,7 @@ int main(int argc, char** argv) {
 #else
         child.operator()<QPushButton>("deleteProxy")->click();
 #endif
+        }
         videovault::app::InWindowSheet::setTestDriver({});
         page.reject(); check(closes == 1 && page.isVisible(), "reject requests host navigation without destroying or hiding page");
         std::cout << "Settings page tests passed: switches, accessibility, updates, appearance, navigation, security, tags, thumbnails, persistence, responsive layout, live palette\n";

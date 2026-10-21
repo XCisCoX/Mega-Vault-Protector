@@ -1367,7 +1367,8 @@ void placeCard(QWidget* page, QFrame* card) {
     // The scroll area's own size hint is small, which let the window shrink to
     // below the card once the auth page was shown. Hold the window at the card's
     // size, as the plain centred layout used to.
-    page->setMinimumSize(card->sizeHint().grownBy(QMargins(96, 96, 96, 96)));
+    // QSize::grownBy is unavailable in the Windows build's Qt 5.12.
+    page->setMinimumSize(card->sizeHint() + QSize(192, 192));
 }
 
 core::Argon2Parameters selectedParameters(const int profile) {
@@ -3783,7 +3784,7 @@ void MainWindow::beginOpen() {
         return;
     }
     setError(loginError_, {});
-    const auto root = pathFromText(loginLocation_->text());
+    auto root = pathFromText(loginLocation_->text());
     const QString passwordText = loginPassword_->text();
     if (root.empty()) {
         setError(loginError_, QStringLiteral("Choose a vault storage location."));
@@ -3794,14 +3795,21 @@ void MainWindow::beginOpen() {
         return;
     }
 
-    auto password = std::make_shared<std::string>(passwordText.toUtf8().constData());
     // A swap keeps the vault open behind the lock screen. Check the password
     // and come back to that same vault; opening a second one would drop the share.
     const bool resumeShare = vault_ && vault_->is_unlocked();
-    if (resumeShare && root != vault_->root_path()) {
-        setError(loginError_, QStringLiteral("Stop sharing before opening another vault."));
-        return;
+    if (resumeShare) {
+        // Compare directory identity, not spelling: the Windows picker can
+        // change case, separators or aliases without choosing a different vault.
+        std::error_code error;
+        if (!std::filesystem::equivalent(root, vault_->root_path(), error) || error) {
+            setError(loginError_, QStringLiteral("Stop sharing before opening another vault."));
+            return;
+        }
+        // Validate the retained vault, never a path alias that could be retargeted.
+        root = vault_->root_path();
     }
+    auto password = std::make_shared<std::string>(passwordText.toUtf8().constData());
     setBusy(true);
     watcher_ = new QFutureWatcher<std::shared_ptr<VaultOperationResult>>(this);
     connect(watcher_, &QFutureWatcherBase::finished, this, [this] { finishOperation(); });

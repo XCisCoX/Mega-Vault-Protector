@@ -68,7 +68,6 @@ import androidx.compose.ui.window.DialogWindowProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 private const val TAB_UPDATES = 0
 private const val TAB_APPEARANCE = 1
@@ -84,6 +83,7 @@ private const val TAB_PROXY = 5
 @Composable
 fun SettingsDialog(
     currentTags: List<TagEntry>,
+    vaultRoot: String,
     remote: Boolean = false,
     onDismiss: () -> Unit,
     onChanged: () -> Unit,
@@ -107,8 +107,6 @@ fun SettingsDialog(
     var updateStatus by remember { mutableStateOf<String?>(null) }
     var checking by remember { mutableStateOf(false) }
     var themeMode by remember { mutableStateOf(ThemePrefs.theme(context)) }
-    var pluginPath by remember { mutableStateOf(File(context.filesDir, "plugins")) }
-    var pluginNote by remember { mutableStateOf<String?>(null) }
 
     fun changePassword() {
         if (newPass.length < 8) { error = "New password must be at least 8 characters."; return }
@@ -333,58 +331,18 @@ fun SettingsDialog(
                         }
 
                         TAB_PLUGINS -> {
-                            Text(
-                                "A future home for external extensions.",
-                                color = Mvp.description,
-                                fontSize = 13.sp,
-                            )
-                            SettingsBlock(title = "Plugins") {
-                                Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                                    Text(
-                                        "External plugin loading is not supported yet",
-                                        color = Mvp.text,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                    Spacer(Modifier.height(4.dp))
-                                    Text(
-                                        "This version has no plugin loader and no plugin API. Files in the folder below are not loaded or executed.",
-                                        color = Mvp.description,
-                                        fontSize = 13.sp,
-                                    )
-                                    Spacer(Modifier.height(10.dp))
-                                    Text(
-                                        pluginPath.absolutePath,
-                                        color = Mvp.description,
-                                        fontSize = 12.sp,
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(
-                                        "Create folder",
-                                        color = Mvp.accent,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable {
-                                                val created = runCatching {
-                                                    val dir = File(context.filesDir, "plugins")
-                                                    if (!dir.isDirectory) dir.mkdirs()
-                                                    dir.isDirectory
-                                                }.getOrDefault(false)
-                                                pluginPath = File(context.filesDir, "plugins")
-                                                pluginNote = if (created) {
-                                                    "Folder is ready. Nothing in it is loaded by this version."
-                                                } else {
-                                                    "The folder could not be created."
-                                                }
-                                            }
-                                            .padding(vertical = 6.dp),
-                                    )
-                                    pluginNote?.let {
-                                        Text(it, color = Mvp.description, fontSize = 12.sp)
-                                    }
-                                }
+                            if (remote) {
+                                Text(
+                                    "Plugins belong to a local vault. Open your phone’s vault to manage its plugins.",
+                                    color = Mvp.description,
+                                    fontSize = 13.sp,
+                                )
+                            } else {
+                                PluginScreen(
+                                    vaultRoot = vaultRoot,
+                                    onClose = onDismiss,
+                                    embedded = true,
+                                )
                             }
                         }
 

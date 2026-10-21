@@ -40,7 +40,8 @@ import kotlinx.coroutines.withContext
 fun LoginScreen(
     vaultLocation: String,
     locationOptions: List<String>,
-    onUnlocked: () -> Unit,
+    onUnlocked: (String) -> Unit,
+    onRemoteConnected: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -73,6 +74,7 @@ fun LoginScreen(
             return
         }
         val code = pcCode
+        val openedRoot = location
         error = null
         busy = true
         checkingPc = code != null
@@ -83,16 +85,16 @@ fun LoginScreen(
                 checkingPc = false
                 if (failure == null) {
                     GalleryCache.clear()
-                    onUnlocked()
+                    onRemoteConnected()
                 } else {
                     error = failure
                 }
             } else {
                 val res = withContext(Dispatchers.Default) {
-                    CoreBridge.Result.parse(CoreBridge.nativeOpenVault(location, password))
+                    CoreBridge.Result.parse(CoreBridge.nativeOpenVault(openedRoot, password))
                 }
                 busy = false
-                if (res.ok) onUnlocked() else error = res.error.ifBlank { res.detail }
+                if (res.ok) onUnlocked(openedRoot) else error = res.error.ifBlank { res.detail }
             }
         }
     }

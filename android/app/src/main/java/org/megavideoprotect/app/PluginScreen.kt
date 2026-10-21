@@ -25,27 +25,27 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
-/** Vault > Add > Plugins. Both registered native adapters and sandbox actions need version-scoped consent. */
+/** Shared by Settings and Add > Extensions; consent stays version- and vault-scoped. */
 @Composable
-fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
+fun PluginScreen(vaultRoot: String, onClose: () -> Unit, embedded: Boolean = false) {
     val context = LocalContext.current
     val manager = remember(vaultRoot) { PluginManager(context.applicationContext, vaultRoot) }
-    val scope = rememberCoroutineScope()
-    var manifests by remember { mutableStateOf<List<PluginManifest>>(emptyList()) }
-    var revision by remember { mutableIntStateOf(0) }
-    var error by remember { mutableStateOf("") }
-    var consent by remember { mutableStateOf<PluginManifest?>(null) }
-    var configure by remember { mutableStateOf<PluginManifest?>(null) }
-    var browser by remember { mutableStateOf<PluginSession?>(null) }
-    var actionBrowser by remember { mutableStateOf<PluginManifest?>(null) }
-    var installing by remember { mutableStateOf(false) }
-    LaunchedEffect(revision) {
+    val scope = key(vaultRoot) { rememberCoroutineScope() }
+    var manifests by remember(vaultRoot) { mutableStateOf<List<PluginManifest>>(emptyList()) }
+    var revision by remember(vaultRoot) { mutableIntStateOf(0) }
+    var error by remember(vaultRoot) { mutableStateOf("") }
+    var consent by remember(vaultRoot) { mutableStateOf<PluginManifest?>(null) }
+    var configure by remember(vaultRoot) { mutableStateOf<PluginManifest?>(null) }
+    var browser by remember(vaultRoot) { mutableStateOf<PluginSession?>(null) }
+    var actionBrowser by remember(vaultRoot) { mutableStateOf<PluginManifest?>(null) }
+    var installing by remember(vaultRoot) { mutableStateOf(false) }
+    LaunchedEffect(vaultRoot, revision) {
         try { manifests = withContext(Dispatchers.IO) { manager.manifests() } }
         catch (_: Exception) { error = "Plugin descriptors could not be loaded." }
     }
-    DisposableEffect(vaultRoot) { onDispose { PluginRuntime.close() } }
+    DisposableEffect(vaultRoot, embedded) { onDispose { if (!embedded) PluginRuntime.close() } }
     fun back() { if (browser != null || actionBrowser != null) { PluginRuntime.close(); browser=null;actionBrowser=null } else onClose() }
-    BackHandler { back() }
+    if (!embedded) BackHandler { back() }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
             installing = true; error = ""
@@ -54,9 +54,11 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
             finally { installing = false }
         }
     }
-    Surface(color = Mvp.window, contentColor = Mvp.text, modifier = Modifier.fillMaxSize()) {
-        Column(Modifier.safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+    Surface(color = Mvp.window, contentColor = Mvp.text,
+        modifier = if (embedded) Modifier.fillMaxWidth() else Modifier.fillMaxSize()) {
+        Column(if (embedded) Modifier else Modifier.safeDrawingPadding().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (!embedded) Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { back() }) { Text("Back") }
                 Text(browser?.manifest?.name ?: actionBrowser?.name ?: "Portable extensions", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             }
@@ -69,34 +71,42 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
                 Text("Install portable JSON extensions: approved native provider adapters or bounded sandbox commands. Disabled by default; permissions are approved per extension version and vault. No external native code is loaded.")
                 OutlinedButton(onClick = { picker.launch(arrayOf("application/json")) }, enabled = !installing) { Text(if (installing) "Installing…" else "Install JSON manifest") }
                 if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(manifests, key = { it.id }) { manifest ->
-                        val settings = remember(manifest.id, revision) { manager.options(manifest) }
-                        Card(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(manifest.name + " · " + manifest.version, fontWeight = FontWeight.Bold)
-                                Text(manifest.description)
-                                Text(manifest.sourceNotice, style = MaterialTheme.typography.bodySmall)
-                                Text(if (settings.enabled) "Enabled for this vault" else "Disabled", color = if (settings.enabled) Mvp.accent else Mvp.description)
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    TextButton(onClick = {
-                                        if (settings.enabled) {
-                                            PluginRuntime.close(); browser = null
-                                            manager.save(manifest,settings.copy(enabled=false)); revision++
-                                        } else consent = manifest
-                                    }) { Text(if (settings.enabled) "Disable" else "Enable…") }
-                                    TextButton(onClick = { configure = manifest }) { Text("Settings") }
-                                    if (settings.enabled) TextButton(onClick = {
-                                        if(PluginProviderRegistry.protocol(manifest.protocol).music) onClose()
-                                        else actionBrowser = manifest
-                                    }) { Text(if(PluginProviderRegistry.protocol(manifest.protocol).music) "Search in Library" else "Open extension") }
-                                }
-                                if (!manager.isBundled(manifest)) TextButton(onClick = {
-                                    runCatching { manager.remove(manifest) }.onFailure { error = it.message.orEmpty() }
-                                    revision++
-                                }) { Text("Remove") }
+                val pluginRow: @Composable (PluginManifest) -> Unit = { manifest ->
+                    val settings = remember(vaultRoot, manifest.id, manifest.version, revision) { manager.options(manifest) }
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(manifest.name + " · " + manifest.version, fontWeight = FontWeight.Bold)
+                            Text(manifest.description)
+                            Text(manifest.sourceNotice, style = MaterialTheme.typography.bodySmall)
+                            Text(if (settings.enabled) "Enabled for this vault" else "Disabled", color = if (settings.enabled) Mvp.accent else Mvp.description)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = {
+                                    if (settings.enabled) {
+                                        PluginRuntime.close(); browser = null
+                                        manager.save(manifest,settings.copy(enabled=false)); revision++
+                                    } else consent = manifest
+                                }) { Text(if (settings.enabled) "Disable" else "Enable…") }
+                                TextButton(onClick = { configure = manifest }) { Text("Settings") }
+                                if (settings.enabled && !embedded) TextButton(onClick = {
+                                    if(PluginProviderRegistry.protocol(manifest.protocol).music) onClose()
+                                    else actionBrowser = manifest
+                                }) { Text(if(PluginProviderRegistry.protocol(manifest.protocol).music) "Search in Library" else "Open extension") }
                             }
+                            if (!manager.isBundled(manifest)) TextButton(onClick = {
+                                runCatching { manager.remove(manifest) }.onFailure { error = it.message.orEmpty() }
+                                revision++
+                            }) { Text("Remove") }
                         }
+                    }
+                }
+                // Settings owns scrolling; do not nest an unbounded lazy list.
+                if (embedded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        manifests.forEach { manifest -> key(manifest.id) { pluginRow(manifest) } }
+                    }
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(manifests, key = { it.id }) { manifest -> pluginRow(manifest) }
                     }
                 }
             }
@@ -119,7 +129,8 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
             )
         }
     }
-    configure?.let { manifest ->
+    // Recreate nested dialog state and folder-loading effects on namespace changes.
+    key(vaultRoot) { configure?.let { manifest ->
         if(PluginProviderRegistry.protocol(manifest.protocol).music) {
             PluginSettingsDialog(manifest.name, manager.options(manifest), onDismiss = { configure = null }, onSave = {
                 manager.save(manifest,it); configure=null; revision++
@@ -127,7 +138,7 @@ fun PluginScreen(vaultRoot: String, onClose: () -> Unit) {
         } else ExtensionSettingsDialog(manifest,manager.booleanSettings(manifest),onDismiss={configure=null},onSave={
             manager.saveBooleanSettings(manifest,it);configure=null;revision++
         })
-    }
+    } }
 }
 
 @Composable

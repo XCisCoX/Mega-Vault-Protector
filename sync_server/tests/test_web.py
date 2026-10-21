@@ -1,5 +1,7 @@
 """The static web UI and the cookie-authenticated routes it drives."""
+from html.parser import HTMLParser
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -17,10 +19,33 @@ class WebTests(ServerCase):
         self.assertEqual(headers['x-frame-options'], 'DENY')
         self.assertEqual(headers['x-content-type-options'], 'nosniff')
         html = body.decode()
-        for marker in ('register-form', 'login-form', 'vault-form', 'token-form', 'server-url', 'Connect the app'):
-            self.assertIn(marker, html)
+        class Page(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.elements = []
+
+            def handle_starttag(self, tag, attrs):
+                self.elements.append((tag, dict(attrs)))
+
+        page = Page()
+        page.feed(html)
+        ids = {attrs['id']: (tag, attrs) for tag, attrs in page.elements if 'id' in attrs}
+        for marker in ('register-form', 'login-form', 'token-form', 'server-url',
+                       'library-select', 'create-library', 'file-picker', 'file-list',
+                       'lock-library', 'preview-dialog', 'transfer-tray'):
+            self.assertIn(marker, ids)
+        self.assertIn('hidden', ids['app'][1], 'the file shell starts signed out')
+        self.assertEqual(ids['file-picker'][1]['type'], 'file')
+        self.assertEqual(ids['preview-dialog'][0], 'dialog')
+        scripts = [attrs for tag, attrs in page.elements if tag == 'script']
+        self.assertEqual([attrs.get('src') for attrs in scripts], [
+            '/vendor/sodium.js', '/vendor/sodium-wrappers.js', '/package-crypto.js',
+            '/files-model.js', '/app.js'])
+        self.assertTrue(all('defer' in attrs for attrs in scripts))
         self.assertNotIn('<script>', html, 'no inline script may sneak past the CSP')
-        self.assertNotIn('onclick', html)
+        for _, attrs in page.elements:
+            self.assertFalse(any(name.lower().startswith('on') for name in attrs),
+                             'inline event handlers violate the CSP')
         for asset, kind in (('/app.js', 'text/javascript'), ('/style.css', 'text/css'), ('/icon.svg', 'image/svg')):
             status, headers, body = self.request('GET', asset)
             self.assertEqual(status, 200, asset)
@@ -33,12 +58,23 @@ class WebTests(ServerCase):
         self.assertEqual(self.request('POST', '/')[0], 405)
         self.assertEqual(self.request('GET', '/healthz')[2], {'ok': True, 'protocol': 4, 'registration': 'open'})
 
-    def test_the_ui_never_touches_records_or_blobs(self):
+    def test_file_ui_uses_session_browser_routes_and_only_persists_theme(self):
         script = self.request('GET', '/app.js')[2].decode()
-        self.assertIn('/v1/vaults', script)
-        self.assertIn('/auth/token', script)
-        for forbidden in ('/records', '/blobs', 'localStorage', 'sessionStorage'):
-            self.assertNotIn(forbidden, script, 'the web UI must not browse files or keep state locally')
+        for route in ('/v1/vaults', '/auth/token', '/browser/vaults/', '/records', '/blobs/'):
+            self.assertIn(route, script)
+        for forbidden in ('/v3/files', 'Authorization', 'sessionStorage', 'indexedDB',
+                          'document.cookie', 'innerHTML', 'outerHTML', 'insertAdjacentHTML'):
+            self.assertNotIn(forbidden, script)
+        # Appearance may persist, never a password, token, decrypted file or record.
+        accesses = re.findall(r'\blocalStorage\s*\.\s*(\w+)\s*\(([^)]*)\)', script)
+        self.assertEqual(accesses, [('setItem', "'mvp-theme',e.target.value"),
+                                    ('getItem', "'mvp-theme'")])
+        self.assertEqual(len(re.findall(r'\blocalStorage\b', script)), len(accesses),
+                         'no unreviewed storage API or bracket access')
+        for asset in ('/files-model.js', '/package-crypto.js'):
+            code = self.request('GET', asset)[2].decode()
+            for forbidden in ('localStorage', 'sessionStorage', 'indexedDB'):
+                self.assertNotIn(forbidden, code, asset)
 
     def test_the_whole_web_flow_over_the_session_cookie(self):
         email = self.new_email()

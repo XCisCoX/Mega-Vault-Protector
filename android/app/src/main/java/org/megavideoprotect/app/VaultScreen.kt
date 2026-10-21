@@ -1201,6 +1201,7 @@ fun VaultScreen(
         ) {
             SettingsDialog(
                 currentTags = tags,
+                vaultRoot = vaultLocation,
                 remote = RemoteVault.connected(),
                 onDismiss = {
                     showSettings = false
