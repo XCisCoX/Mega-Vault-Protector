@@ -1032,6 +1032,14 @@ RecordDocument cloneTemplate(const RecordEntry& templateEntry, const QString& ti
     return document;
 }
 
+QString templateFolderName() {
+    return QStringLiteral(".templates");
+}
+
+bool isTemplateFolderName(const QString& name) {
+    return name == templateFolderName();
+}
+
 bool insertTemplate(RecordNode* target, const RecordEntry& templateEntry, const QString& key,
     QString* problem) {
     const auto fail = [problem](const QString& text) {

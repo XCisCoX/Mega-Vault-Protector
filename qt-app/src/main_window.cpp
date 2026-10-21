@@ -7576,6 +7576,18 @@ void MainWindow::refreshGallery() {
         return;
     }
     folders_ = std::move(listed.value());
+    // The templates folder is a store, not a place in the library. Dropping it here keeps it
+    // out of every view built from folders_ -- the grid, the tree, the breadcrumb and search
+    // -- so a template never appears as a file.
+    templateFolderId_ = 0;
+    for (auto entry = folders_.begin(); entry != folders_.end();) {
+        if (isTemplateFolderName(QString::fromStdString(entry->name))) {
+            templateFolderId_ = entry->id;
+            entry = folders_.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
     bool open = currentFolderId_ == 0;
     std::int64_t parentOfOpen = 0;
     for (const auto& folder : folders_) {

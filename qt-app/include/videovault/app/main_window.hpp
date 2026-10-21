@@ -342,6 +342,9 @@ private:
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
+    // The templates store folder, recorded when the library is listed and then dropped from
+    // folders_, so nothing that walks the library ever sees it. 0 means "not there yet".
+    std::int64_t templateFolderId_{0};
     std::vector<std::filesystem::path> pendingExternal_;
     // .mvpk files handed over by the shell file association, kept apart from
     // media imports because they unlock and import as packages.

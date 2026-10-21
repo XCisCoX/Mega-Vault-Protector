@@ -1266,7 +1266,6 @@ void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
 
     setStatus(QStringLiteral("Saving the template…"), false);
     const auto vault = vault_;
-    const auto folder_id = folderId_;
     auto* watcher = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
     connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, name] {
         const auto outcome = *watcher->result();
@@ -1278,7 +1277,25 @@ void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
         setStatus(QStringLiteral("Template \"%1\" saved.").arg(name), false);
         emit templateSaved(name);
     });
-    watcher->setFuture(QtConcurrent::run([vault, bytes, name, folder_id] {
+    watcher->setFuture(QtConcurrent::run([vault, bytes, name] {
+        // Templates live in the store folder, created on first use. Not in the record's own
+        // folder: a template is not a file the user browses.
+        std::int64_t folder_id = 0;
+        if (const auto folders = vault->list_folders(); folders) {
+            for (const auto& folder : folders.value()) {
+                if (isTemplateFolderName(QString::fromStdString(folder.name))) {
+                    folder_id = folder.id;
+                    break;
+                }
+            }
+        }
+        if (folder_id == 0) {
+            const auto created = vault->create_folder(0, templateFolderName().toStdString());
+            if (!created) {
+                return std::make_shared<core::Result<std::int64_t>>(created.error());
+            }
+            folder_id = created.value();
+        }
         const std::span<const unsigned char> content(
             reinterpret_cast<const unsigned char*>(bytes.constData()),
             static_cast<std::size_t>(bytes.size()));

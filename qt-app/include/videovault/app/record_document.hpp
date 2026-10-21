@@ -189,6 +189,16 @@ bool applyGenerators(RecordEntry* entry, QString* problem = nullptr);
 RecordDocument cloneTemplate(const RecordEntry& templateEntry,
     const QString& title = QString());
 
+// Where a user's own templates live.
+//
+// A template is not a file in the library: it is a store the app owns. They sit in one
+// folder whose name starts with a dot, the gallery drops that folder when it loads the
+// library, and the picker is where they are managed. Keeping them as ordinary vault items
+// means they are encrypted and synced like everything else; keeping them out of the gallery
+// means a template never turns up as a file somebody has to understand.
+QString templateFolderName();
+bool isTemplateFolderName(const QString& name);
+
 // The templates shipped with the app, read from :/templates and parsed with
 // parseRecord, so a built-in is exactly the format a user's own template is.
 QVector<RecordDocument> builtinTemplates();
