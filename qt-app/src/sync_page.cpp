@@ -141,7 +141,7 @@ QString rowStyle(const char* name) {
                " border-radius: 14px; outline: none; }"
                "QListWidget#%1::item { border: none; background: transparent; }"
                "QListWidget#%1::item:hover { background: palette(midlight); }"
-               "QListWidget#%1::item:selected { background: rgba(51, 144, 236, 70); }")
+               "QListWidget#%1::item:selected { background: rgba(38, 114, 200, 70); }")
         .arg(QString::fromLatin1(name));
 }
 
@@ -176,7 +176,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     back_->setCursor(Qt::PointingHandCursor);
     back_->setFocusPolicy(Qt::NoFocus);
     back_->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #3390ec; background: transparent; border: none;"
+        "QPushButton { color: #2672c8; background: transparent; border: none;"
         " padding: 2px; min-height: 28px; font: 600 13px \"Segoe UI\"; }"
         "QPushButton:hover { color: #5aa6f0; }"));
     auto* title = new QLabel(QStringLiteral("Sync"), bar);
@@ -247,11 +247,11 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
         "QFrame#syncSignInCard QLineEdit { min-height: 38px; color: white;"
         " background: palette(alternate-base); border: 1px solid palette(midlight);"
         " border-radius: 14px; padding: 0 12px; font-size: 13px; }"
-        "QFrame#syncSignInCard QLineEdit:focus { border: 1px solid #3390ec; }"
+        "QFrame#syncSignInCard QLineEdit:focus { border: 1px solid #2672c8; }"
         "QFrame#syncSignInCard QPushButton#syncSignIn { min-height: 40px; color: white;"
-        " background: #3390ec; border: 1px solid #3390ec; border-radius: 16px;"
+        " background: #2672c8; border: 1px solid #2672c8; border-radius: 16px;"
         " font: 600 13px \"Segoe UI\"; }"
-        "QFrame#syncSignInCard QPushButton#syncSignIn:hover { background: #4ba0f5; }"
+        "QFrame#syncSignInCard QPushButton#syncSignIn:hover { background: #2168b8; }"
         "QFrame#syncSignInCard QPushButton#syncSignIn:disabled {"
         " color: palette(placeholder-text); background: palette(midlight); border-color: palette(midlight); }"));
     auto* cardLayout = new QVBoxLayout(signInCard_);
@@ -354,10 +354,10 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     run_->setCursor(Qt::PointingHandCursor);
     run_->setMinimumHeight(40);
     run_->setStyleSheet(QStringLiteral(
-        "QPushButton#syncRun { min-height: 40px; color: white; background: #3390ec;"
-        " border: 1px solid #3390ec; border-radius: 16px;"
+        "QPushButton#syncRun { min-height: 40px; color: white; background: #2672c8;"
+        " border: 1px solid #2672c8; border-radius: 16px;"
         " font: 600 13px \"Segoe UI\"; }"
-        "QPushButton#syncRun:hover { background: #4ba0f5; }"
+        "QPushButton#syncRun:hover { background: #2168b8; }"
         "QPushButton#syncRun:disabled { color: palette(placeholder-text); background: palette(midlight);"
         " border-color: palette(midlight); }"));
     workLayout->addWidget(run_);
@@ -380,7 +380,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     progress_->setStyleSheet(QStringLiteral(
         "QProgressBar { background: palette(alternate-base); border: none; border-radius: 3px;"
         " min-height: 6px; max-height: 6px; }"
-        "QProgressBar::chunk { background: #3390ec; border-radius: 3px; }"));
+        "QProgressBar::chunk { background: #2672c8; border-radius: 3px; }"));
     auto* progressLine = new QHBoxLayout();
     progressLine->setContentsMargins(0, 0, 0, 0);
     progressLine->setSpacing(8);
@@ -392,7 +392,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     stop_->setCursor(Qt::PointingHandCursor);
     stop_->setFocusPolicy(Qt::NoFocus);
     stop_->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #3390ec; background: transparent; border: none;"
+        "QPushButton { color: #2672c8; background: transparent; border: none;"
         " padding: 0 4px; min-height: 28px; font: 600 12px \"Segoe UI\"; }"
         "QPushButton:hover { color: #5aa6f0; }"));
     progressLine->addWidget(progressText_, 1);

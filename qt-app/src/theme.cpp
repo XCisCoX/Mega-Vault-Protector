@@ -179,7 +179,7 @@ QPalette lightPalette() {
     palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#636366")));
     palette.setColor(QPalette::Button, Qt::white);
     palette.setColor(QPalette::ButtonText, QColor(QStringLiteral("#1c1c1e")));
-    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#3390ec")));
+    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#2672c8")));
     palette.setColor(QPalette::HighlightedText, Qt::white);
     palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#8e8e93")));
     palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#8e8e93")));
@@ -199,8 +199,10 @@ QString themedStyleSheet(const QString& darkStyle) {
     static const QRegularExpression rgba(QStringLiteral(
         R"(rgba\(\s*255\s*,\s*255\s*,\s*255\s*(,\s*[^)]+)\))"),
         QRegularExpression::CaseInsensitiveOption);
+    // Accent backgrounds keep the accent in both themes; new accent hexes have to be
+    // listed here or the light theme's token pass would translate them like a surface.
     static const QRegularExpression accentBackground(QStringLiteral(
-        R"((?:^|[;{])\s*background(?:-color)?\s*:\s*#(?:3390ec|4ba0f5|4aa0f0|1d5b96)\b)"),
+        R"((?:^|[;{])\s*background(?:-color)?\s*:\s*#(?:2672c8|2168b8|3390ec|4ba0f5|4aa0f0|1d5b96)\b)"),
         QRegularExpression::CaseInsensitiveOption);
     // Resolve to concrete RGB values, not palette(text): Qt stylesheet
     // palettes can still contain the previous local stylesheet's white text

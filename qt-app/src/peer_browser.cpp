@@ -108,12 +108,12 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
         "QLabel#peerHint, QLabel#peerStatus { color: #8e8e93; }"
         "QListWidget { background: #000000; border: none; color: white; outline: none; }"
         "QListWidget::item { color: white; border-radius: 6px; }"
-        "QListWidget::item:selected { background: rgba(51, 144, 236, 110); }"
+        "QListWidget::item:selected { background: rgba(38, 114, 200, 110); }"
         "QPushButton { background: #1c1c1e; color: white; border: none; border-radius: 14px;"
         "  min-height: 34px; padding: 0 16px; }"
         "QPushButton:hover { background: #2c2c2e; }"
         "QPushButton:disabled { color: #636366; }"
-        "QPushButton#peerCopy { background: #3390ec; font-weight: 600; }"
+        "QPushButton#peerCopy { background: #2672c8; font-weight: 600; }"
         "QPushButton#peerCopy:hover { background: #4aa0f0; }"
         "QPushButton#peerUnlink { background: #2c1518; color: #ff6b6b; }"));
 

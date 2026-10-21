@@ -891,7 +891,7 @@ public:
         slider_->setFocusPolicy(Qt::NoFocus);
         slider_->setStyleSheet(QStringLiteral(
             "QSlider::groove:horizontal { height: 4px; background: #3a3a3c; border-radius: 2px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #2672c8; border-radius: 2px; }"
             "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; "
             "background: white; border-radius: 6px; }"));
         layout->addWidget(readout_);
@@ -1159,7 +1159,7 @@ public:
         timeline_->setFixedHeight(16);
         timeline_->setStyleSheet(QStringLiteral(
             "QSlider::groove:horizontal { height: 3px; background: #3a3a3c; border-radius: 1px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 1px; }"
+            "QSlider::sub-page:horizontal { background: #2672c8; border-radius: 1px; }"
             "QSlider::handle:horizontal { width: 10px; height: 10px; margin: -4px 0; "
             "background: white; border-radius: 5px; }"));
         column->addSpacing(4);
@@ -1182,7 +1182,7 @@ public:
         volume_->setFocusPolicy(Qt::NoFocus);
         volume_->setStyleSheet(QStringLiteral(
             "QSlider::groove:horizontal { height: 4px; background: #3a3a3c; border-radius: 2px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #2672c8; border-radius: 2px; }"
             "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; "
             "background: white; border-radius: 6px; }"));
         controls->addWidget(previous_);

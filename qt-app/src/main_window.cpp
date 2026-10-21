@@ -923,7 +923,7 @@ public:
             const bool selected = option.state.testFlag(QStyle::State_Selected);
             const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
             if (selected) {
-                painter->fillRect(row, QColor(51, 144, 236, 70));
+                painter->fillRect(row, QColor(38, 114, 200, 70));
             } else if (hovered) {
                 painter->fillRect(row, isDarkTheme() ? QColor(255, 255, 255, 16) : QColor(0, 0, 0, 12));
             }
@@ -1081,7 +1081,7 @@ public:
         }
         if (selected) {
             painter->fillRect(tile, QColor(0, 0, 0, 70));
-            painter->setPen(QPen(QColor(51, 144, 236), 3));
+            painter->setPen(QPen(QColor(38, 114, 200), 3));
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(tile.adjusted(1, 1, -2, -2));
         }
@@ -1412,9 +1412,9 @@ public:
             "  color: #f2f2f7; background: transparent; border: none;"
             "  border-radius: 10px; text-align: left; padding: 0 16px;"
             "  min-height: 36px; font-size: 10pt; }"
-            "QPushButton#menuCommand:hover, QPushButton#menuDanger:hover {"
-            "  background: #3390ec; color: #ffffff; }"
-            "QPushButton#menuDanger { color: #ff453a; }"));
+            "QPushButton#menuCommand:hover { background: #2672c8; color: #ffffff; }"
+            "QPushButton#menuDanger { color: #ff453a; }"
+            "QPushButton#menuDanger:hover { background: rgba(255, 69, 58, 42); }"));
     }
 
     QPushButton* addCommand(const QString& text, const int result, const bool danger = false) {
@@ -1545,7 +1545,7 @@ public:
         icons::withText(back_, QStringLiteral("arrow-left"));
         back_->setCursor(Qt::PointingHandCursor);
         back_->setStyleSheet(QStringLiteral(
-            "QPushButton { color: #3390ec; background: transparent; border: none;"
+            "QPushButton { color: #2672c8; background: transparent; border: none;"
             " font: 600 13px \"Segoe UI\"; padding: 4px 2px; }"));
         title_ = new QLabel(this);
         title_->setStyleSheet(QStringLiteral(
@@ -1557,7 +1557,7 @@ public:
         icons::withText(save_, QStringLiteral("check"));
         save_->setCursor(Qt::PointingHandCursor);
         save_->setStyleSheet(QStringLiteral(
-            "QPushButton { color: white; background: #3390ec; border: none; border-radius: 8px;"
+            "QPushButton { color: white; background: #2672c8; border: none; border-radius: 8px;"
             " font: 600 13px \"Segoe UI\"; padding: 6px 14px; }"
             "QPushButton:disabled { background: #2c2c2e; color: #8e8e93; }"));
         bar->addWidget(save_);
@@ -1570,7 +1570,7 @@ public:
         editor_->setStyleSheet(QStringLiteral(
             "QPlainTextEdit { background: #161618; color: #f2f2f7; border: none; border-radius: 12px;"
             " font: 13px \"Cascadia Mono\", Consolas, monospace; padding: 16px;"
-            " selection-background-color: #3390ec; }"));
+            " selection-background-color: #2672c8; }"));
         column->addWidget(editor_, 1);
     }
 
@@ -2424,14 +2424,14 @@ QWidget* MainWindow::buildUnlockedPage() {
         button->setToolTip(tip);
         button->setStyleSheet(filled
             ? QStringLiteral(
-                "QPushButton { background: #3390ec; border: none; border-radius: 18px; padding: 0; min-height: 36px; max-height: 36px; }"
-                "QPushButton:hover { background: #4ba0f5; }"
-                "QPushButton:disabled { background: rgba(51, 144, 236, 90); }")
+                "QPushButton { background: #2672c8; border: none; border-radius: 18px; padding: 0; min-height: 36px; max-height: 36px; }"
+                "QPushButton:hover { background: #2168b8; }"
+                "QPushButton:disabled { background: rgba(38, 114, 200, 90); }")
             : QStringLiteral(
                 "QPushButton { background: transparent; border: none; border-radius: 18px; padding: 0; min-height: 36px; max-height: 36px; }"
                 "QPushButton:hover { background: rgba(255, 255, 255, 28); }"
                 "QPushButton:disabled { background: transparent; }"
-                "QPushButton[sharing=\"true\"] { background: rgba(51, 144, 236, 90); }"));
+                "QPushButton[sharing=\"true\"] { background: rgba(38, 114, 200, 90); }"));
         return button;
     };
     // Offered only once GitHub has a newer release, the way the phone puts a
@@ -2473,7 +2473,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     // A section entry, drawn like the other text actions in the chrome, not a
     // boxed button between the round icons.
     syncButton->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #3390ec; background: transparent; border: none;"
+        "QPushButton { color: #2672c8; background: transparent; border: none;"
         " padding: 0 10px; min-height: 32px; max-height: 32px;"
         " font: 600 13px \"Segoe UI\"; }"
         "QPushButton:hover { color: #5aa6f0; background: rgba(255, 255, 255, 18);"
@@ -2530,9 +2530,9 @@ QWidget* MainWindow::buildUnlockedPage() {
     const QString modeStyle = QStringLiteral(
         "QPushButton { min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px;"
         " padding: 0; border-radius: 16px; background: transparent; border: none; }"
-        "QPushButton:checked { background: rgba(51, 144, 236, 90); }"
+        "QPushButton:checked { background: rgba(38, 114, 200, 90); }"
         "QPushButton:hover { background: rgba(255, 255, 255, 18); }"
-        "QPushButton:checked:hover { background: rgba(51, 144, 236, 120); }");
+        "QPushButton:checked:hover { background: rgba(38, 114, 200, 120); }");
     int modeId = 0;
     for (auto* button : {detailsMode, iconsMode, listMode}) {
         button->setIconSize(QSize(18, 18));
@@ -2549,7 +2549,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     sortButton_->setCursor(Qt::PointingHandCursor);
     sortButton_->setStyleSheet(QStringLiteral(
         "QPushButton { min-height: 32px; padding: 0 12px; border-radius: 16px;"
-        " background: transparent; border: none; color: #3390ec; }"));
+        " background: transparent; border: none; color: #2672c8; }"));
     auto* filterRow = new QHBoxLayout();
     filterRow->setSpacing(8);
     filterRow->addWidget(searchEdit_, 1);
@@ -2560,6 +2560,11 @@ QWidget* MainWindow::buildUnlockedPage() {
 
     crumbHost_ = new QWidget(toolbar);
     crumbHost_->setStyleSheet(QStringLiteral("background: transparent;"));
+    // The bar's height is computed from this row's size hint (layoutLibraryChrome). A
+    // rebuild empties the row while it recreates the crumbs, and a hint measured in that
+    // window came back degenerate: the bar was then resized below its children's minimums
+    // and the path bar was clipped. The floor keeps the row's contribution stable.
+    crumbHost_->setMinimumHeight(40);
     crumbLayout_ = new QHBoxLayout(crumbHost_);
     crumbLayout_->setContentsMargins(0, 0, 0, 0);
     crumbLayout_->setSpacing(2);
@@ -2754,7 +2759,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     transfersButton_->setFlat(true);
     transfersButton_->setCursor(Qt::PointingHandCursor);
     transfersButton_->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #3390ec; background: transparent; font-weight: 600; }"
+        "QPushButton { color: #2672c8; background: transparent; font-weight: 600; }"
         "QPushButton:hover { color: #5aa6f0; }"));
     transfersButton_->hide();
     connect(transfersButton_, &QPushButton::clicked, this, [this] { showTransfers(); });
@@ -2931,7 +2936,23 @@ void MainWindow::layoutLibraryChrome() {
     if (page == nullptr || libraryTop_ == nullptr || libraryBottom_ == nullptr) {
         return;
     }
-    const int topHeight = std::max(libraryTop_->sizeHint().height(), 44);
+    // The bar's height is computed from a size *hint*, and a hint taken while one of its rows is
+    // momentarily empty comes back short. Qt then clips every row in the bar rather than laying it
+    // out smaller, so the title, the search field and the path collapse together, and the bar stays
+    // that way until some later pass happens to re-lay it out -- which is why a second drag can put
+    // it back. A drag rewrites the crumbs' stylesheets on every move, a rebuild empties the crumb
+    // row, and either can catch the hint in that window.
+    //
+    // So the barrier is removed from the hint: the bar is never allowed below what its own layout
+    // requires, measured after activating it. Rows that are hidden do not count, so the bar still
+    // shrinks when a row legitimately goes away.
+    int required = 0;
+    if (auto* layout = libraryTop_->layout()) {
+        layout->activate();
+        required = layout->sizeHint().height();
+        libraryTop_->setMinimumHeight(required);
+    }
+    const int topHeight = std::max({required, libraryTop_->sizeHint().height(), 44});
     const int bottomHeight = std::max(libraryBottom_->sizeHint().height(), 28);
     const bool details = galleryStack_->currentWidget() == detailsTree_;
     const bool paneVisible = folderPane_ != nullptr && folderPane_->isVisibleTo(page);
@@ -5563,7 +5584,7 @@ bool MainWindow::galleryHasFocus() const {
 
 void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on) {
     dropHighlight_ = on ? folder_id : -1;
-    const QBrush mark(QColor(51, 144, 236, 110));
+    const QBrush mark(QColor(38, 114, 200, 110));
     if (detailsTree_ != nullptr) {
         for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
             auto* item = detailsTree_->topLevelItem(index);
@@ -5593,7 +5614,7 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
                 const auto id = item->data(0, Qt::UserRole).toLongLong();
                 const bool hit = on && id == folder_id;
                 const bool current = id == currentFolderId_;
-                item->setBackground(0, hit ? mark : (current ? QBrush(QColor(51, 144, 236, 70)) : QBrush()));
+                item->setBackground(0, hit ? mark : (current ? QBrush(QColor(38, 114, 200, 70)) : QBrush()));
                 paint(item);
             }
         };
@@ -5604,13 +5625,15 @@ void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on
         for (auto* button : buttons) {
             const bool hit = on && button->property("mvpDropFolder").isValid()
                 && button->property("mvpDropFolder").toLongLong() == folder_id;
-            const bool current = button->property("mvpDropFolder").toLongLong() == currentFolderId_;
-            button->setStyleSheet(hit
-                ? QStringLiteral("QPushButton { color: white; background: rgba(51, 144, 236, 150);"
-                    " border: none; border-radius: 8px; padding: 2px 6px; }")
-                : (current
-                    ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
-                    : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }")));
+            if (button->property("dropTarget").toBool() == hit) {
+                continue;
+            }
+            // Property plus repolish: the stylesheet is never replaced mid-drag, so the
+            // crumb keeps the height the path bar's row was laid out with.
+            button->setProperty("dropTarget", hit);
+            button->style()->unpolish(button);
+            button->style()->polish(button);
+            button->update();
         }
     }
 }
@@ -6005,7 +6028,7 @@ void MainWindow::rebuildFolderTree() {
             open = hit;
         }
     }
-    const QBrush mark(QColor(51, 144, 236, 70));
+    const QBrush mark(QColor(38, 114, 200, 70));
     for (auto* item : {root, open}) {
         if (item != nullptr && item->data(0, Qt::UserRole).toLongLong() == currentFolderId_) {
             item->setBackground(0, mark);
@@ -6222,6 +6245,18 @@ void MainWindow::openFolder(const std::int64_t folder_id) {
     refreshGallery();
 }
 
+namespace {
+// The path bar's crumbs share one stylesheet; the states are properties so that a drag
+// highlight cannot rewrite it. min-height is explicit because a widget stylesheet that
+// replaced this one used to drop the application's height rule, collapsing the row.
+const QString kCrumbStyle = QStringLiteral(
+    "QPushButton { color: #8ec8ff; background: transparent; border: none;"
+    " padding: 2px 4px; min-height: 36px; }"
+    "QPushButton[crumbCurrent=\"true\"] { color: white; }"
+    "QPushButton[dropTarget=\"true\"] { color: white;"
+    " background: rgba(38, 114, 200, 150); border-radius: 8px; }");
+} // namespace
+
 void MainWindow::rebuildBreadcrumb() {
     if (crumbLayout_ == nullptr) {
         return;
@@ -6236,10 +6271,14 @@ void MainWindow::rebuildBreadcrumb() {
         button->setCursor(Qt::PointingHandCursor);
         button->setAcceptDrops(true);
         button->setProperty("mvpDropFolder", static_cast<qlonglong>(id));
+        button->setProperty("crumbCurrent", current);
+        button->setProperty("dropTarget", false);
         button->installEventFilter(this);
-        button->setStyleSheet(current
-            ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
-            : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }"));
+        // One stylesheet for every crumb, switched by properties rather than replaced by
+        // setStyleSheet(). Replacing the stylesheet of a live button changes its size hint:
+        // the header then shrinks and clips the path bar. The explicit min-height keeps the
+        // row's height independent of whether an application-level rule survives a restyle.
+        button->setStyleSheet(kCrumbStyle);
         connect(button, &QPushButton::clicked, this, [this, id] { openFolder(id); });
         crumbLayout_->addWidget(button);
     };
@@ -6268,6 +6307,8 @@ void MainWindow::rebuildBreadcrumb() {
             chain[static_cast<std::size_t>(index)].first, index == 0);
     }
     crumbLayout_->addStretch(1);
+    // The bar's geometry was computed from a hint taken before these crumbs existed.
+    layoutLibraryChrome();
 }
 
 void MainWindow::beginNewFolder() {
@@ -8446,7 +8487,7 @@ void MainWindow::approvePeer(const QString& phone, std::function<void(bool)> ans
         "QFrame#approvalCard { background: #161618; border-radius: 16px; }"
         "QLabel { color: white; background: transparent; }"
         "QLabel#approvalBody { color: #8e8e93; }"
-        "QPushButton#approvalAllow { background: #3390ec; color: white; border: none;"
+        "QPushButton#approvalAllow { background: #2672c8; color: white; border: none;"
         "  border-radius: 12px; min-height: 36px; padding: 0 18px; font-weight: 600; }"
         "QPushButton#approvalDecline { background: transparent; color: #ff6b6b; border: none;"
         "  min-height: 36px; padding: 0 12px; }"));
@@ -8693,7 +8734,7 @@ void MainWindow::showTransfers() {
             "QFrame#transferPanel { background: #101014; border: 1px solid #2c2c2e; border-radius: 16px; }"
             "QFrame#transferPanel QLabel { color: white; background: transparent; }"
             "QFrame#transferPanel QPushButton { color: #ff6b6b; background: transparent; border: none; }"
-            "QFrame#transferPanel QPushButton#clearDone, QFrame#transferPanel QPushButton#transferClose { color: #3390ec; }"));
+            "QFrame#transferPanel QPushButton#clearDone, QFrame#transferPanel QPushButton#transferClose { color: #2672c8; }"));
         auto* layout = new QVBoxLayout(panel);
         layout->setContentsMargins(16, 14, 16, 14);
         auto* titleRow = new QHBoxLayout();

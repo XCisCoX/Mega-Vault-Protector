@@ -1,4 +1,5 @@
 // Large-library regression against the actual gallery widgets and decorators.
+#include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/theme.hpp"
@@ -723,6 +724,68 @@ struct GalleryPerformanceTestAccess {
             (long long)stage.elapsed());
         return 0;
     }
+
+    // The library chrome bar stacks three rows: title, filter (search, sort, view modes, tags) and
+    // the breadcrumb. layoutLibraryChrome() sizes the bar from a size *hint*, so a hint taken while
+    // one row is momentarily empty is short, and Qt then clips every row in the bar -- the title,
+    // the search field and the path all collapse together. Measured here rather than eyeballed.
+    static int libraryChrome() {
+        const auto scratch = qEnvironmentVariable("TMPDIR", QDir::tempPath());
+        QTemporaryDir temp(scratch + QStringLiteral("/MVP-chrome-XXXXXX"));
+        core::Argon2Parameters parameters;
+        parameters.memory_kib = 8192;
+        parameters.iterations = 1;
+        auto created = core::Vault::create(
+            std::filesystem::path(temp.path().toStdWString()) / L"vault", "chrome fixture",
+            parameters);
+        if (!created) return 2;
+        MainWindow window;
+        window.vault_ = std::make_shared<core::Vault>(std::move(created.value()));
+        for (int i = 1; i <= 3; ++i) {
+            QImage image(64, 48, QImage::Format_RGB32);
+            image.fill(QColor::fromHsv((i * 47) % 360, 150, 200));
+            const auto path = temp.path() + QStringLiteral("/item-%1.jpg").arg(i);
+            if (!image.save(path, "JPEG", 85)) return 3;
+            if (!window.vault_->import_file(std::filesystem::path(path.toStdWString()))) return 4;
+        }
+        window.resize(1100, 760);
+        window.pages_->setCurrentIndex(2);
+        window.contentStack_->setCurrentWidget(window.pages_);
+        window.galleryStack_->setCurrentWidget(window.iconList_);
+        window.show();
+        QApplication::processEvents();
+        window.refreshGallery();
+        drain(window);
+
+        // What the bar needs, versus what it was given. totalMinimumSize() is the layout's own
+        // answer, so it does not depend on any row being populated at the moment of measuring.
+        int clipped = 0;
+        const auto measure = [&window, &clipped](const char* when) {
+            auto* layout = window.libraryTop_->layout();
+            const int needed = layout != nullptr ? layout->totalMinimumSize().height() : 0;
+            const int bar = window.libraryTop_->height();
+            const bool ok = bar >= needed;
+            if (!ok) ++clipped;
+            std::printf("  %-20s bar=%3d needed=%3d %s\n", when, bar, needed,
+                ok ? "ok" : "CLIPPED");
+            return ok;
+        };
+        if (!measure("after refresh")) return 11;
+        for (const int width : {1400, 900, 1200, 760}) {
+            window.resize(width, 760);
+            QApplication::processEvents();
+            if (!measure("after resize")) return 12;
+        }
+        // The breadcrumb rebuild is the state that used to leave the bar short: it empties the
+        // crumb row, the hint is taken then, and nothing re-lays the bar afterwards.
+        window.rebuildBreadcrumb();
+        QApplication::processEvents();
+        if (!measure("after crumb rebuild")) return 13;
+        if (clipped != 0) return 14;
+        std::printf("PASS library chrome keeps its rows at every width\n");
+        return 0;
+    }
+
     static int run() {
         if (qEnvironmentVariableIsSet("MVP_VAULT_CREATION_TEST")) return creation();
         if (qEnvironmentVariableIsSet("MVP_PLUGIN_FOLDER_TEST")) return pluginFolder();
@@ -943,6 +1006,8 @@ int main(int argc, char** argv) {
         QSettings().setValue(QStringLiteral("appearance/theme"), qEnvironmentVariable("MVP_GALLERY_THEME"));
     }
     videovault::app::initializeTheme(app);
+    if (qEnvironmentVariableIsSet("MVP_LIBRARY_CHROME_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::libraryChrome();
     if (qEnvironmentVariableIsSet("MVP_LIBRARY_COMMANDS_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::libraryCommands();
     if (qEnvironmentVariableIsSet("MVP_SHARE_UNLOCK_TEST"))
