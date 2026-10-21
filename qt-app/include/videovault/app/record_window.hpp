@@ -110,9 +110,13 @@ private:
     void removeEntry(int entryIndex);
     void moveEntry(int entryIndex, int delta);
 
-    // Captures an object row as a template item: the authoring half, so a template can be
-    // made from a structure the user already has instead of by editing JSON.
+    // Captures an object row as a template: one part of a record.
     void beginSaveAsTemplate(const NodePath& path);
+    // Captures a whole record as a template. A record here is one entry, not the document.
+    void beginSaveAsTemplateEntry(int entryIndex);
+    // Asks for the template's name, then writes it to the store.
+    void promptSaveTemplate(const RecordEntry& entry, const QString& defaultName);
+    void writeTemplate(const QString& name, const RecordEntry& entry);
     // Inserts a template's structure into an object row, as a new nested object.
     void beginInsertTemplate(const NodePath& parent);
     void promptInsertTemplate(const NodePath& parent, const RecordEntry& templateEntry);

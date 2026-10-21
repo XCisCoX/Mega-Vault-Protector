@@ -1,10 +1,11 @@
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/in_window_sheet.hpp"
+#include "videovault/app/plugin_host.hpp"
 #include "videovault/app/proxy_settings.hpp"
+#include "videovault/app/record_document.hpp"
 #include <QDialog>
 #include <QIntValidator>
 #include <QUuid>
-#include "videovault/app/in_window_sheet.hpp"
-#include "videovault/app/plugin_host.hpp"
 #include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
 #include <QtConcurrent/QtConcurrentRun>
@@ -240,6 +241,22 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     auto* plugins = section(QStringLiteral("Extensions"), QStringLiteral("Local sandboxed tools and permission-controlled providers."));
     if (!pluginHost) pluginHost = new PluginHost({}, this);
     plugins->addWidget(pluginHost->manager(vault_, this));
+
+    auto* templates = section(QStringLiteral("Record templates"),
+        QStringLiteral("Structures to start a record from. They are kept here rather than in "
+                       "the library, so they never look like files."));
+    auto* templateCard = card(templates);
+    templateEmpty_ = textLabel(
+        QStringLiteral("No templates yet. In a record, use the bookmark-plus action on a "
+                       "record or on one of its objects to save one."),
+        this, true);
+    templateEmpty_->setObjectName(QStringLiteral("templatesEmptyState"));
+    templateCard->addWidget(templateEmpty_);
+    auto* templateHost = new QWidget(this);
+    templateRows_ = new QVBoxLayout(templateHost);
+    templateRows_->setContentsMargins(0, 0, 0, 0);
+    templateRows_->setSpacing(6);
+    templateCard->addWidget(templateHost);
 
     auto* security = section(QStringLiteral("Security"), QStringLiteral("Protect your vault and control when it locks."));
     auto* lockCard = card(security);
@@ -490,6 +507,90 @@ void SettingsDialog::setStatus(const QString& message, bool error) {
     status_->setText(message); status_->setVisible(!message.isEmpty());
     status_->setAccessibleName(error ? QStringLiteral("Settings error") : QStringLiteral("Settings status"));
 }
+void SettingsDialog::showEvent(QShowEvent* event) {
+    // The page outlives sessions of use, and a template can be saved from the record editor
+    // while it is hidden, so the list is rebuilt every time it comes back.
+    reloadTemplates();
+    QWidget::showEvent(event);
+}
+
+void SettingsDialog::reloadTemplates() {
+    if (templateRows_ == nullptr || vault_ == nullptr) {
+        return;
+    }
+    while (auto* entry = templateRows_->takeAt(0)) {
+        if (auto* widget = entry->widget()) {
+            widget->deleteLater();
+        }
+        delete entry;
+    }
+
+    // The store folder, then its items. Nothing else counts as a template.
+    std::int64_t folderId = 0;
+    if (const auto folders = vault_->list_folders(); folders) {
+        for (const auto& folder : folders.value()) {
+            if (isTemplateFolderName(QString::fromStdString(folder.name))) {
+                folderId = folder.id;
+                break;
+            }
+        }
+    }
+    std::vector<core::VideoInfo> items;
+    if (folderId != 0) {
+        if (const auto listed = vault_->list_videos(); listed) {
+            for (const auto& item : listed.value()) {
+                if (item.folder_id == folderId) {
+                    items.push_back(item);
+                }
+            }
+        }
+    }
+    templateEmpty_->setVisible(items.empty());
+    for (const auto& item : items) {
+        auto* row = new QWidget(this);
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(8);
+        const QString name = QString::fromStdString(item.display_name);
+        auto* label = new QLabel(name, row);
+        label->setWordWrap(true);
+        layout->addWidget(label, 1);
+        auto* edit = action(QStringLiteral("Edit"), QStringLiteral("editTemplate"), row);
+        auto* remove = action(QStringLiteral("Delete"), QStringLiteral("deleteTemplate"), row);
+        layout->addWidget(edit);
+        layout->addWidget(remove);
+        const auto id = item.id;
+        connect(edit, &QPushButton::clicked, this,
+            [this, id, name] { emit openTemplateRequested(qlonglong(id), name); });
+        connect(remove, &QPushButton::clicked, this,
+            [this, id, name] { removeTemplate(id, name); });
+        templateRows_->addWidget(row);
+    }
+}
+
+void SettingsDialog::removeTemplate(const qint64 templateId, const QString& name) {
+    if (vault_ == nullptr) {
+        return;
+    }
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("Delete template"));
+    sheet.setMessage(QStringLiteral("\"%1\" is removed. Records already made from it keep "
+                                    "their fields.")
+                         .arg(name));
+    sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    sheet.addButton(QStringLiteral("Delete"), 1, true, QStringLiteral("trash"));
+    if (sheet.run() != 1) {
+        return;
+    }
+    if (const auto removed = vault_->remove_video(templateId); !removed) {
+        setStatus(QStringLiteral("The template could not be deleted."), true);
+        return;
+    }
+    setStatus(QStringLiteral("\"%1\" deleted.").arg(name), false);
+    reloadTemplates();
+    emit settingsChanged();
+}
+
 void SettingsDialog::reloadTags() {
     const QSignalBlocker block(tagList_);
     tagList_->clear(); renameTagButton_->setEnabled(false); removeTagButton_->setEnabled(false);

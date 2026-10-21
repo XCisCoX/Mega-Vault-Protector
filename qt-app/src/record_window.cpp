@@ -728,6 +728,8 @@ void RecordWindow::buildEntry(const int entryIndex, QVBoxLayout* layout) {
         QStringLiteral("arrow-up"), QStringLiteral("Move this record up"), card);
     auto* down = quietIconButton(
         QStringLiteral("arrow-down"), QStringLiteral("Move this record down"), card);
+    auto* asTemplate = quietIconButton(QStringLiteral("bookmark-plus"),
+        QStringLiteral("Save this record as a template"), card);
     auto* remove = quietIconButton(
         QStringLiteral("trash"), QStringLiteral("Delete this record"), card);
     up->setEnabled(entryIndex > 0);
@@ -736,9 +738,10 @@ void RecordWindow::buildEntry(const int entryIndex, QVBoxLayout* layout) {
     header->addWidget(up);
     header->addWidget(down);
     header->addWidget(remove);
+    header->addWidget(asTemplate);
     header->addWidget(addField);
     // The card keeps one visible action; the rest show on hover like the rows.
-    for (auto* button : {rename, up, down, remove}) {
+    for (auto* button : {rename, up, down, asTemplate, remove}) {
         card->actions.append(button);
     }
     card->endHover();
@@ -753,6 +756,7 @@ void RecordWindow::buildEntry(const int entryIndex, QVBoxLayout* layout) {
 
     if (!editable_) {
         addField->setEnabled(false);
+        asTemplate->setEnabled(false);
         rename->setEnabled(false);
         up->setEnabled(false);
         down->setEnabled(false);
@@ -760,6 +764,8 @@ void RecordWindow::buildEntry(const int entryIndex, QVBoxLayout* layout) {
     }
 
     connect(addField, &QPushButton::clicked, this, [this, bodyPath] { addChild(bodyPath); });
+    connect(asTemplate, &QPushButton::clicked, this,
+        [this, entryIndex] { beginSaveAsTemplateEntry(entryIndex); });
     connect(rename, &QPushButton::clicked, this, [this, entryIndex] { renameEntry(entryIndex); });
     connect(up, &QPushButton::clicked, this, [this, entryIndex] { moveEntry(entryIndex, -1); });
     connect(down, &QPushButton::clicked, this, [this, entryIndex] { moveEntry(entryIndex, 1); });
@@ -1218,25 +1224,18 @@ bool RecordWindow::confirm(const QString& heading, const QString& message, const
 // Structure changes
 // ---------------------------------------------------------------------------
 
-void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
-    if (!editable_ || vault_ == nullptr) {
-        return;
-    }
-    RecordNode* node = resolve(path);
-    QString key;
-    resolveParent(path, &key);
-    if (node == nullptr || node->type != ValueType::Object) {
-        return;
-    }
-
+// Prompts for a name, then hands the entry to writeTemplate(). Both capture points -- an
+// object row and a whole record -- come through here, so they cannot drift apart.
+void RecordWindow::promptSaveTemplate(const RecordEntry& entry, const QString& defaultName) {
     InWindowSheet sheet(this);
     sheet.setTitle(QStringLiteral("Save as template"));
-    sheet.setMessage(QStringLiteral("This object becomes a template. It is copied, so the "
-                                    "record keeps its own fields and stays a record."));
-    auto* nameEdit = sheet.addTextEntry(QLineEdit::Normal, key, QStringLiteral("Template name"));
+    sheet.setMessage(QStringLiteral("This becomes a template. It is copied, so the record "
+                                    "keeps its own fields and stays a record."));
+    auto* nameEdit = sheet.addTextEntry(QLineEdit::Normal, defaultName,
+        QStringLiteral("Template name"));
     auto* hint = new QLabel(QStringLiteral(
-        "Templates appear under New from template in the library, and under Insert template "
-        "on any object row."));
+        "Templates are kept in one place, not in the library. Find them under New from "
+        "template, and under Insert template on any object row."));
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
     sheet.body()->addWidget(hint);
@@ -1251,20 +1250,20 @@ void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
     if (sheet.run() != 1) {
         return;
     }
-    const QString name = nameEdit->text().trimmed();
+    writeTemplate(nameEdit->text().trimmed(), entry);
+}
 
-    RecordEntry entry;
-    // The key the structure had becomes the default name on insert, and the placeholder
-    // title when the template is used as a whole record.
-    entry.title = key;
-    entry.body = *node;          // a copy: the record keeps what it has
+void RecordWindow::writeTemplate(const QString& name, const RecordEntry& entry) {
+    if (vault_ == nullptr || name.isEmpty()) {
+        return;
+    }
     RecordDocument document;
     document.isTemplate = true;
     document.templateName = name;
     document.entries.push_back(entry);
     const QByteArray bytes = serializeRecord(document);
 
-    setStatus(QStringLiteral("Saving the template…"), false);
+    setStatus(QStringLiteral("Saving the template\u2026"), false);
     const auto vault = vault_;
     auto* watcher = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
     connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, name] {
@@ -1290,11 +1289,11 @@ void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
             }
         }
         if (folder_id == 0) {
-            const auto created = vault->create_folder(0, templateFolderName().toStdString());
-            if (!created) {
-                return std::make_shared<core::Result<std::int64_t>>(created.error());
+            const auto made = vault->create_folder(0, templateFolderName().toStdString());
+            if (!made) {
+                return std::make_shared<core::Result<std::int64_t>>(made.error());
             }
-            folder_id = created.value();
+            folder_id = made.value();
         }
         const std::span<const unsigned char> content(
             reinterpret_cast<const unsigned char*>(bytes.constData()),
@@ -1302,6 +1301,35 @@ void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
         return std::make_shared<core::Result<std::int64_t>>(
             vault->import_bytes(content, name.toStdString(), folder_id));
     }));
+}
+
+void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
+    if (!editable_ || vault_ == nullptr) {
+        return;
+    }
+    RecordNode* node = resolve(path);
+    QString key;
+    resolveParent(path, &key);
+    if (node == nullptr || node->type != ValueType::Object) {
+        return;
+    }
+    RecordEntry entry;
+    // The key the structure had becomes the default insert name, and the placeholder title
+    // when the template is used as a whole record.
+    entry.title = key;
+    entry.body = *node;          // a copy: the record keeps what it has
+    promptSaveTemplate(entry, key);
+}
+
+void RecordWindow::beginSaveAsTemplateEntry(const int entryIndex) {
+    if (!editable_ || vault_ == nullptr || entryIndex < 0
+        || entryIndex >= document_.entries.size()) {
+        return;
+    }
+    const RecordEntry& entry = document_.entries.at(entryIndex);
+    RecordEntry copy = entry;
+    copy.generated.clear();      // a record has no generators; it is defaults only
+    promptSaveTemplate(copy, entry.title);
 }
 
 void RecordWindow::beginInsertTemplate(const NodePath& parent) {

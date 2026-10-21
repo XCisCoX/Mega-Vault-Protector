@@ -4841,6 +4841,11 @@ void MainWindow::openSettings() {
             update();
         });
         connect(page, &SettingsDialog::updateCheckRequested, this, [this] { beginUpdateCheck(true); });
+        // A template is a record document, so the record editor is the editor for it.
+        connect(page, &SettingsDialog::openTemplateRequested, this,
+            [this](qlonglong id, const QString& name) {
+                beginRecord(static_cast<std::int64_t>(id), name);
+            });
         connect(page, &SettingsDialog::updatePreferencesChanged, this, [this] { configureUpdateChecks(); });
         connect(page, &SettingsDialog::passwordChanged, this, [this] {
             // The sync key comes from the vault password, so every engine and

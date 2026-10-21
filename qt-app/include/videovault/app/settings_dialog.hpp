@@ -20,6 +20,8 @@ template <typename T>
 class Result;
 } // namespace videovault::core
 
+class QVBoxLayout;
+
 namespace videovault::app {
 class PluginHost;
 
@@ -44,9 +46,15 @@ signals:
     // The vault password changed, so sync state was re-sealed and the open
     // engine holds stale keys: the host must lock sync until the next unlock.
     void passwordChanged();
+    // The user asked to edit a template, so the host should open it in the record editor.
+    void openTemplateRequested(qlonglong templateId, const QString& name);
 
 private:
     void reloadTags();
+    // Record templates: kept in the store folder, out of the library, managed here.
+    void reloadTemplates();
+    void removeTemplate(qint64 templateId, const QString& name);
+    void showEvent(QShowEvent* event) override;
     void beginPasswordChange();
     void finishPasswordChange();
     void addTag();
@@ -68,6 +76,10 @@ private:
 
     // Tags section.
     QListWidget* tagList_{nullptr};
+
+    // Record templates section.
+    QVBoxLayout* templateRows_{nullptr};
+    QLabel* templateEmpty_{nullptr};
     QLineEdit* newTagEdit_{nullptr};
     QPushButton* addTagButton_{nullptr};
     QPushButton* renameTagButton_{nullptr};
