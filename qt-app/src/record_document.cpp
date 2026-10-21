@@ -5,6 +5,10 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QDate>
+#include <QDir>
+#include <QFile>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
@@ -134,6 +138,10 @@ QString pointerEscape(QString token) {
     token.replace(QLatin1Char('/'), QStringLiteral("~1"));
     return token;
 }
+
+// Defined with the template helpers below; parseRecord uses it to check that a
+// generator's path really names a string.
+RecordNode* nodeAtPointer(RecordNode& root, const QString& pointer);
 
 QString pointerUnescape(QString token) {
     token.replace(QStringLiteral("~1"), QStringLiteral("/"));
@@ -433,6 +441,11 @@ bool looksLikeRecord(const QByteArray& head) {
     return head.mid(start, marker.size()) == marker;
 }
 
+bool looksLikeTemplate(const QByteArray& head) {
+    // The name is optional and may follow, so only the flag is required here.
+    return looksLikeRecord(head) && head.contains("\"template\":true");
+}
+
 int recordFormatVersion(const QByteArray& bytes) {
     QJsonObject root;
     int version = 0;
@@ -502,6 +515,14 @@ QByteArray serializeRecord(const RecordDocument& document) {
 
     QString json = QStringLiteral("{\"mvp_record\":");
     json += QString::number(kRecordFormatVersion);
+    if (sorted.isTemplate) {
+        json += QStringLiteral(",\"template\":true");
+        if (!sorted.templateName.trimmed().isEmpty()) {
+            json += QStringLiteral(",\"name\":\"");
+            json += escapeJson(sorted.templateName.trimmed());
+            json += QLatin1Char('"');
+        }
+    }
     json += QStringLiteral(",\"entries\":[");
     for (int index = 0; index < sorted.entries.size(); ++index) {
         if (index > 0) {
@@ -528,6 +549,27 @@ QByteArray serializeRecord(const RecordDocument& document) {
             }
             json += QLatin1Char(']');
         }
+        // Ordinary records have no generators, so this key never appears in one.
+        if (!entry.generated.isEmpty()) {
+            json += QStringLiteral(",\"generate\":[");
+            for (int generator = 0; generator < entry.generated.size(); ++generator) {
+                if (generator > 0) {
+                    json += QLatin1Char(',');
+                }
+                const GeneratedValue& value = entry.generated.at(generator);
+                json += QStringLiteral("{\"path\":\"");
+                json += escapeJson(value.pointer);
+                json += QStringLiteral("\",\"kind\":\"");
+                json += generatorKindName(value.kind);
+                json += QLatin1Char('\"');
+                if (value.kind == GeneratorKind::Password) {
+                    json += QStringLiteral(",\"length\":");
+                    json += QString::number(value.length);
+                }
+                json += QLatin1Char('}');
+            }
+            json += QLatin1Char(']');
+        }
         json += QLatin1Char('}');
     }
     json += QStringLiteral("]}");
@@ -549,6 +591,20 @@ bool parseRecord(const QByteArray& bytes, RecordDocument* document) {
     }
 
     RecordDocument parsed;
+    const QJsonValue templateValue = root.value(QStringLiteral("template"));
+    if (!templateValue.isUndefined()) {
+        if (!templateValue.isBool()) {
+            return false;
+        }
+        parsed.isTemplate = templateValue.toBool();
+    }
+    const QJsonValue nameValue = root.value(QStringLiteral("name"));
+    if (!nameValue.isUndefined()) {
+        if (!nameValue.isString()) {
+            return false;
+        }
+        parsed.templateName = nameValue.toString();
+    }
     const QJsonArray entries = entriesValue.toArray();
     parsed.entries.reserve(entries.size());
     for (const QJsonValue& entryValue : entries) {
@@ -588,7 +644,50 @@ bool parseRecord(const QByteArray& bytes, RecordDocument* document) {
             return false;
         }
 
+        const QJsonValue generated = entryObject.value(QStringLiteral("generate"));
+        if (!generated.isUndefined()) {
+            if (!generated.isArray()) {
+                return false;
+            }
+            for (const QJsonValue& item : generated.toArray()) {
+                if (!item.isObject()) {
+                    return false;
+                }
+                const QJsonObject object = item.toObject();
+                const QJsonValue path = object.value(QStringLiteral("path"));
+                const QJsonValue kind = object.value(QStringLiteral("kind"));
+                if (!path.isString() || path.toString().isEmpty() || !kind.isString()) {
+                    return false;
+                }
+                GeneratedValue value;
+                value.pointer = path.toString();
+                if (!generatorKindFromName(kind.toString(), &value.kind)) {
+                    return false;
+                }
+                const QJsonValue length = object.value(QStringLiteral("length"));
+                if (!length.isUndefined()) {
+                    if (!length.isDouble()) {
+                        return false;
+                    }
+                    value.length = length.toInt();
+                }
+                if (value.kind == GeneratorKind::Password && (value.length < 8 || value.length > 128)) {
+                    return false;
+                }
+                entry.generated.push_back(value);
+            }
+        }
+
         sortMembersInto(&entry.body);
+        // A generator whose path does not name a string would silently keep the sample
+        // value, so it is rejected here and the editor shows the file read-only.
+        for (const GeneratedValue& value : entry.generated) {
+            const RecordNode* target = nodeAtPointer(entry.body, value.pointer);
+            if (target == nullptr
+                || (target->type != ValueType::String && target->type != ValueType::Secret)) {
+                return false;
+            }
+        }
         parsed.entries.push_back(entry);
     }
     *document = parsed;
@@ -744,6 +843,247 @@ QString valueTypeLabel(const ValueType type) {
         return QStringLiteral("array");
     }
     return QString();
+}
+
+// --- templates -------------------------------------------------------------
+
+namespace {
+
+// Walks a JSON Pointer (RFC 6901) to the node it names. The empty pointer names the
+// body itself, which is never a string and so never a generator target.
+RecordNode* nodeAtPointer(RecordNode& root, const QString& pointer) {
+    if (pointer.isEmpty()) {
+        return &root;
+    }
+    // Relative, like the secret list's paths ("Password", "a/b"). A leading slash is
+    // tolerated so a file written by another JSON-Pointer-aware tool still resolves.
+    QString path = pointer;
+    if (path.startsWith(QLatin1Char('/'))) {
+        path.remove(0, 1);
+    }
+    const QStringList tokens = path.split(QLatin1Char('/'));
+    RecordNode* node = &root;
+    for (int index = 0; index < tokens.size(); ++index) {
+        const QString token = pointerUnescape(tokens.at(index));
+        if (node->type == ValueType::Object) {
+            RecordNode* found = nullptr;
+            for (auto& member : node->members) {
+                if (member.first == token) {
+                    found = &member.second;
+                    break;
+                }
+            }
+            if (found == nullptr) {
+                return nullptr;
+            }
+            node = found;
+        } else if (node->type == ValueType::Array) {
+            bool ok = false;
+            const int position = token.toInt(&ok);
+            if (!ok || position < 0 || position >= node->items.size()) {
+                return nullptr;
+            }
+            node = &node->items[position];
+        } else {
+            return nullptr;
+        }
+    }
+    return node;
+}
+
+// Sets a leaf's text, keeping its type. Only strings and secrets are generator targets.
+bool setLeafText(RecordNode* node, const QString& text) {
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type != ValueType::String && node->type != ValueType::Secret) {
+        return false;
+    }
+    node->text = text;
+    return true;
+}
+
+// No 0/O/1/l/I: the value is read from a screen and typed onto another device.
+constexpr auto kPasswordUpper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+constexpr auto kPasswordLower = "abcdefghijkmnopqrstuvwxyz";
+constexpr auto kPasswordDigits = "23456789";
+constexpr auto kPasswordSymbols = "!@#$%^&*-_=+?";
+
+QString randomPassword(const int length) {
+    const QString classes[] = {QString::fromLatin1(kPasswordUpper), QString::fromLatin1(kPasswordLower),
+        QString::fromLatin1(kPasswordDigits), QString::fromLatin1(kPasswordSymbols)};
+    QString alphabet;
+    for (const auto& group : classes) {
+        alphabet += group;
+    }
+    QRandomGenerator* generator = QRandomGenerator::system();
+    QString out;
+    out.reserve(length);
+    // One from each class first, so a generated password is never only lower-case.
+    for (const auto& group : classes) {
+        if (out.size() < length) {
+            out += group.at(static_cast<int>(generator->bounded(group.size())));
+        }
+    }
+    while (out.size() < length) {
+        out += alphabet.at(static_cast<int>(generator->bounded(alphabet.size())));
+    }
+    // Shuffle so the guaranteed characters are not always in the first four places.
+    for (int index = out.size() - 1; index > 0; --index) {
+        const int other = static_cast<int>(generator->bounded(index + 1));
+        const QChar held = out.at(index);
+        out[index] = out.at(other);
+        out[other] = held;
+    }
+    return out;
+}
+
+QString randomUuid() {
+    quint32 parts[4];
+    QRandomGenerator* generator = QRandomGenerator::system();
+    for (auto& part : parts) {
+        part = generator->generate();
+    }
+    // Version 4, variant 1 (RFC 4122), then the canonical 8-4-4-4-12 spelling.
+    parts[1] = (parts[1] & 0xFFFF0FFFu) | 0x00004000u;
+    parts[2] = (parts[2] & 0x3FFFFFFFu) | 0x80000000u;
+    return QStringLiteral("%1-%2-%3-%4-%5")
+        .arg(parts[0], 8, 16, QLatin1Char('0'))
+        .arg(parts[1] >> 16, 4, 16, QLatin1Char('0'))
+        .arg(parts[1] & 0xFFFF, 4, 16, QLatin1Char('0'))
+        .arg(parts[2] >> 16, 4, 16, QLatin1Char('0'))
+        .arg(QStringLiteral("%1%2").arg(parts[2] & 0xFFFF, 4, 16, QLatin1Char('0'))
+                 .arg(parts[3], 8, 16, QLatin1Char('0')));
+}
+
+} // namespace
+
+QString generatorKindName(const GeneratorKind kind) {
+    switch (kind) {
+    case GeneratorKind::Password:
+        return QStringLiteral("password");
+    case GeneratorKind::Uuid:
+        return QStringLiteral("uuid");
+    case GeneratorKind::Date:
+        return QStringLiteral("date");
+    }
+    return QString();
+}
+
+bool generatorKindFromName(const QString& name, GeneratorKind* kind) {
+    if (kind == nullptr) {
+        return false;
+    }
+    if (name == QLatin1String("password")) {
+        *kind = GeneratorKind::Password;
+        return true;
+    }
+    if (name == QLatin1String("uuid")) {
+        *kind = GeneratorKind::Uuid;
+        return true;
+    }
+    if (name == QLatin1String("date")) {
+        *kind = GeneratorKind::Date;
+        return true;
+    }
+    return false;
+}
+
+bool applyGenerators(RecordEntry* entry, QString* problem) {
+    if (entry == nullptr) {
+        return false;
+    }
+    for (const GeneratedValue& value : entry->generated) {
+        RecordNode* target = nodeAtPointer(entry->body, value.pointer);
+        QString text;
+        switch (value.kind) {
+        case GeneratorKind::Password:
+            text = randomPassword(value.length);
+            break;
+        case GeneratorKind::Uuid:
+            text = randomUuid();
+            break;
+        case GeneratorKind::Date:
+            text = QDate::currentDate().toString(Qt::ISODate);
+            break;
+        }
+        if (!setLeafText(target, text)) {
+            if (problem != nullptr) {
+                *problem = value.pointer;
+            }
+            return false;
+        }
+    }
+    entry->generated.clear();
+    return true;
+}
+
+RecordDocument cloneTemplate(const RecordEntry& templateEntry, const QString& title) {
+    RecordEntry clone = templateEntry;
+    if (!title.trimmed().isEmpty()) {
+        clone.title = title.trimmed();
+    }
+    // A generator that cannot be applied leaves the sample in place rather than an empty
+    // field, and parseRecord already refuses such a template, so this cannot hide a fault.
+    applyGenerators(&clone);
+    RecordDocument document;
+    document.isTemplate = false;
+    document.entries.push_back(clone);
+    return document;
+}
+
+QString templateFolderName() {
+    return QStringLiteral(".templates");
+}
+
+bool isTemplateFolderName(const QString& name) {
+    return name == templateFolderName();
+}
+
+bool insertTemplate(RecordNode* target, const RecordEntry& templateEntry, const QString& key,
+    QString* problem) {
+    const auto fail = [problem](const QString& text) {
+        if (problem != nullptr) {
+            *problem = text;
+        }
+        return false;
+    };
+    if (target == nullptr || target->type != ValueType::Object) {
+        return fail(QStringLiteral("Templates are inserted into an object."));
+    }
+    const QString name = key.trimmed();
+    if (!isValidKey(name)) {
+        return fail(QStringLiteral("A field needs a name."));
+    }
+    for (const auto& member : target->members) {
+        if (member.first == name) {
+            return fail(QStringLiteral("\"%1\" is already a field here.").arg(name));
+        }
+    }
+    RecordEntry copy = templateEntry;
+    if (!applyGenerators(&copy, problem)) {
+        return false;
+    }
+    target->members.append({name, copy.body});
+    sortMembers(target);
+    return true;
+}
+
+QVector<RecordDocument> builtinTemplates() {
+    QVector<RecordDocument> templates;
+    const QStringList files = QDir(QStringLiteral(":/templates"))
+                                  .entryList(QStringList{QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const QString& file : files) {
+        QFile resource(QStringLiteral(":/templates/") + file);
+        if (!resource.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        RecordDocument document;
+        if (parseRecord(resource.readAll(), &document) && document.isTemplate) {
+            templates.push_back(document);
+        }
+    }
+    return templates;
 }
 
 } // namespace videovault::app

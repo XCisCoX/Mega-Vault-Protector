@@ -46,16 +46,40 @@ struct RecordNode {
     bool isContainer() const;
 };
 
+// A value a template computes when it is used.
+//
+// Templates reuse this container instead of defining a second format: a template is a
+// record file flagged `template`, whose entries carry the *sample* value in the body so
+// they can be read and edited like any record, plus these generators. Using a template
+// replaces each sample with a fresh value and drops the generator, which is what makes
+// the result an ordinary record with nothing special left in it.
+enum class GeneratorKind { Password, Uuid, Date };
+
+struct GeneratedValue {
+    QString pointer;                      // JSON Pointer (RFC 6901) into the body
+    GeneratorKind kind{GeneratorKind::Password};
+    int length{20};                       // password only; ignored otherwise
+};
+
 // One record inside the file: a title and an object body.
 struct RecordEntry {
     QString title;
     RecordNode body{RecordNode::object()};
+    QVector<GeneratedValue> generated;    // empty for ordinary records
 };
 
 // The content of one library item: an ordered list of records. The user moves
 // records up and down; the keys inside each body are sorted, not ordered.
+//
+// `isTemplate` marks a file whose entries are templates to start records from. It is
+// stored as a top-level `"template":true`, so the same parser, serializer and editor
+// handle both kinds, and the gallery can tell them apart without a second format.
 struct RecordDocument {
     QVector<RecordEntry> entries;
+    bool isTemplate{false};
+    // What the template is called in the picker ("Website login"). Separate from the
+    // entry's title, which is the placeholder name the created record starts with.
+    QString templateName;
 };
 
 // Every serialized record starts with this marker, so the gallery can route an
@@ -65,6 +89,11 @@ inline constexpr char kRecordMarker[] = "{\"mvp_record\":";
 // True when `head` (the first bytes of an item's plaintext) begins a record.
 // Tolerates a UTF-8 BOM and leading whitespace.
 bool looksLikeRecord(const QByteArray& head);
+
+// True when those bytes begin a *template*: a record file flagged `"template":true`.
+// The flag sits right after the version, so a gallery can classify an item from a
+// 64-byte read instead of decrypting it in full.
+bool looksLikeTemplate(const QByteArray& head);
 
 // The stored format version, or 0 when the bytes are not a record at all.
 // 1 and 2 mean "a pre-v3 record the editor can migrate"; 3 is the only version
@@ -141,5 +170,49 @@ bool nodeHasSecret(const RecordNode& node);
 
 // "string", "number", "secret", "object", "array" — the badge on a row.
 QString valueTypeLabel(ValueType type);
+
+// --- templates -------------------------------------------------------------
+
+// "password", "uuid", "date" — the stored name of a generator.
+QString generatorKindName(GeneratorKind kind);
+bool generatorKindFromName(const QString& name, GeneratorKind* kind);
+
+// Replaces every generated value in `entry` with a fresh one and clears the list.
+// False (with `problem` set, naming the path) when a pointer does not resolve to a
+// string: a template whose generator cannot be applied is reported rather than leaving
+// the sample value in what the user thinks is a generated field.
+bool applyGenerators(RecordEntry* entry, QString* problem = nullptr);
+
+// The ordinary record a template produces: one entry, generators applied and dropped,
+// and the template flag off. `title` replaces the template's placeholder title when it
+// is not empty, because the user names the thing they just created.
+RecordDocument cloneTemplate(const RecordEntry& templateEntry,
+    const QString& title = QString());
+
+// Where a user's own templates live.
+//
+// A template is not a file in the library: it is a store the app owns. They sit in one
+// folder whose name starts with a dot, the gallery drops that folder when it loads the
+// library, and the picker is where they are managed. Keeping them as ordinary vault items
+// means they are encrypted and synced like everything else; keeping them out of the gallery
+// means a template never turns up as a file somebody has to understand.
+QString templateFolderName();
+bool isTemplateFolderName(const QString& name);
+
+// The templates shipped with the app, read from :/templates and parsed with
+// parseRecord, so a built-in is exactly the format a user's own template is.
+QVector<RecordDocument> builtinTemplates();
+
+// Inserts a template's structure into `target`, which must be an object, under `key`.
+//
+// This is the "part of a record" use: the template's body becomes a nested object, with
+// its generators applied on the way in, so a password template inserted mid-edit arrives
+// already generated. Because the generators are applied rather than carried over, there is
+// no path to re-root: the values are already in place and the inserted subtree is ordinary.
+//
+// False (with `problem` set) when the target is not an object, the key is empty or already
+// a field there, or the template's own generator paths do not resolve.
+bool insertTemplate(RecordNode* target, const RecordEntry& templateEntry, const QString& key,
+    QString* problem = nullptr);
 
 } // namespace videovault::app

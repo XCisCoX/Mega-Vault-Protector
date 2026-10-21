@@ -2,6 +2,7 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
@@ -10,6 +11,8 @@ namespace videovault::app::icons {
 namespace {
 
 constexpr int kSizes[] = {16, 20, 32, 64};
+// Below the quiet ink's 150, so a disabled icon never outweighs an enabled one.
+constexpr int kDisabledAlpha = 80;
 
 QPixmap tinted(const int size, const QColor& color, const QString& name) {
     const QString path = QStringLiteral(":/icons/lucide/") + name + QLatin1Char('-')
@@ -50,7 +53,12 @@ QColor activeColor(const QPalette& palette, const Tone tone) {
 }
 
 QColor disabledColor(const QPalette& palette) {
-    return palette.color(QPalette::Disabled, QPalette::ButtonText);
+    QColor color = palette.color(QPalette::Disabled, QPalette::ButtonText);
+    // The quiet ink is already translucent (alpha 150), so an opaque disabled colour came
+    // out *stronger* than the enabled one -- enabled buttons looked washed out next to
+    // disabled ones, which is backwards. Disabled stays translucent and weaker than quiet.
+    color.setAlpha(kDisabledAlpha);
+    return color;
 }
 
 QIcon build(const QString& name, const Tone tone, const QPalette& palette) {
@@ -118,15 +126,52 @@ void withText(QAbstractButton* button, const QString& name, const int size) {
     QObject::connect(qApp, &QApplication::paletteChanged, button, repaint);
 }
 
+namespace {
+
+// Retints a button's icon from the button's *own* palette whenever that palette changes.
+//
+// Tinting from QApplication::palette() was wrong for any surface that carries its own
+// palette (the record page, the player and PDF windows): the icon kept the application's
+// ink, so switching themes left icons on those surfaces the wrong colour. Watching the
+// button covers an application palette change too, because Qt then sends it a
+// PaletteChange of its own.
+class IconTinter : public QObject {
+public:
+    IconTinter(QAbstractButton* button, QString name, const Tone tone)
+        : QObject(button), button_(button), name_(std::move(name)), tone_(tone) {
+        button->installEventFilter(this);
+        repaint();
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange
+            || event->type() == QEvent::EnabledChange || event->type() == QEvent::Show) {
+            repaint();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    void repaint() {
+        if (button_ != nullptr) {
+            button_->setIcon(build(name_, tone_, button_->palette()));
+        }
+    }
+
+    QAbstractButton* button_{nullptr};
+    QString name_;
+    Tone tone_{Tone::Normal};
+};
+
+} // namespace
+
 void apply(QAbstractButton* button, const QString& name, const Tone tone) {
     if (button == nullptr) {
         return;
     }
-    const auto repaint = [button, name, tone](const QPalette& palette) {
-        button->setIcon(build(name, tone, palette));
-    };
-    repaint(QApplication::palette());
-    QObject::connect(qApp, &QApplication::paletteChanged, button, repaint);
+    // Owned by the button, so it lives and dies with it.
+    new IconTinter(button, name, tone);
 }
 
 } // namespace videovault::app::icons

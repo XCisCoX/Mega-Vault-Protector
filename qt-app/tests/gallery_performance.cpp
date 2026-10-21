@@ -135,8 +135,11 @@ struct GalleryPerformanceTestAccess {
         bool hasLock = false;
         for (auto* button : buttons) hasLock |= button->toolTip().startsWith(QStringLiteral("Lock this PC"));
         if (!require(hasLock, "lock command is missing")) return 82;
+        // One "make a new thing" list, in order. "New from template…" sits under New record
+        // because a template is a way to start a record, not a separate kind of thing.
         const QStringList expected{QStringLiteral("Import files…"), QStringLiteral("Import folder…"),
-            QStringLiteral("New note"), QStringLiteral("New record"), QStringLiteral("New folder"),
+            QStringLiteral("New note"), QStringLiteral("New record"),
+            QStringLiteral("New from template…"), QStringLiteral("New folder"),
             QStringLiteral("Import package…"), QStringLiteral("Export package…")};
         auto inspectPopup = [&] {
             bool opened = false;
@@ -151,7 +154,7 @@ struct GalleryPerformanceTestAccess {
             add->click();
             return opened && labels == expected;
         };
-        if (!require(inspectPopup(), "Add popup must retain all seven import/create/package actions")) return 83;
+        if (!require(inspectPopup(), "Add popup must retain every import/create/package action")) return 83;
         add->setEnabled(false);
         add->click();
         if (!require(!window.findChild<QDialog*>(QStringLiteral("commandPopup")),

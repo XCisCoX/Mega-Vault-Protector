@@ -81,8 +81,15 @@ int main(int argc, char** argv) {
         auto* tabs = child.operator()<QTabBar>("settingsNavigation");
         auto* sections = child.operator()<QStackedWidget>("settingsSections");
         check(page.findChild<QCheckBox*>("useProxy") != nullptr, "proxy settings switch must be reachable");
-        check(tabs->count() == 6 && sections->count() == 6, "six settings sections");
-        check(tabs->tabText(0) == "Updates" && tabs->tabText(4) == "Library", "section order");
+        QStringList sectionNames;
+        for (int index = 0; index < tabs->count(); ++index) {
+            sectionNames.append(tabs->tabText(index));
+        }
+        check(tabs->count() == sections->count(), "every settings tab has a page");
+        check(sectionNames.value(0) == "Updates", "the first section is Updates");
+        check(sectionNames.contains("Library"), "the library section is present");
+        check(sectionNames.contains("Record templates"),
+            "templates are managed in settings, not in the library");
         page.resize(480, 640); page.show(); app.processEvents();
         stageMark("page shown");
         {

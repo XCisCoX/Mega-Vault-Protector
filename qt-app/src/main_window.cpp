@@ -2793,9 +2793,10 @@ QWidget* MainWindow::buildUnlockedPage() {
         menu.addCommand(QStringLiteral("Import folder…"), 2);
         menu.addCommand(QStringLiteral("New note"), 3);
         menu.addCommand(QStringLiteral("New record"), 4);
-        menu.addCommand(QStringLiteral("New folder"), 5);
-        menu.addCommand(QStringLiteral("Import package…"), 6);
-        menu.addCommand(QStringLiteral("Export package…"), 7);
+        menu.addCommand(QStringLiteral("New from template…"), 5);
+        menu.addCommand(QStringLiteral("New folder"), 6);
+        menu.addCommand(QStringLiteral("Import package…"), 7);
+        menu.addCommand(QStringLiteral("Export package…"), 8);
         const QPoint origin = importButton_->mapToGlobal(QPoint(0, importButton_->height()));
         if (menu.empty()) { return; }
         placePopup(&menu, origin);
@@ -2813,12 +2814,15 @@ QWidget* MainWindow::buildUnlockedPage() {
             beginNewRecord();
             break;
         case 5:
-            beginNewFolder();
+            beginNewRecordFromTemplate();
             break;
         case 6:
-            beginImportPackage();
+            beginNewFolder();
             break;
         case 7:
+            beginImportPackage();
+            break;
+        case 8:
             beginExportPackage(0);
             break;
         default:
@@ -3597,9 +3601,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         menu.addCommand(QStringLiteral("New folder"), 1);
         menu.addCommand(QStringLiteral("New note"), 2);
         menu.addCommand(QStringLiteral("New record"), 3);
-        menu.addCommand(QStringLiteral("Import package…"), 4);
+        menu.addCommand(QStringLiteral("New from template…"), 4);
+        menu.addCommand(QStringLiteral("Import package…"), 5);
         if (!cutItems_.empty()) {
-            menu.addCommand(QStringLiteral("Paste"), 5);
+            menu.addCommand(QStringLiteral("Paste"), 6);
         }
         if (menu.empty()) { return; }
         if (menu.empty()) { return; }
@@ -3615,9 +3620,12 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
             beginNewRecord();
             break;
         case 4:
-            beginImportPackage();
+            beginNewRecordFromTemplate();
             break;
         case 5:
+            beginImportPackage();
+            break;
+        case 6:
             pasteCutSelection();
             break;
         default:
@@ -4833,6 +4841,11 @@ void MainWindow::openSettings() {
             update();
         });
         connect(page, &SettingsDialog::updateCheckRequested, this, [this] { beginUpdateCheck(true); });
+        // A template is a record document, so the record editor is the editor for it.
+        connect(page, &SettingsDialog::openTemplateRequested, this,
+            [this](qlonglong id, const QString& name) {
+                beginRecord(static_cast<std::int64_t>(id), name);
+            });
         connect(page, &SettingsDialog::updatePreferencesChanged, this, [this] { configureUpdateChecks(); });
         connect(page, &SettingsDialog::passwordChanged, this, [this] {
             // The sync key comes from the vault password, so every engine and
@@ -6498,8 +6511,12 @@ void MainWindow::beginNewRecord() {
     // first record is added; a zero-byte item could not be routed to the editor.
     // The title lives on the library item, not inside the content.
     RecordDocument document;
-    const QByteArray bytes = serializeRecord(document);
+    createRecordItem(title, serializeRecord(document));
+}
 
+// Shared by New record and New from template: import the content as an item in the open
+// folder, refresh, then open the editor on it.
+void MainWindow::createRecordItem(const QString& title, const QByteArray& bytes) {
     const auto vault = vault_;
     const auto folder_id = currentFolderId_;
     auto* watcher = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
@@ -6549,9 +6566,11 @@ void MainWindow::beginRecord(const std::int64_t video_id, const QString& title) 
         });
         connect(window, &RecordWindow::closeRequested, this, [this] { closeRecord(); });
         connect(window, &RecordWindow::saved, this, [this] { refreshGallery(); });
+        // A saved template is a new library item; refresh so it is there when the user goes back.
+        connect(window, &RecordWindow::templateSaved, this, [this](const QString&) { refreshGallery(); });
         recordWindow_ = window;
     }
-    recordWindow_->openRecord(vault_, video_id, title);
+    recordWindow_->openRecord(vault_, video_id, title, currentFolderId_);
     if (contentStack_ != nullptr && contentStack_->indexOf(recordWindow_) < 0) {
         contentStack_->addWidget(recordWindow_);
     }
@@ -7562,6 +7581,18 @@ void MainWindow::refreshGallery() {
         return;
     }
     folders_ = std::move(listed.value());
+    // The templates folder is a store, not a place in the library. Dropping it here keeps it
+    // out of every view built from folders_ -- the grid, the tree, the breadcrumb and search
+    // -- so a template never appears as a file.
+    templateFolderId_ = 0;
+    for (auto entry = folders_.begin(); entry != folders_.end();) {
+        if (isTemplateFolderName(QString::fromStdString(entry->name))) {
+            templateFolderId_ = entry->id;
+            entry = folders_.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
     bool open = currentFolderId_ == 0;
     std::int64_t parentOfOpen = 0;
     for (const auto& folder : folders_) {
@@ -8798,6 +8829,100 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
         approvalVeil_->raise();
     }
     syncPluginRowButtons();
+}
+
+void MainWindow::beginNewRecordFromTemplate() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    // The built-ins are resources and cost nothing. The user's templates are ordinary
+    // items whose head carries the template flag, so the scan reads 64 bytes per item and
+    // decrypts in full only the few that are templates.
+    const auto vault = vault_;
+    auto* watcher = new QFutureWatcher<std::shared_ptr<QVector<QPair<QString, RecordEntry>>>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
+        const auto found = watcher->result();
+        watcher->deleteLater();
+        showTemplateChooser(*found);
+    });
+    watcher->setFuture(QtConcurrent::run([vault] {
+        auto choices = std::make_shared<QVector<QPair<QString, RecordEntry>>>();
+        for (const auto& document : builtinTemplates()) {
+            for (const auto& entry : document.entries) {
+                choices->push_back({document.templateName.isEmpty() ? entry.title
+                                                                    : document.templateName,
+                    entry});
+            }
+        }
+        const auto listed = vault->list_videos();
+        if (!listed) {
+            return choices;
+        }
+        for (const auto& item : listed.value()) {
+            const auto head = vault->read_video_range(item.id, 0, 64);
+            if (!head || head.value().empty()) {
+                continue;
+            }
+            const QByteArray peek(reinterpret_cast<const char*>(head.value().data()),
+                static_cast<int>(head.value().size()));
+            if (!looksLikeTemplate(peek)) {
+                continue;
+            }
+            const auto full = vault->read_video_bytes(item.id);
+            if (!full) {
+                continue;
+            }
+            RecordDocument document;
+            const QByteArray bytes(reinterpret_cast<const char*>(full.value().data()),
+                static_cast<int>(full.value().size()));
+            if (!parseRecord(bytes, &document) || !document.isTemplate) {
+                continue;
+            }
+            for (const auto& entry : document.entries) {
+                choices->push_back({document.templateName.isEmpty() ? entry.title
+                                                                    : document.templateName,
+                    entry});
+            }
+        }
+        return choices;
+    }));
+}
+
+void MainWindow::showTemplateChooser(const QVector<QPair<QString, RecordEntry>>& choices) {
+    if (choices.isEmpty()) {
+        showStatus(QStringLiteral("No templates yet. Save a record as a template to get one."), true);
+        return;
+    }
+    CommandPopup menu(this);
+    for (int index = 0; index < choices.size(); ++index) {
+        menu.addCommand(choices.at(index).first, index + 1);
+    }
+    const QPoint origin = importButton_->mapToGlobal(QPoint(0, importButton_->height()));
+    placePopup(&menu, origin);
+    const int picked = menu.exec();
+    if (picked < 1 || picked > choices.size()) {
+        return;
+    }
+
+    // The name the user gives here is the record's title, not the template's.
+    const RecordEntry& templateEntry = choices.at(picked - 1).second;
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("New from template"));
+    sheet.setMessage(QStringLiteral("Name this record. The fields and their values are "
+                                    "ready to edit."));
+    auto* entry = sheet.addTextEntry(QLineEdit::Normal, templateEntry.title,
+        QStringLiteral("Title"));
+    sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    sheet.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
+    if (sheet.run() != 1) {
+        return;
+    }
+    const QString title = entry->text().trimmed();
+    if (title.isEmpty()) {
+        showStatus(QStringLiteral("A record needs a title."), true);
+        return;
+    }
+    createRecordItem(title, serializeRecord(cloneTemplate(templateEntry, title)));
 }
 
 void MainWindow::beginNewNote() {

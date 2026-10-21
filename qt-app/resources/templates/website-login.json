@@ -1,0 +1,1 @@
+{"mvp_record":3,"template":true,"name":"Website login","entries":[{"title":"Placeholder Website Name","body":{"Password":"","URL":"","Username":"Default Username"},"secret":["Password"],"generate":[{"path":"Password","kind":"password","length":20}]}]}

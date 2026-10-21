@@ -1,4 +1,9 @@
 <RCC>
+    <qresource prefix="/">
+        <file>templates/website-login.json</file>
+        <file>templates/api-key.json</file>
+        <file>templates/secure-note.json</file>
+    </qresource>
     <qresource prefix="/icons">
         <file>app.png</file>
         <file>media_doc_blue.png</file>

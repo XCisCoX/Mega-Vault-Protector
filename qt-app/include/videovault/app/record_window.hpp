@@ -41,12 +41,16 @@ class RecordWindow final : public QWidget {
 public:
     explicit RecordWindow(QWidget* parent = nullptr);
 
+    // `folderId` is where the item lives, so a template saved from this record lands
+    // beside it rather than at the library root.
     void openRecord(std::shared_ptr<core::Vault> vault, std::int64_t recordId,
-        const QString& itemName);
+        const QString& itemName, std::int64_t folderId = 0);
 
 signals:
     void closeRequested();
     void saved();
+    // A template item was created, so the library has one more item in it.
+    void templateSaved(const QString& name);
 
 protected:
     void changeEvent(QEvent* event) override;
@@ -106,6 +110,17 @@ private:
     void removeEntry(int entryIndex);
     void moveEntry(int entryIndex, int delta);
 
+    // Captures an object row as a template: one part of a record.
+    void beginSaveAsTemplate(const NodePath& path);
+    // Captures a whole record as a template. A record here is one entry, not the document.
+    void beginSaveAsTemplateEntry(int entryIndex);
+    // Asks for the template's name, then writes it to the store.
+    void promptSaveTemplate(const RecordEntry& entry, const QString& defaultName);
+    void writeTemplate(const QString& name, const RecordEntry& entry);
+    // Inserts a template's structure into an object row, as a new nested object.
+    void beginInsertTemplate(const NodePath& parent);
+    void promptInsertTemplate(const NodePath& parent, const RecordEntry& templateEntry);
+
     void markChanged();
     void refreshDirty();
     void save();
@@ -125,6 +140,7 @@ private:
     void copyToClipboard(const QString& text, bool secret, const QString& note);
 
     std::shared_ptr<core::Vault> vault_;
+    std::int64_t folderId_{0};
     std::int64_t recordId_{0};
     QString itemName_;
     RecordDocument document_;
