@@ -21,6 +21,10 @@
         <file alias="arrow-up-down-20.png">icons/lucide/arrow-up-down-20.png</file>
         <file alias="arrow-up-down-32.png">icons/lucide/arrow-up-down-32.png</file>
         <file alias="arrow-up-down-64.png">icons/lucide/arrow-up-down-64.png</file>
+        <file alias="bookmark-plus-16.png">icons/lucide/bookmark-plus-16.png</file>
+        <file alias="bookmark-plus-20.png">icons/lucide/bookmark-plus-20.png</file>
+        <file alias="bookmark-plus-32.png">icons/lucide/bookmark-plus-32.png</file>
+        <file alias="bookmark-plus-64.png">icons/lucide/bookmark-plus-64.png</file>
         <file alias="check-16.png">icons/lucide/check-16.png</file>
         <file alias="check-20.png">icons/lucide/check-20.png</file>
         <file alias="check-32.png">icons/lucide/check-32.png</file>

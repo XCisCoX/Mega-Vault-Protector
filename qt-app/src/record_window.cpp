@@ -512,10 +512,11 @@ void RecordWindow::changeEvent(QEvent* event) {
 }
 
 void RecordWindow::openRecord(std::shared_ptr<core::Vault> vault, const std::int64_t recordId,
-    const QString& itemName) {
+    const QString& itemName, const std::int64_t folderId) {
     vault_ = std::move(vault);
     recordId_ = recordId;
     itemName_ = itemName;
+    folderId_ = folderId;
     fileName_->setText(itemName.isEmpty() ? QStringLiteral("Record") : itemName);
     fileName_->setToolTip(itemName_);
     load();
@@ -963,6 +964,13 @@ void RecordWindow::buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath
         if (named) {
             actions.append({QStringLiteral("pencil"), QStringLiteral("Rename this key"),
                 [this, path] { renameNode(path); }});
+            // A named object is the unit a template captures, so the authoring entry point
+            // sits on the structure itself rather than in the header.
+            if (node.type == ValueType::Object) {
+                actions.append({QStringLiteral("bookmark-plus"),
+                    QStringLiteral("Save this object as a template"),
+                    [this, path] { beginSaveAsTemplate(path); }});
+            }
         }
         actions.append({QStringLiteral("trash"), QStringLiteral("Remove this key and its contents"),
             [this, path] { removeNode(path); }});
@@ -1115,6 +1123,12 @@ bool RecordWindow::promptNode(const QString& heading, const bool withKey, NodeDr
         valueEdit->setStyleSheet(QStringLiteral(
             "QPlainTextEdit { color: #ffffff; background: #1c1c22; border: none;"
             " border-radius: 8px; padding: 8px; }"));
+        // A container has no value, so the editor is hidden for Object and Array. Without
+        // keeping its space the sheet shrinks the moment one of them is picked, which moves
+        // the buttons under the cursor mid-click.
+        QSizePolicy valuePolicy = valueEdit->sizePolicy();
+        valuePolicy.setRetainSizeWhenHidden(true);
+        valueEdit->setSizePolicy(valuePolicy);
         valueEdit->setVisible(type != ValueType::Object && type != ValueType::Array);
         sheet.body()->addWidget(valueEdit);
 
@@ -1203,6 +1217,220 @@ bool RecordWindow::confirm(const QString& heading, const QString& message, const
 // Structure changes
 // ---------------------------------------------------------------------------
 
+void RecordWindow::beginSaveAsTemplate(const NodePath& path) {
+    if (!editable_ || vault_ == nullptr) {
+        return;
+    }
+    RecordNode* node = resolve(path);
+    QString key;
+    resolveParent(path, &key);
+    if (node == nullptr || node->type != ValueType::Object) {
+        return;
+    }
+
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("Save as template"));
+    sheet.setMessage(QStringLiteral("This object becomes a template. It is copied, so the "
+                                    "record keeps its own fields and stays a record."));
+    auto* nameEdit = sheet.addTextEntry(QLineEdit::Normal, key, QStringLiteral("Template name"));
+    auto* hint = new QLabel(QStringLiteral(
+        "Templates appear under New from template in the library, and under Insert template "
+        "on any object row."));
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
+    sheet.body()->addWidget(hint);
+    sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+    QPushButton* saveButton = sheet.addButton(QStringLiteral("Save template"), 1, true,
+        QStringLiteral("bookmark-plus"));
+    const auto validate = [nameEdit, saveButton] {
+        saveButton->setEnabled(!nameEdit->text().trimmed().isEmpty());
+    };
+    connect(nameEdit, &QLineEdit::textChanged, this, [validate](const QString&) { validate(); });
+    validate();
+    if (sheet.run() != 1) {
+        return;
+    }
+    const QString name = nameEdit->text().trimmed();
+
+    RecordEntry entry;
+    // The key the structure had becomes the default name on insert, and the placeholder
+    // title when the template is used as a whole record.
+    entry.title = key;
+    entry.body = *node;          // a copy: the record keeps what it has
+    RecordDocument document;
+    document.isTemplate = true;
+    document.templateName = name;
+    document.entries.push_back(entry);
+    const QByteArray bytes = serializeRecord(document);
+
+    setStatus(QStringLiteral("Saving the template…"), false);
+    const auto vault = vault_;
+    const auto folder_id = folderId_;
+    auto* watcher = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, name] {
+        const auto outcome = *watcher->result();
+        watcher->deleteLater();
+        if (!outcome) {
+            setStatus(QStringLiteral("The template could not be saved."), true);
+            return;
+        }
+        setStatus(QStringLiteral("Template \"%1\" saved.").arg(name), false);
+        emit templateSaved(name);
+    });
+    watcher->setFuture(QtConcurrent::run([vault, bytes, name, folder_id] {
+        const std::span<const unsigned char> content(
+            reinterpret_cast<const unsigned char*>(bytes.constData()),
+            static_cast<std::size_t>(bytes.size()));
+        return std::make_shared<core::Result<std::int64_t>>(
+            vault->import_bytes(content, name.toStdString(), folder_id));
+    }));
+}
+
+void RecordWindow::beginInsertTemplate(const NodePath& parent) {
+    if (!editable_ || vault_ == nullptr) {
+        return;
+    }
+    // The same list the library's "New from template" offers: the built-ins, then the user's
+    // own template items, classified by reading each item's first bytes and decrypting in
+    // full only the ones that are templates. Mirrors MainWindow::beginNewRecordFromTemplate.
+    const auto vault = vault_;
+    auto* watcher = new QFutureWatcher<std::shared_ptr<QVector<QPair<QString, RecordEntry>>>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, parent] {
+        const auto found = watcher->result();
+        watcher->deleteLater();
+        if (found->isEmpty()) {
+            setStatus(QStringLiteral("No templates yet. Save a record as a template to get one."),
+                true);
+            return;
+        }
+        QMenu menu(this);
+        for (const auto& choice : *found) {
+            QAction* action = menu.addAction(choice.first);
+            action->setData(choice.first);
+        }
+        QAction* picked = menu.exec(QCursor::pos());
+        if (picked == nullptr) {
+            return;
+        }
+        for (const auto& choice : *found) {
+            if (choice.first == picked->data().toString()) {
+                promptInsertTemplate(parent, choice.second);
+                return;
+            }
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([vault] {
+        auto choices = std::make_shared<QVector<QPair<QString, RecordEntry>>>();
+        for (const auto& document : builtinTemplates()) {
+            for (const auto& entry : document.entries) {
+                choices->push_back({document.templateName.isEmpty() ? entry.title
+                                                                    : document.templateName,
+                    entry});
+            }
+        }
+        const auto listed = vault->list_videos();
+        if (!listed) {
+            return choices;
+        }
+        for (const auto& item : listed.value()) {
+            const auto head = vault->read_video_range(item.id, 0, 64);
+            if (!head || head.value().empty()) {
+                continue;
+            }
+            if (!looksLikeTemplate(QByteArray(reinterpret_cast<const char*>(head.value().data()),
+                    static_cast<int>(head.value().size())))) {
+                continue;
+            }
+            const auto full = vault->read_video_bytes(item.id);
+            if (!full) {
+                continue;
+            }
+            RecordDocument document;
+            if (!parseRecord(QByteArray(reinterpret_cast<const char*>(full.value().data()),
+                                static_cast<int>(full.value().size())),
+                    &document)
+                || !document.isTemplate) {
+                continue;
+            }
+            for (const auto& entry : document.entries) {
+                choices->push_back({document.templateName.isEmpty() ? entry.title
+                                                                    : document.templateName,
+                    entry});
+            }
+        }
+        return choices;
+    }));
+}
+
+void RecordWindow::promptInsertTemplate(const NodePath& parent, const RecordEntry& templateEntry) {
+    RecordNode* container = resolve(parent);
+    if (container == nullptr || container->type != ValueType::Object) {
+        return;
+    }
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("Insert template"));
+    sheet.setMessage(QStringLiteral("Adds \"%1\" here as a new object. Values the template "
+                                    "generates are filled in on the way.")
+                         .arg(templateEntry.title.isEmpty() ? QStringLiteral("a template")
+                                                            : templateEntry.title));
+    // Guidance where it is needed: the user is looking at the template list, so tell them
+    // how to get their own into it.
+    auto* guidance = new QLabel(QStringLiteral(
+        "Make your own: right-click a record in the library and choose Save as template."));
+    guidance->setWordWrap(true);
+    guidance->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
+    sheet.body()->addWidget(guidance);
+
+    // The key defaults to what the structure was called in the template, and stays editable.
+    auto* keyEdit = sheet.addTextEntry(QLineEdit::Normal, templateEntry.title,
+        QStringLiteral("Name"));
+    auto* problem = new QLabel(this);
+    problem->setWordWrap(true);
+    problem->setStyleSheet(QStringLiteral("color: #ff6b6b; background: transparent;"));
+    QSizePolicy problemPolicy = problem->sizePolicy();
+    problemPolicy.setRetainSizeWhenHidden(true);
+    problem->setSizePolicy(problemPolicy);
+    problem->hide();
+    sheet.body()->addWidget(problem);
+
+    QPushButton* insert = sheet.addButton(QStringLiteral("Insert"), 1, true,
+        QStringLiteral("plus"));
+    sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+
+    // A name that is already a field here is refused by disabling Insert and saying why,
+    // rather than by letting the click through to an error.
+    const auto validate = [container, keyEdit, insert, problem] {
+        const QString key = keyEdit->text().trimmed();
+        QString text;
+        if (key.isEmpty()) {
+            text = QStringLiteral("A field needs a name.");
+        } else {
+            for (const auto& member : container->members) {
+                if (member.first == key) {
+                    text = QStringLiteral("\"%1\" is already a field here.").arg(key);
+                    break;
+                }
+            }
+        }
+        problem->setText(text);
+        problem->setVisible(!text.isEmpty());
+        insert->setEnabled(text.isEmpty());
+    };
+    connect(keyEdit, &QLineEdit::textChanged, this, [validate](const QString&) { validate(); });
+    validate();
+
+    if (sheet.run() != 1) {
+        return;
+    }
+    QString failure;
+    if (!insertTemplate(container, templateEntry, keyEdit->text(), &failure)) {
+        setStatus(failure, true);
+        return;
+    }
+    markChanged();
+    rebuild();
+}
+
 void RecordWindow::addChild(const NodePath& parent) {
     RecordNode* container = resolve(parent);
     if (container == nullptr
@@ -1210,6 +1438,24 @@ void RecordWindow::addChild(const NodePath& parent) {
         return;
     }
     const bool object = container->type == ValueType::Object;
+    if (object) {
+        // One "+" on an object row covers both ways of adding structure: a field of your
+        // own, or a template's structure inserted whole.
+        QMenu menu(this);
+        QAction* addFieldAction = menu.addAction(QStringLiteral("Add field"));
+        QAction* insertAction = menu.addAction(QStringLiteral("Insert template…"));
+        insertAction->setEnabled(editable_);
+        QAction* picked = menu.exec(QCursor::pos());
+        if (picked == nullptr) {
+            return;                        // dismissed without choosing
+        }
+        if (picked == insertAction) {
+            beginInsertTemplate(parent);
+            return;
+        }
+        Q_UNUSED(addFieldAction);
+        // Otherwise fall through to the Add field prompt below.
+    }
     NodeDraft draft;
     draft.type = ValueType::String;
     if (!promptNode(object ? QStringLiteral("Add field") : QStringLiteral("Add value"), object,

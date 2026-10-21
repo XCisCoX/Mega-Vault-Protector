@@ -15,8 +15,13 @@ namespace {
 
 int failures = 0;
 
-void check(const bool ok, const char* what) {
-    std::printf("%s %s\n", ok ? "PASS" : "FAIL", what);
+// `detail` is optional context (the problem text, a size); it never changes the verdict.
+void check(const bool ok, const char* what, const char* detail = nullptr) {
+    if (detail != nullptr && *detail != '\0') {
+        std::printf("%s %s  [%s]\n", ok ? "PASS" : "FAIL", what, detail);
+    } else {
+        std::printf("%s %s\n", ok ? "PASS" : "FAIL", what);
+    }
     if (!ok) {
         ++failures;
     }
@@ -203,6 +208,68 @@ int main() {
         check(app::looksLikeTemplate(QByteArray("\xEF\xBB\xBF  ") + templateBytes.left(64)),
             "a BOM and leading whitespace are tolerated");
         check(!app::looksLikeTemplate(QByteArray()), "empty content is not a template");
+    }
+
+    // --- a template as part of a record ------------------------------------
+    if (website != nullptr) {
+        app::RecordNode host = app::RecordNode::object();
+        host.members.push_back({QStringLiteral("Name"),
+            app::RecordNode::leaf(app::ValueType::String, QStringLiteral("my host"))});
+
+        QString problem;
+        // The default key is what it was in the template: its placeholder title.
+        check(app::insertTemplate(&host, *website, website->title, &problem),
+            "a template inserts into a record's object", qPrintable(problem));
+        check(host.members.size() == 2, "the record has the new nested object beside its field");
+
+        const app::RecordNode* inserted = member(host, QStringLiteral("Placeholder Website Name"));
+        check(inserted != nullptr && inserted->type == app::ValueType::Object,
+            "the inserted subtree is an object");
+        if (inserted != nullptr) {
+            const app::RecordNode* password = member(*inserted, QStringLiteral("Password"));
+            check(password != nullptr && password->type == app::ValueType::Secret,
+                "the inserted password is still a secret");
+            check(password != nullptr && password->text.size() == 20,
+                "the generator ran on the way in", password != nullptr
+                    ? qPrintable(QString::number(password->text.size())) : "missing");
+            check(password != nullptr && !password->text.isEmpty(),
+                "the inserted value is generated, not the empty sample");
+            const app::RecordNode* username = member(*inserted, QStringLiteral("Username"));
+            check(username != nullptr && username->text == QStringLiteral("Default Username"),
+                "defaults come along with the structure");
+        }
+
+        // The whole document must still be an ordinary record, with the nested secret path.
+        app::RecordDocument hostDocument;
+        hostDocument.entries.push_back(app::RecordEntry{QStringLiteral("Host"), host, {}});
+        const QByteArray saved = app::serializeRecord(hostDocument);
+        check(!saved.contains("template"), "a record holding an inserted template is not a template");
+        app::RecordDocument reloaded;
+        check(app::parseRecord(saved, &reloaded), "the record reloads");
+        const QString text = QString::fromUtf8(saved);
+        check(text.contains(QStringLiteral(
+                  "\"secret\":[\"Placeholder Website Name/Password\"]")),
+            "the nested password is recorded as a secret at its new path");
+
+        // A second insert of the same key is refused, and nothing changes.
+        const int before = host.members.size();
+        check(!app::insertTemplate(&host, *website, website->title, &problem),
+            "an existing key is refused");
+        check(host.members.size() == before, "the refused insert changed nothing");
+
+        // Editing the key at insert time is allowed and lands under the new name.
+        check(app::insertTemplate(&host, *website, QStringLiteral("backup login"), &problem),
+            "an edited key is accepted", qPrintable(problem));
+        check(member(host, QStringLiteral("backup login")) != nullptr,
+            "the structure lands under the edited key");
+
+        // Arrays are not a destination.
+        app::RecordNode list = app::RecordNode::array();
+        check(!app::insertTemplate(&list, *website, QStringLiteral("x"), &problem),
+            "an array is not a destination");
+        // And a blank key is refused before anything is added.
+        check(!app::insertTemplate(&host, *website, QStringLiteral("   "), &problem),
+            "a blank key is refused");
     }
 
     // --- broken templates are refused --------------------------------------

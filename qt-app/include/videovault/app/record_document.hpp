@@ -193,4 +193,16 @@ RecordDocument cloneTemplate(const RecordEntry& templateEntry,
 // parseRecord, so a built-in is exactly the format a user's own template is.
 QVector<RecordDocument> builtinTemplates();
 
+// Inserts a template's structure into `target`, which must be an object, under `key`.
+//
+// This is the "part of a record" use: the template's body becomes a nested object, with
+// its generators applied on the way in, so a password template inserted mid-edit arrives
+// already generated. Because the generators are applied rather than carried over, there is
+// no path to re-root: the values are already in place and the inserted subtree is ordinary.
+//
+// False (with `problem` set) when the target is not an object, the key is empty or already
+// a field there, or the template's own generator paths do not resolve.
+bool insertTemplate(RecordNode* target, const RecordEntry& templateEntry, const QString& key,
+    QString* problem = nullptr);
+
 } // namespace videovault::app

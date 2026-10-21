@@ -1032,6 +1032,35 @@ RecordDocument cloneTemplate(const RecordEntry& templateEntry, const QString& ti
     return document;
 }
 
+bool insertTemplate(RecordNode* target, const RecordEntry& templateEntry, const QString& key,
+    QString* problem) {
+    const auto fail = [problem](const QString& text) {
+        if (problem != nullptr) {
+            *problem = text;
+        }
+        return false;
+    };
+    if (target == nullptr || target->type != ValueType::Object) {
+        return fail(QStringLiteral("Templates are inserted into an object."));
+    }
+    const QString name = key.trimmed();
+    if (!isValidKey(name)) {
+        return fail(QStringLiteral("A field needs a name."));
+    }
+    for (const auto& member : target->members) {
+        if (member.first == name) {
+            return fail(QStringLiteral("\"%1\" is already a field here.").arg(name));
+        }
+    }
+    RecordEntry copy = templateEntry;
+    if (!applyGenerators(&copy, problem)) {
+        return false;
+    }
+    target->members.append({name, copy.body});
+    sortMembers(target);
+    return true;
+}
+
 QVector<RecordDocument> builtinTemplates() {
     QVector<RecordDocument> templates;
     const QStringList files = QDir(QStringLiteral(":/templates"))

@@ -6561,9 +6561,11 @@ void MainWindow::beginRecord(const std::int64_t video_id, const QString& title) 
         });
         connect(window, &RecordWindow::closeRequested, this, [this] { closeRecord(); });
         connect(window, &RecordWindow::saved, this, [this] { refreshGallery(); });
+        // A saved template is a new library item; refresh so it is there when the user goes back.
+        connect(window, &RecordWindow::templateSaved, this, [this](const QString&) { refreshGallery(); });
         recordWindow_ = window;
     }
-    recordWindow_->openRecord(vault_, video_id, title);
+    recordWindow_->openRecord(vault_, video_id, title, currentFolderId_);
     if (contentStack_ != nullptr && contentStack_->indexOf(recordWindow_) < 0) {
         contentStack_->addWidget(recordWindow_);
     }
