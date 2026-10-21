@@ -137,6 +137,12 @@ private:
 
     std::shared_ptr<core::Vault> vault_;
     std::int64_t folderId_{0};
+    // applyStyle() sets a stylesheet, which delivers a StyleChange, which changeEvent()
+    // answers with applyStyle() and so on. In light theme the sheet moves the palette, so the
+    // loop actually closes and the recursion exhausts the stack; in dark it happened not to,
+    // which is why only light crashed. Guarded here and compared against the window colour the
+    // sheet was built for, so only a real theme change re-styles.
+    bool restyling_{false};
     std::int64_t recordId_{0};
     QString itemName_;
     RecordDocument document_;

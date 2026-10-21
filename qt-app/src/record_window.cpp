@@ -440,8 +440,6 @@ void RecordWindow::applyStyle() {
     const QString bar = dark ? QStringLiteral("#1c1c22") : QStringLiteral("#f2f2f7");
     const QString border = dark ? QStringLiteral("rgba(255, 255, 255, 22)")
                                 : QStringLiteral("rgba(0, 0, 0, 20)");
-    const QString guide = dark ? QStringLiteral("rgba(255, 255, 255, 18)")
-                               : QStringLiteral("rgba(0, 0, 0, 14)");
     const QString quiet = dark ? QStringLiteral("#d1d1d6") : QStringLiteral("#3a3a3c");
     const QString quietOff = dark ? QStringLiteral("#636366") : QStringLiteral("#b0b0b5");
     disclosureColor_ = dark ? QStringLiteral("#a8a8b0") : QStringLiteral("#78787d");
@@ -475,12 +473,15 @@ void RecordWindow::applyStyle() {
         }
         QLineEdit#recordSearch:focus { border: 1px solid #2672c8; }
         QPushButton[quiet="true"]:focus { border: 1px solid #2672c8; border-radius: 7px; }
-        QFrame#recordLegacyBar { background: %8; border: 1px solid %5; border-radius: 14px; }
+        QFrame#recordLegacyBar { background: %7; border: 1px solid %5; border-radius: 14px; }
         QLabel#recordLegacyLabel { color: %2; font-size: 13px; }
 
         QWidget#recordChildren { background: transparent; }
     )")
-            .arg(strong, body, muted, card, border, badge, guide, bar);
+            // Seven placeholders, seven arguments. Passing eight left %8 holding `guide`
+            // and dropped `bar`, so the legacy bar was painted near-transparent in both
+            // themes and every call warned that an argument was missing.
+            .arg(strong, body, muted, card, border, badge, bar);
     // Appended rather than added as %9/%10: Qt's arg() parses two-digit
     // placeholders badly once an earlier pass has consumed the leading digit.
     // Quiet actions are #d1d1d6 in the app sheet, which disappears on a white card.
