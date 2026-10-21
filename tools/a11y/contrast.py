@@ -116,14 +116,19 @@ def report(name: str, palette: dict[str, str], minimum: float) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--min", type=float, default=4.5, help="minimum ratio for normal text")
+    # Point the gate at another palette pair. The tool's own tests use this to exercise the
+    # failing path with a fixture instead of depending on the tree's current health -- which
+    # is what made them assert failure on a palette that had since been fixed.
+    parser.add_argument("--hpp", type=Path, default=THEME_HPP, help="theme header to read (dark)")
+    parser.add_argument("--cpp", type=Path, default=THEME_CPP, help="theme source to read (light)")
     args = parser.parse_args()
 
-    hpp = THEME_HPP.read_text(encoding="utf-8")
-    cpp = THEME_CPP.read_text(encoding="utf-8")
+    hpp = args.hpp.read_text(encoding="utf-8")
+    cpp = args.cpp.read_text(encoding="utf-8")
     dark = parse_palette(hpp, "inline QPalette darkPalette()")
     light = parse_palette(cpp, "QPalette lightPalette()")
 
-    print("WCAG 2.1 contrast, read from theme.hpp (dark) and theme.cpp (light)")
+    print(f"WCAG 2.1 contrast, read from {args.hpp.name} (dark) and {args.cpp.name} (light)")
     print(f"threshold: {args.min} for normal text, 3.0 for large/icon text")
     failures = report("dark", dark, args.min) + report("light", light, args.min)
 
