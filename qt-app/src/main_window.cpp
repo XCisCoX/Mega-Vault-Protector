@@ -104,6 +104,7 @@
 #include <QEasingCurve>
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
+#include <QScopedValueRollback>
 #include <QTimer>
 #include <QRandomGenerator>
 #include <QAbstractSlider>
@@ -1357,6 +1358,109 @@ QFrame* cardFor(QWidget* page) {
     return card;
 }
 
+// The auth card must never be shorter than its content at the width it has.
+// A word-wrapped label reports a one-line minimum height, so a short window
+// compressed the card until the title row and the privacy banner were drawn on
+// top of each other. Keeping a content-derived minimum makes the page's scroll
+// area scroll instead, which is what the card was placed in for.
+class CardFitter final : public QObject {
+public:
+    CardFitter(QFrame* card, QWidget* page)
+        : QObject(card), card_(card), page_(page),
+          designWidth_(card != nullptr ? card->maximumWidth() : 620) {}
+
+    void apply() {
+        if (card_ == nullptr || card_->layout() == nullptr || applying_) {
+            return;
+        }
+        const QScopedValueRollback<bool> guard(applying_, true);
+        QLayout* layout = card_->layout();
+        // A wrapped title reads as a clipping bug even when it is not one: give
+        // the card enough width for the heading on one line before deciding.
+        // The page, not the card's host: the host is stretched to the card, so
+        // it never reports the width the user actually has.
+        const int pageWidth = page_ != nullptr ? page_->width() : 0;
+        // A card wider than the page is simply cut off: the auth scroll area has
+        // no horizontal scrollbar. Tighten the design cap to what fits.
+        const int available = pageWidth > 0 ? std::max(320, pageWidth - 96) : designWidth_;
+        const int hardCap = std::min(designWidth_ > 0 ? designWidth_ : 620, available);
+        if (card_->maximumWidth() != hardCap) {
+            card_->setMaximumWidth(hardCap);
+        }
+        if (auto* title = card_->findChild<QLabel*>(QStringLiteral("pageTitle"))) {
+            const int titleWidth = title->fontMetrics().horizontalAdvance(title->text());
+            const int neededWidth = titleWidth + 4 + 84; // card margins, both sides
+            // One line for the heading whenever the window can hold it; below
+            // that the title wraps and the card scrolls vertically.
+            card_->setMinimumWidth(pageWidth == 0 || pageWidth >= neededWidth + 96
+                    ? std::min(neededWidth, hardCap)
+                    : 0);
+        }
+        // Cleared first: hiding the privacy banner has to be able to lower it.
+        card_->setMinimumHeight(0);
+        card_->setMaximumHeight(QWIDGETSIZE_MAX);
+        layout->activate();
+        const int width = card_->width() > 0 ? card_->width() : 560;
+        // Max of both: heightForWidth(530) came out 2px short of what the label
+        // rows actually need, which clipped the descenders of the title.
+        int needed = layout->sizeHint().height();
+        if (layout->hasHeightForWidth()) {
+            needed = std::max(needed, layout->heightForWidth(width));
+        }
+        // Wrapped labels report a sizeHint two pixels shorter than the height
+        // their own heightForWidth asks for, and a box layout hands them the
+        // sizeHint: that was the clipped descender on the title. Floor each one.
+        for (QLabel* label : card_->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly)) {
+            if (label == nullptr || !label->isVisible() || !label->wordWrap()) {
+                continue;
+            }
+            label->setMinimumHeight(0);
+            const int labelWidth = label->width() > 0 ? label->width() : width - 84;
+            label->setMinimumHeight(std::max(label->heightForWidth(labelWidth), 0));
+        }
+        layout->activate();
+        needed = std::max(needed, layout->sizeHint().height());
+        if (layout->hasHeightForWidth()) {
+            needed = std::max(needed, layout->heightForWidth(width));
+        }
+        // Fixed, not a floor: with spare room the host layout handed the card its
+        // own sizeHint, which was the 2px short one. The page's stretches take the
+        // spare height instead, so the card is exactly as tall as its content.
+        card_->setFixedHeight(std::max(needed, layout->minimumSize().height()));
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        Q_UNUSED(watched);
+        if (applying_ || pending_) {
+            return false;
+        }
+        switch (event->type()) {
+        case QEvent::Resize:
+        case QEvent::LayoutRequest:
+        case QEvent::Show:
+        case QEvent::Hide:
+            // Deferred: resizing inside a layout request re-enters the layout.
+            pending_ = true;
+            QTimer::singleShot(0, this, [this] {
+                pending_ = false;
+                apply();
+            });
+            break;
+        default:
+            break;
+        }
+        return false;
+    }
+
+private:
+    QFrame* card_{nullptr};
+    QWidget* page_{nullptr};
+    int designWidth_{620};
+    bool applying_{false};
+    bool pending_{false};
+};
+
 void placeCard(QWidget* page, QFrame* card) {
     // A short window scrolls the card instead of squeezing it: a compressed card
     // is what cut the bottom half off the path and password fields.
@@ -1386,6 +1490,10 @@ void placeCard(QWidget* page, QFrame* card) {
     // 812x520 slab that would not fit a small laptop screen, and a frame dragged
     // below the floor clipped the card's controls. Height beyond that scrolls.
     // QSize::grownBy is unavailable in the Windows build's Qt 5.12.
+    auto* fitter = new CardFitter(card, page);
+    card->installEventFilter(fitter);
+    page->installEventFilter(fitter);
+    fitter->apply();
     const QSize cardMinimum = card->minimumSizeHint();
     page->setMinimumSize(QSize(cardMinimum.width() + 96, cardMinimum.height() + 48));
 }
@@ -5360,7 +5468,7 @@ PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
     ok->setObjectName(QStringLiteral("inWindowPrimary"));
     ok->setCursor(Qt::PointingHandCursor);
     ok->setFocusPolicy(Qt::NoFocus);
-    dialog.buttons()->addWidget(ok);
+    dialog.addButtonWidget(ok);
     QObject::connect(password, &QLineEdit::returnPressed, ok, &QPushButton::click);
     QObject::connect(ok, &QPushButton::clicked, &dialog, [&dialog, password, confirm] {
         if (password->text().isEmpty()) {

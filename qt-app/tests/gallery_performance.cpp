@@ -283,6 +283,24 @@ struct GalleryPerformanceTestAccess {
                 check(card->height() >= cardMinimum.height(), "card keeps its layout minimum height");
                 check(field->sizePolicy().verticalPolicy() != QSizePolicy::Ignored,
                     "path field is not vertically ignored");
+                // Nothing may be painted outside the card: the reported case was the
+                // title's second line and the bottom action overlapping the controls
+                // above them because the card was compressed below its content.
+                for (QWidget* child : card->findChildren<QWidget*>(
+                         QString(), Qt::FindDirectChildrenOnly)) {
+                    if (!child->isVisible()) {
+                        continue;
+                    }
+                    check(child->geometry().bottom() < card->height(),
+                        "auth card child stays inside the card");
+                }
+                if (auto* title = card->findChild<QLabel*>(QStringLiteral("pageTitle"));
+                    title != nullptr && title->isVisible()) {
+                    const int titleNeeded = title->heightForWidth(title->width());
+                    std::printf("  title h=%d needed=%d w=%d\n", title->height(), titleNeeded,
+                        title->width());
+                    check(title->height() >= titleNeeded, "auth title is not clipped");
+                }
             }
         }
         // A small window is the reported case: the app must scroll the auth card
@@ -318,12 +336,121 @@ struct GalleryPerformanceTestAccess {
                 "compressed window: row keeps its layout minimum height");
             check(row->rect().contains(field->geometry()) && row->rect().contains(browse->geometry()),
                 "compressed window: row contains both controls");
+            // The card may not hang out of the page: there is no horizontal
+            // scrollbar, so a card wider than the window is simply cut off.
+            auto* card = setup ? window.setupPage_->findChild<QFrame*>(QStringLiteral("card"))
+                               : window.loginPage_->findChild<QFrame*>(QStringLiteral("card"));
+            std::printf("compressed card w=%d page w=%d\n", card->width(),
+                setup ? window.setupPage_->width() : window.loginPage_->width());
+            check(card->width() + 96 <=
+                    (setup ? window.setupPage_->width() : window.loginPage_->width()) + 1,
+                "compressed window: card fits the page width");
             if (const auto shots = qEnvironmentVariable("MVP_AUTH_SHOT"); !shots.isEmpty()) {
                 QDir().mkpath(shots);
                 window.grab().save(shots + QStringLiteral("/auth-") + (setup ? "setup" : "unlock") + ".png");
             }
         }
+        // The privacy banner is what pushed the card past the window in the report:
+        // shown, the card has to grow (or scroll) instead of overlapping its button.
+        {
+            MainWindow window;
+            window.showLogin({});
+            window.setMinimumSize(0, 0);
+            window.loginPage_->setMinimumSize(0, 0);
+            window.show();
+            window.privacyBannerText_->setText(QStringLiteral(
+                "Privacy screen: the vault is NOT locked. Its keys are still in memory, so "
+                "the phone can keep reading and copying files."));
+            window.privacyBanner_->show();
+            window.resize(520, 400);
+            QApplication::processEvents();
+            QApplication::processEvents();
+            auto* card = window.loginPage_->findChild<QFrame*>(QStringLiteral("card"));
+            int worstBottom = 0;
+            for (QWidget* child : card->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+                if (child->isVisible()) {
+                    worstBottom = std::max(worstBottom, child->geometry().bottom());
+                }
+            }
+            std::printf("banner window=%dx%d card=%dx%d worst child bottom=%d\n",
+                window.width(), window.height(), card->width(), card->height(), worstBottom);
+            check(worstBottom < card->height(), "privacy banner stays inside the card");
+            if (const auto shots = qEnvironmentVariable("MVP_AUTH_SHOT"); !shots.isEmpty()) {
+                QDir().mkpath(shots);
+                window.grab().save(shots + QStringLiteral("/auth-privacy.png"));
+            }
+        }
         if (failures == 0) std::printf("auth layout: controls keep their full height at every size\n");
+        return failures == 0 ? 0 : 1;
+    }
+
+    // The sheet's action row: three long labels in a 420px card used to be cut
+    // mid-word ("Lock and stop sha"). It has to either fit the card or stack.
+    static int sheetLayout() {
+        int failures = 0;
+        const auto check = [&failures](bool condition, const char* message) {
+            if (!condition) {
+                std::fprintf(stderr, "FAIL %s\n", message);
+                ++failures;
+            }
+        };
+        // 560 is just above the app's own minimum width; below that the window
+        // itself is outside anything the sheet can lay out.
+        for (const QSize hostSize : {QSize(720, 520), QSize(560, 420)}) {
+            QWidget host;
+            host.resize(hostSize);
+            host.show();
+            QApplication::processEvents();
+            int rows = 0;
+            int cardWidth = 0;
+            QStringList labels;
+            InWindowSheet::setTestDriver([&](InWindowSheet* sheet) {
+                const auto buttons = sheet->findChild<QFrame*>(QStringLiteral("inWindowCard"))
+                                         ->findChildren<QPushButton*>();
+                QSet<int> tops;
+                for (QPushButton* button : buttons) {
+                    if (!button->isVisible()) {
+                        continue;
+                    }
+                    labels << button->text();
+                    tops.insert(button->mapTo(sheet, QPoint(0, 0)).y() / 10);
+                    std::printf("  button '%s' w=%d needs=%d\n", qPrintable(button->text()),
+                        button->width(), button->minimumSizeHint().width());
+                    check(button->width() >= button->minimumSizeHint().width(),
+                        "sheet button is wide enough for its label");
+                }
+                rows = tops.size();
+                cardWidth = sheet->findChild<QFrame*>(QStringLiteral("inWindowCard"))->width();
+                if (const auto shots = qEnvironmentVariable("MVP_SHEET_SHOT"); !shots.isEmpty()) {
+                    QDir().mkpath(shots);
+                    sheet->grab().save(shots + QStringLiteral("/sheet-") +
+                        QString::number(cardWidth) + QStringLiteral(".png"));
+                }
+                sheet->finish(0);
+            });
+            {
+                InWindowSheet sheet(&host);
+                sheet.setTitle(QStringLiteral("Lock this PC"));
+                sheet.setMessage(QStringLiteral(
+                    "A phone is still connected.\n\nLocking wipes the vault keys from memory and "
+                    "stops sharing. Hiding the screen keeps the vault UNLOCKED in this program so "
+                    "the phone can keep reading and copying it."));
+                sheet.addButton(QStringLiteral("Lock and stop sharing"), 1, true,
+                    QStringLiteral("lock"));
+                sheet.addButton(QStringLiteral("Hide screen, keep sharing"), 2, false,
+                    QStringLiteral("wifi"));
+                sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+                sheet.run();
+            }
+            InWindowSheet::setTestDriver({});
+            std::printf("sheet host=%dx%d card w=%d rows=%d\n", hostSize.width(),
+                hostSize.height(), cardWidth, rows);
+            check(labels.size() == 3, "sheet shows all three actions");
+            check(rows >= 1, "sheet lays its actions out");
+            check(cardWidth <= hostSize.width() - 40, "sheet card fits the window");
+            check(rows == 1 || rows == 3, "actions are one row or one per line");
+        }
+        if (failures == 0) std::printf("sheet layout: labels fit or stack\n");
         return failures == 0 ? 0 : 1;
     }
 
@@ -1173,5 +1300,7 @@ int main(int argc, char** argv) {
         return videovault::app::GalleryPerformanceTestAccess::shareUnlock();
     if (qEnvironmentVariableIsSet("MVP_AUTH_LAYOUT_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::authLayout();
+    if (qEnvironmentVariableIsSet("MVP_SHEET_LAYOUT_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::sheetLayout();
     return videovault::app::GalleryPerformanceTestAccess::run();
 }

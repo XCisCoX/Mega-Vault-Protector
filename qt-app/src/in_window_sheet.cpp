@@ -9,7 +9,8 @@
 #include <QGraphicsBlurEffect>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
-#include <QHBoxLayout>
+#include <QGridLayout>
+#include <QSpacerItem>
 #include <QKeyEvent>
 #include <QTimer>
 #include <cstdio>
@@ -105,9 +106,11 @@ InWindowSheet::InWindowSheet(QWidget* host)
     bodyHost_->setBackgroundRole(QPalette::NoRole);
     scroll_->setStyleSheet(QStringLiteral(
         "QScrollArea#inWindowBody { background: transparent; border: none; }"));
-    buttons_ = new QHBoxLayout();
+    // A grid, not a box: the action row reflows to one button per line when the
+    // labels do not fit the card (see relayoutActions).
+    buttons_ = new QGridLayout();
+    buttons_->setContentsMargins(0, 0, 0, 0);
     buttons_->setSpacing(8);
-    buttons_->addStretch(1);
     column->addWidget(title_);
     column->addWidget(message_);
     column->addWidget(scroll_, 1);
@@ -178,6 +181,23 @@ QLineEdit* InWindowSheet::addTextEntry(
     return entry_;
 }
 
+void InWindowSheet::addButtonWidget(QPushButton* button) {
+    if (button == nullptr) {
+        return;
+    }
+    if (button->parentWidget() == nullptr) {
+        button->setParent(card_);
+    }
+    if (button->minimumHeight() < 36) {
+        button->setMinimumHeight(36);
+    }
+    if (button->cursor().shape() == Qt::ArrowCursor) {
+        button->setCursor(Qt::PointingHandCursor);
+    }
+    actions_.push_back(button);
+    relayoutActions(false);
+}
+
 QPushButton* InWindowSheet::addButton(const QString& label, const int result, const bool primary,
     const QString& icon) {
     auto* button = new QPushButton(label, card_);
@@ -198,7 +218,7 @@ QPushButton* InWindowSheet::addButton(const QString& label, const int result, co
             button->setIcon(icons::lucideSolid(icon, QColor(0xf2, 0xf2, 0xf7)));
         }
     }
-    buttons_->addWidget(button);
+    addButtonWidget(button);
     connect(button, &QPushButton::clicked, this, [this, result] { finish(result); });
     return button;
 }
@@ -209,14 +229,74 @@ void InWindowSheet::setTestDriver(std::function<void(InWindowSheet*)> driver) {
     testDriver_ = std::move(driver);
 }
 
+int InWindowSheet::actionsWidth() const {
+    if (actions_.empty()) {
+        return 0;
+    }
+    int width = 0;
+    for (const QPushButton* button : actions_) {
+        width += button->minimumSizeHint().width();
+    }
+    width += buttons_->spacing() * (static_cast<int>(actions_.size()) - 1);
+    // The card's own padding (22px each side) plus its 1px border, twice over.
+    return width + 48;
+}
+
+void InWindowSheet::relayoutActions(const bool stacked) {
+    if (buttons_ == nullptr) {
+        return;
+    }
+    while (QLayoutItem* item = buttons_->takeAt(0)) {
+        // Takes the item, not the widget: the buttons are reparented below.
+        delete item;
+    }
+    if (actions_.empty()) {
+        return;
+    }
+    if (stacked) {
+        for (std::size_t index = 0; index < actions_.size(); ++index) {
+            buttons_->addWidget(actions_[index], static_cast<int>(index), 0);
+        }
+    } else {
+        buttons_->addItem(
+            new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum), 0, 0);
+        for (std::size_t index = 0; index < actions_.size(); ++index) {
+            buttons_->addWidget(actions_[index], 0, static_cast<int>(index) + 1);
+        }
+    }
+    buttons_->setColumnStretch(0, stacked ? 1 : 0);
+    if (!stacked) {
+        buttons_->setColumnStretch(1, 0);
+    }
+}
+
 void InWindowSheet::fitCard() {
     if (card_ == nullptr || card_->layout() == nullptr || fitting_) {
         return;
     }
     const QScopedValueRollback<bool> guard(fitting_, true);
     QLayout* layout = card_->layout();
+    // Width first: the row of actions decides whether the card has to grow.
+    int widest = 0;
+    for (const QPushButton* button : actions_) {
+        widest = qMax(widest, button->minimumSizeHint().width());
+    }
+    int maxWidth = 640;
+    if (QWidget* host = parentWidget()) {
+        maxWidth = qMax(420, qMin(host->width() - 48, 640));
+    }
+    const int row = actionsWidth();
+    const bool stacked = row > maxWidth;
+    // Stacked, the card still has to be wide enough for the longest label:
+    // that label is the one that decides how narrow the sheet may go.
+    const int stackedWidth = qMax(420, widest + 48);
+    int width = stacked ? qMin(stackedWidth, maxWidth) : qMin(qMax(420, row), maxWidth);
+    width = qMax(320, width);
+    if (card_->width() != width) {
+        card_->setFixedWidth(width);
+    }
+    relayoutActions(stacked);
     layout->activate();
-    const int width = card_->width() > 0 ? card_->width() : 420;
     const int height = layout->hasHeightForWidth() ? layout->heightForWidth(width)
                                                    : layout->sizeHint().height();
     int target = qMax(height, layout->minimumSize().height());
