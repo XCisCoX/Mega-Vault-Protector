@@ -298,7 +298,13 @@ private:
     void showTransfers();
     void refreshTransfers();
     void notePeerCopyFinished(bool ok, const QString& message);
+    // Ordinary Lock: stops sharing, wipes the keys and closes the database.
+    // When a phone is connected the user is asked to choose explicitly between
+    // this and the privacy screen; the privacy screen is never silent.
     void lockVault();
+    // Screen-only lock: hides the library while sharing stays up. Reached only
+    // through lockVault()'s explicit "keep sharing" choice.
+    void enterPrivacyScreen(const std::filesystem::path& root);
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
     void showStatus(const QString& message, bool problem);
@@ -323,6 +329,16 @@ private:
     QLineEdit* loginLocation_{nullptr};
     QLineEdit* loginPassword_{nullptr};
     QLabel* loginError_{nullptr};
+    // Shown only after the user explicitly chose "hide the screen, keep
+    // sharing": the vault is still unlocked in this process, so the lock screen
+    // must say so instead of pretending the keys were wiped.
+    QWidget* privacyBanner_{nullptr};
+    QLabel* privacyBannerText_{nullptr};
+    QPushButton* privacyLockButton_{nullptr};
+    bool privacyScreenActive_{false};
+    // False while the idle auto-lock runs: an unattended lock must not wait on
+    // a dialog, so it always takes the hard-lock path.
+    bool interactiveLock_{true};
     QWidget* loginLocationRow_{nullptr};
     QLineEdit* cloudAddress_{nullptr};
     QLineEdit* cloudFingerprint_{nullptr};

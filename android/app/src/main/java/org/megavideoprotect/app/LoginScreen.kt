@@ -43,6 +43,10 @@ fun LoginScreen(
     onUnlocked: (String) -> Unit,
     onRemoteConnected: () -> Unit,
     onBack: () -> Unit,
+    // True while the vault is still unlocked behind this screen because a swap
+    // was deliberately kept alive. The screen must say so — it is not a lock.
+    privacyScreen: Boolean = false,
+    onLockFully: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var location by remember { mutableStateOf(vaultLocation) }
@@ -75,12 +79,18 @@ fun LoginScreen(
         }
         val code = pcCode
         val openedRoot = location
+        // Take the typed text into a local and empty the field immediately: the
+        // Argon2id unlock takes seconds, and the password must not sit in
+        // Compose state while it runs. (A Kotlin String cannot be overwritten;
+        // this only shortens how long the app itself keeps a reference.)
+        val entered = password
+        password = ""
         error = null
         busy = true
         checkingPc = code != null
         scope.launch {
             if (code != null) {
-                val failure = withContext(Dispatchers.IO) { RemoteVault.login(code, password) }
+                val failure = withContext(Dispatchers.IO) { RemoteVault.login(code, entered) }
                 busy = false
                 checkingPc = false
                 if (failure == null) {
@@ -91,7 +101,7 @@ fun LoginScreen(
                 }
             } else {
                 val res = withContext(Dispatchers.Default) {
-                    CoreBridge.Result.parse(CoreBridge.nativeOpenVault(openedRoot, password))
+                    CoreBridge.Result.parse(CoreBridge.nativeOpenVault(openedRoot, entered))
                 }
                 busy = false
                 if (res.ok) onUnlocked(openedRoot) else error = res.error.ifBlank { res.detail }
@@ -152,6 +162,21 @@ fun LoginScreen(
                         },
                         onChooseFolder = { showFolderPicker = true },
                     )
+                }
+                if (privacyScreen) {
+                    MvpError(
+                        "Privacy screen: the vault is NOT locked. Its keys are still in " +
+                            "memory and the connected PC can still read and copy this library.",
+                    )
+                    if (onLockFully != null) {
+                        MvpButton(
+                            "Lock the vault now",
+                            onClick = onLockFully,
+                            primary = true,
+                            enabled = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
                 MvpInput(
                     value = password,

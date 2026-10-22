@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -23,7 +24,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,7 +100,23 @@ class MainActivity : ComponentActivity() {
         return SystemClock.elapsedRealtime() - AppSession.leftAt >= limit
     }
 
-    private fun lockNow() {
+    /** Set when the user must choose between a hard lock and a screen-only lock. */
+    private var lockChoice by mutableStateOf(false)
+
+    /**
+     * The Lock button. When a PC is swapped in, the user has to say whether the
+     * vault really locks (sharing ends) or only the screen hides (the keys stay
+     * in memory and the PC keeps reading). The choice is never made silently.
+     */
+    private fun requestLock() {
+        if (PeerLink.linked() && unlocked()) {
+            lockChoice = true
+            return
+        }
+        lockNow(keepSharing = false)
+    }
+
+    private fun lockNow(keepSharing: Boolean = false) {
         SyncV4Auto.detach()
         PluginLibrary.close()
         PluginRuntime.close()
@@ -107,12 +126,15 @@ class MainActivity : ComponentActivity() {
                     .setAction(MusicPlaybackService.ACTION_STOP),
             )
         }
-        // A swap outlives the lock screen. It ends when someone disconnects
-        // or the PC stops sharing, and the vault locks then.
-        if (PeerLink.linked()) {
+        if (keepSharing && PeerLink.linked()) {
+            // Deliberate, user-chosen exception: the swap keeps its vault so the
+            // PC can still read it. The login screen says so.
             shareHoldsVault = true
         } else {
             shareHoldsVault = false
+            // Dropping the PC link is part of the lock: its session handle was a
+            // second way into this vault.
+            runCatching { PeerLink.unlink() }
             if (RemoteVault.connected()) RemoteVault.disconnect()
             else runCatching { CoreBridge.nativeLock() }
         }
@@ -133,6 +155,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         AppProxy.initialize(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Decrypted filenames, thumbnails and video frames must not reach the
+        // screenshot pipeline or the Recents thumbnail. This is the platform
+        // mechanism for that; it protects the preview, not process memory.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
         // The saved appearance is read once, before the first frame.
         MvpThemeState.loadOnce(this)
 
@@ -163,6 +192,30 @@ class MainActivity : ComponentActivity() {
                 // A player, picture, PDF, or song returns to the library. The library
                 // walks up one folder, then leaves only after a second press.
                 // Login leaves on one press. Setup has nowhere to go back to.
+                if (lockChoice) {
+                    AlertDialog(
+                        onDismissRequest = { lockChoice = false },
+                        title = { Text("Lock the vault?") },
+                        text = {
+                            Text(
+                                "Choosing “keep sharing” only hides the screen: the vault stays " +
+                                    "unlocked in memory and the PC can still read and copy it.",
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                lockChoice = false
+                                lockNow(keepSharing = false)
+                            }) { Text("Lock and stop sharing") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                lockChoice = false
+                                lockNow(keepSharing = true)
+                            }) { Text("Hide screen, keep sharing") }
+                        },
+                    )
+                }
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
                         is Screen.Player, is Screen.Image, is Screen.Music, is Screen.PluginMusic, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync, is Screen.Plugins -> show(Screen.Vault)
@@ -226,6 +279,8 @@ class MainActivity : ComponentActivity() {
                             onUnlocked = { root -> openedLocalVault(root) },
                             onRemoteConnected = { openedRemoteVault() },
                             onBack = { show(Screen.Setup) },
+                            privacyScreen = shareHoldsVault && unlocked(),
+                            onLockFully = { lockNow(keepSharing = false) },
                         )
                         is Screen.Vault -> {
                             // Outgoing animated content may recompose after a remote disconnect.
@@ -233,7 +288,7 @@ class MainActivity : ComponentActivity() {
                                 else AppSession.vaultIdentity.activeLocalRoot
                             if (location != null) VaultScreen(
                             vaultLocation = location,
-                            onLock = { lockNow() },
+                            onLock = { requestLock() },
                             onOpenPeer = { show(Screen.Peer) },
                             onOpenSync = { if (!RemoteVault.connected()) show(Screen.Sync) },
                             onOpenPlugins = { if (!RemoteVault.connected()) show(Screen.Plugins) },

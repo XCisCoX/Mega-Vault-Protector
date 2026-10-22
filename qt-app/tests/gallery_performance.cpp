@@ -62,12 +62,9 @@ struct GalleryPerformanceTestAccess {
         // Simulate the already-approved peer's state, not a network handshake.
         // The listener, vault, lock screen and password worker are production code.
         window.shareServer_->peer()->open(QStringLiteral("Generated phone"));
-        const auto port = window.shareServer_->port();
         window.showUnlocked();
         drain(window);
-        window.lockVault();
-        if (window.vault_ != original || !window.shareServer_->running()
-            || !window.peerLinked() || window.pages_->currentWidget() != window.loginPage_) return 103;
+
         auto login = [&](const std::filesystem::path& path, const QString& password) {
             window.loginLocation_->setText(QString::fromStdWString(path.wstring()));
             window.loginPassword_->setText(password);
@@ -80,35 +77,62 @@ struct GalleryPerformanceTestAccess {
             }
             return window.watcher_ == nullptr;
         };
-        const auto alias = root.parent_path() / L"." / root.filename();
-        if (!login(alias, QStringLiteral("wrong-password"))
-            || window.pages_->currentWidget() != window.loginPage_
-            || window.loginError_->text().contains(QStringLiteral("Stop sharing"))) {
-            std::fprintf(stderr, "FAIL equivalent share path rejected before password validation: %s\n",
-                qPrintable(window.loginError_->text()));
-            return 104;
+
+        // Hard lock is the ordinary Lock action. An unattended lock (the idle
+        // timer) never asks, so drive it exactly the way the timer does: no
+        // dialog, and the vault, its keys and the share session all go away.
+        window.interactiveLock_ = false;
+        window.lockVault();
+        if (window.vault_ != nullptr || window.shareServer_->running()
+            || window.peerLinked() || window.vault_ && window.vault_->is_unlocked()) {
+            std::fprintf(stderr, "FAIL lock left the vault or the share session alive\n");
+            return 103;
         }
-        if (!login(alias, QStringLiteral("share-unlock-fixture"))
-            || window.pages_->currentWidget() != window.unlockedPage_
-            || window.vault_ != original || !window.peerLinked()
-            || !window.shareServer_->running() || window.shareServer_->port() != port) {
-            std::fprintf(stderr, "FAIL shared vault did not resume: %s\n", qPrintable(window.loginError_->text()));
+        if (window.pages_->currentWidget() != window.loginPage_) return 103;
+
+        // The explicit alternative is a privacy screen, and it must not look
+        // like a lock: the vault stays open and the banner says so.
+        auto reopened = core::Vault::open(root, "share-unlock-fixture");
+        if (!reopened) return 104;
+        window.vault_ = std::make_shared<core::Vault>(std::move(reopened.value()));
+        window.shareServer_->setLocalVault(window.vault_);
+        window.shareServer_->peer()->open(QStringLiteral("Generated phone"));
+        window.enterPrivacyScreen(root);
+        drain(window);
+        if (!window.vault_ || !window.vault_->is_unlocked()
+            || !window.privacyScreenActive_ || window.privacyBanner_ == nullptr) {
+            std::fprintf(stderr, "FAIL privacy screen did not keep the vault open\n");
             return 105;
         }
-        drain(window);
+        // isHidden() is the widget's own state; isVisible() would also be false
+        // just because an ancestor page has not been painted yet offscreen.
+        if (window.privacyBanner_->isHidden()) {
+            std::fprintf(stderr, "FAIL privacy banner stayed hidden\n");
+            return 105;
+        }
+        if (!window.privacyBannerText_->text().contains(QStringLiteral("NOT locked"))) {
+            std::fprintf(stderr, "FAIL privacy banner text: %s\n",
+                qPrintable(window.privacyBannerText_->text()));
+            return 105;
+        }
+
+        // Locking from the privacy screen finishes the job for real.
+        window.privacyScreenActive_ = false;
+        window.interactiveLock_ = false;
         window.lockVault();
-        const auto other = root.parent_path() / L"other-vault";
-        std::filesystem::create_directory(other);
-        if (!login(other, QStringLiteral("share-unlock-fixture"))
-            || !window.loginError_->text().contains(QStringLiteral("Stop sharing"))
-            || window.vault_ != original || !window.peerLinked()) return 106;
-        window.shareServer_->unlinkPeer();
-        window.shareServer_->stop();
-        window.lockVault();
+        if (window.vault_ != nullptr || window.shareServer_->running()) return 105;
+
+        // The vault reopens with its password and the content is still there.
+        if (!login(root, QStringLiteral("wrong-password"))
+            || window.pages_->currentWidget() != window.loginPage_
+            || window.loginError_->text().isEmpty()) return 106;
         if (!login(root, QStringLiteral("share-unlock-fixture"))
-            || window.pages_->currentWidget() != window.unlockedPage_) return 107;
+            || window.pages_->currentWidget() != window.unlockedPage_) return 106;
         drain(window);
-        std::printf("PASS share lock/unlock: equivalent path, password verification, retained peer/listener, other-vault refusal, fresh reopen\n");
+        window.interactiveLock_ = false;
+        window.lockVault();
+        drain(window);
+        std::printf("PASS share lock/unlock: hard lock revokes the share session, privacy screen warns and keeps the vault, password verification, fresh reopen\n");
         return 0;
     }
     // Inspect the current toolbar and drive its real command popup.

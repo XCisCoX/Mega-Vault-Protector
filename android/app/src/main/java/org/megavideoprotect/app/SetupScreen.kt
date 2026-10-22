@@ -85,9 +85,14 @@ fun SetupScreen(
         }
         val iters = if (profile.startsWith("High")) 4 else 3
         val openedRoot = location
+        // Capture into a local and empty the fields before key derivation: the
+        // Compose state must not hold the new password while Argon2id runs.
+        val chosen = password
+        password = ""
+        confirmation = ""
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(openedRoot, password, memKib, iters, 1))
+                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(openedRoot, chosen, memKib, iters, 1))
             }
             busy = false
             if (res.ok) onCreated(openedRoot) else error = res.error.ifBlank { res.detail }

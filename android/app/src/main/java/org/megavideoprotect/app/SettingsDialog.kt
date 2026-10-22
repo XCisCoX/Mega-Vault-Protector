@@ -112,15 +112,21 @@ fun SettingsDialog(
         if (newPass.length < 8) { error = "New password must be at least 8 characters."; return }
         if (newPass != confirm) { error = "New passwords do not match."; return }
         error = null; ok = null; busy = true
+        // The two passwords move into locals and the fields are emptied before
+        // the re-key starts, so Compose state does not hold them for the whole
+        // Argon2id pass. (Java/Kotlin Strings cannot be overwritten; this only
+        // shortens how long the app keeps a reference to them.)
+        val oldPassword = current
+        val replacement = newPass
+        current = ""; newPass = ""; confirm = ""
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeChangePassword(current, newPass, 256 * 1024, 3, 1))
+                CoreBridge.Result.parse(
+                    CoreBridge.nativeChangePassword(oldPassword, replacement, 256 * 1024, 3, 1),
+                )
             }
             busy = false
-            if (res.ok) {
-                ok = "Password changed."
-                current = ""; newPass = ""; confirm = ""
-            } else error = res.error.ifBlank { res.detail }
+            if (res.ok) ok = "Password changed." else error = res.error.ifBlank { res.detail }
         }
     }
 

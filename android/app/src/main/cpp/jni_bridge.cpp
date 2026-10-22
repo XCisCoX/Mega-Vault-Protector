@@ -6,6 +6,8 @@
 
 #include <jni.h>
 
+#include <sodium.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -61,7 +63,12 @@ std::unordered_map<std::int64_t, std::vector<unsigned char>> g_plain;
 std::size_t g_plain_bytes = 0;
 
 void wipe_plain(std::vector<unsigned char>& bytes) {
-    std::fill(bytes.begin(), bytes.end(), 0U);
+    // sodium_memzero cannot be optimised away; std::fill over a buffer that is
+    // freed immediately afterwards can be. The vector is cleared only after the
+    // bytes are gone.
+    if (!bytes.empty()) {
+        sodium_memzero(bytes.data(), bytes.size());
+    }
     bytes.clear();
     bytes.shrink_to_fit();
 }
@@ -137,6 +144,22 @@ std::string json_escape(const std::string& s) {
         }
     }
     return out;
+}
+
+// Password input from Kotlin. The UTF-16 code units are encoded straight into
+// libsodium secure memory, so the password never becomes a std::string and the
+// buffer zeroises itself when the Secret leaves scope on any return path.
+// This does not (and cannot) wipe the Java String the caller passed in.
+std::optional<Secret> secret_from_jstring(JNIEnv* env, jstring jstr) {
+    if (jstr == nullptr) return std::nullopt;
+    const jsize length = env->GetStringLength(jstr);
+    if (length <= 0) return std::nullopt;
+    const jchar* chars = env->GetStringChars(jstr, nullptr);
+    if (chars == nullptr) return std::nullopt;
+    auto secret = Secret::from_utf16(std::span<const char16_t>(
+        reinterpret_cast<const char16_t*>(chars), static_cast<std::size_t>(length)));
+    env->ReleaseStringChars(jstr, chars);
+    return secret;
 }
 
 std::string ok_json(const std::string& extra = "") {
@@ -897,27 +920,33 @@ JNIEXPORT jboolean JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVaultE
     return Vault::exists(r) ? JNI_TRUE : JNI_FALSE;
 }
 
-JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring password,
+JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring jpassword,
                               jint mem_kib, jint iterations, jint parallelism) {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string r = jstring_to_string(env, root);
-    const std::string p = jstring_to_string(env, password);
+    auto password = secret_from_jstring(env, jpassword);
+    if (!password) {
+        return to_jstring(env, err_msg("The password could not be held in protected memory."));
+    }
     Argon2Parameters params{
         static_cast<std::uint32_t>(mem_kib),
         static_cast<std::uint32_t>(iterations),
         static_cast<std::uint32_t>(parallelism)};
-    auto result = Vault::create(r, p, params);
+    auto result = Vault::create(r, *password, params);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
     g_vault_root = r;
     return to_jstring(env, ok_json());
 }
 
-JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring password) {
+JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring jpassword) {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string r = jstring_to_string(env, root);
-    const std::string p = jstring_to_string(env, password);
-    auto result = Vault::open(r, p);
+    auto password = secret_from_jstring(env, jpassword);
+    if (!password) {
+        return to_jstring(env, err_msg("The password could not be held in protected memory."));
+    }
+    auto result = Vault::open(r, *password);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
     g_vault_root = r;
@@ -1056,13 +1085,16 @@ JNI_METHOD(nativeChangePassword)(JNIEnv* env, jobject, jstring current, jstring 
                                  jint mem_kib, jint iterations, jint parallelism) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
-    const std::string cur = jstring_to_string(env, current);
-    const std::string nw = jstring_to_string(env, new_password);
+    auto cur = secret_from_jstring(env, current);
+    auto nw = secret_from_jstring(env, new_password);
+    if (!cur || !nw) {
+        return to_jstring(env, err_msg("A password could not be held in protected memory."));
+    }
     Argon2Parameters params{
         static_cast<std::uint32_t>(mem_kib),
         static_cast<std::uint32_t>(iterations),
         static_cast<std::uint32_t>(parallelism)};
-    auto result = g_vault->change_password(cur, nw, params);
+    auto result = g_vault->change_password(*cur, *nw, params);
     if (!result) return to_jstring(env, err_json(result.error()));
     return to_jstring(env, ok_json());
 }
@@ -1265,7 +1297,8 @@ JNI_METHOD(nativeExportPackage)(JNIEnv* env, jobject, jstring path, jstring pass
     auto vault = retain_vault();
     if (!vault) return to_jstring(env, err_msg("Vault is not open"));
     const std::string dest = jstring_to_string(env, path);
-    const std::string pass = jstring_to_string(env, password);
+    auto pass = secret_from_jstring(env, password);
+    if (!pass) return to_jstring(env, err_msg("The package password is not valid."));
     const jsize count = ids == nullptr ? 0 : env->GetArrayLength(ids);
     const jsize path_count = paths == nullptr ? 0 : env->GetArrayLength(paths);
     if (count != path_count) return to_jstring(env, err_msg("The package list is invalid."));
@@ -1291,7 +1324,7 @@ JNI_METHOD(nativeExportPackage)(JNIEnv* env, jobject, jstring path, jstring pass
     }
     g_package_progress.store(0.0);
     auto result = vault->export_package(
-        dest, pass, files, directories, compress == JNI_TRUE,
+        dest, *pass, files, directories, compress == JNI_TRUE,
         [](double fraction) { g_package_progress.store(fraction); });
     g_package_progress.store(result ? 1.0 : -1.0);
     if (!result) return to_jstring(env, err_json(result.error()));
@@ -1302,10 +1335,11 @@ JNI_METHOD(nativeImportPackage)(JNIEnv* env, jobject, jstring path, jstring pass
     auto vault = retain_vault();
     if (!vault) return to_jstring(env, err_msg("Vault is not open"));
     const std::string source = jstring_to_string(env, path);
-    const std::string pass = jstring_to_string(env, password);
+    auto pass = secret_from_jstring(env, password);
+    if (!pass) return to_jstring(env, err_msg("The package password is not valid."));
     g_package_progress.store(0.0);
     auto result = vault->import_package(
-        source, pass, static_cast<std::int64_t>(folder_id),
+        source, *pass, static_cast<std::int64_t>(folder_id),
         [](double fraction) { g_package_progress.store(fraction); });
     g_package_progress.store(result ? 1.0 : -1.0);
     if (!result) return to_jstring(env, err_json(result.error()));

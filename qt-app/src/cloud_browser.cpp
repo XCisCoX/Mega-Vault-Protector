@@ -1,6 +1,8 @@
 #include "videovault/app/icons.hpp"
 #include "videovault/app/cloud_browser.hpp"
 
+#include "videovault/app/secure_input.hpp"
+
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -556,7 +558,7 @@ void CloudBrowser::openSession(
     const quint16 cloudPort = port_;
     const QString pin = fingerprint_;
     const QString cloudModel = model_;
-    const QByteArray secret = password.toUtf8();
+    QByteArray secret = password.toUtf8();
     auto* watcher = new QFutureWatcher<CloudReply>(this);
     connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
         const CloudReply reply = watcher->result();
@@ -578,8 +580,17 @@ void CloudBrowser::openSession(
     });
     watcher->setFuture(QtConcurrent::run([host, cloudPort, pin, cloudModel, secret] {
         QList<QByteArray> headers = identityHeaders(cloudModel, QStringLiteral("fast"), false);
-        return exchange(host, cloudPort, pin, "POST", QStringLiteral("/v1/login"), headers, secret);
+        CloudReply reply =
+            exchange(host, cloudPort, pin, "POST", QStringLiteral("/v1/login"), headers, secret);
+        // The password is the vault password: it must not stay in the worker's
+        // captured copy after the request is on the wire.
+        QByteArray scrub = secret;
+        wipeByteArray(scrub);
+        return reply;
     }));
+    // The caller's copy is released here rather than at the end of the frame.
+    // (The worker holds its own copy and wipes that one itself.)
+    wipeByteArray(secret);
 }
 
 void CloudBrowser::refreshRemote() {

@@ -1,5 +1,7 @@
 #include "videovault/app/sync_engine.hpp"
 
+#include "videovault/app/secure_input.hpp"
+
 #include "videovault/app/sync_client.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -1205,8 +1207,9 @@ void SyncEngine::signIn(const QUrl& server, const QString& email, const QString&
     launch(QStringLiteral("Signing in..."), Launch::SignedOut,
            [secret, address, label](Job& job, sync::Client& client) {
                job.signIn(client, address, *secret, label);
-               secret->fill(QLatin1Char('\0'));
-               secret->clear();
+               // Detach, zero the owned buffer, then clear: fill() alone left
+               // the previous buffer untouched on the heap.
+               wipeString(*secret);
            });
     emit changed();
 }

@@ -166,7 +166,14 @@ int main(int argc, char** argv) {
         check(!rotate->isEnabled(), "async password operation busy");
         QElapsedTimer timer; timer.start();
         while (!rotate->isEnabled() && timer.elapsed() < 30000) { app.processEvents(); QThread::msleep(5); }
-        check(rotate->isEnabled() && child.operator()<QLabel>("settingsStatus")->text() == "Password changed.", "real generated vault password rotation completes");
+        {
+            const QString statusText = child.operator()<QLabel>("settingsStatus")->text();
+            const QString diagnostic = QStringLiteral(
+                "real generated vault password rotation completes [enabled=%1, status=%2]")
+                .arg(rotate->isEnabled()).arg(statusText);
+            check(rotate->isEnabled() && statusText == QStringLiteral("Password changed."),
+                qPrintable(diagnostic));
+        }
         check(current->text().isEmpty() && next->text().isEmpty() && confirm->text().isEmpty(), "password fields cleared after rotation");
         check(bool(videovault::core::Vault::validate_password(root, "new-test-password")), "new password opens generated vault");
         stageMark("security section");

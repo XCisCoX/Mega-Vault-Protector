@@ -1,5 +1,7 @@
 #pragma once
 
+#include "videovault/core/secret.hpp"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -137,6 +139,29 @@ public:
 
     [[nodiscard]] static bool exists(const std::filesystem::path& root) noexcept;
 
+    // True when this process could lock secret pages with mlock(). When false,
+    // Secret buffers are still wiped on release but may be swappable; the UI
+    // must not claim otherwise.
+    [[nodiscard]] static bool secure_memory_available() noexcept;
+
+    // Secure-memory entry points. Prefer these: the password bytes go straight
+    // into a locked, self-wiping buffer and are never copied into a std::string.
+    [[nodiscard]] static Result<Vault> create(
+        const std::filesystem::path& root,
+        const Secret& password,
+        Argon2Parameters parameters = {});
+
+    [[nodiscard]] static Result<Vault> open(
+        const std::filesystem::path& root,
+        const Secret& password);
+
+    [[nodiscard]] static Result<bool> validate_password(
+        const std::filesystem::path& root,
+        const Secret& password);
+
+    // Compatibility overloads for callers that already hold the password as
+    // text. They copy it into a Secret internally, but the caller's own bytes
+    // are outside the core's control (see REMAINING_RISKS.md).
     [[nodiscard]] static Result<Vault> create(
         const std::filesystem::path& root,
         std::string_view password,
@@ -151,7 +176,15 @@ public:
         std::string_view password);
 
     [[nodiscard]] bool is_unlocked() const noexcept;
+
+    // Hard lock: revokes the session, closes the encrypted database, wipes the
+    // master key and clears every capability handed out during the unlock.
     void lock() noexcept;
+
+    // Increases on every completed lock(). An asynchronous result created under
+    // an older generation belongs to a vault that no longer exists; callers
+    // must discard it instead of reopening a closed view.
+    [[nodiscard]] std::uint64_t lock_generation() const noexcept;
 
     [[nodiscard]] const std::filesystem::path& root_path() const noexcept;
     [[nodiscard]] Argon2Parameters kdf_parameters() const noexcept;
@@ -254,6 +287,13 @@ public:
     // Re-keys the vault with a new password: new salt and Argon2id parameters,
     // SQLCipher rekey, a fresh sealed password verifier, and re-wrapped file
     // keys. The vault stays unlocked under the new credentials on success.
+    // Both passwords are held in secure memory for the duration of the change
+    // only; neither is retained afterwards.
+    [[nodiscard]] Result<bool> change_password(
+        const Secret& current_password,
+        const Secret& new_password,
+        Argon2Parameters parameters = {});
+
     [[nodiscard]] Result<bool> change_password(
         std::string_view current_password,
         std::string_view new_password,
@@ -335,6 +375,14 @@ public:
     // `progress` receives 0.0..1.0 from the calling thread.
     [[nodiscard]] Result<bool> export_package(
         const std::filesystem::path& destination,
+        const Secret& password,
+        const std::vector<PackageItem>& files,
+        const std::vector<std::string>& directories,
+        bool compress,
+        const std::function<void(double)>& progress = {});
+
+    [[nodiscard]] Result<bool> export_package(
+        const std::filesystem::path& destination,
         std::string_view password,
         const std::vector<PackageItem>& files,
         const std::vector<std::string>& directories,
@@ -345,6 +393,14 @@ public:
     // library root), recreating folders. The password is the one chosen when
     // the package was written, not the vault password.
     // `on_file` / `on_folder` run for items that were newly stored.
+    [[nodiscard]] Result<int> import_package(
+        const std::filesystem::path& source,
+        const Secret& password,
+        std::int64_t folder_id,
+        const std::function<void(double)>& progress = {},
+        const std::function<void(std::int64_t id, const std::string& name, std::uint64_t size, std::int64_t parent)>& on_file = {},
+        const std::function<void(std::int64_t id, std::int64_t parent, const std::string& name)>& on_folder = {});
+
     [[nodiscard]] Result<int> import_package(
         const std::filesystem::path& source,
         std::string_view password,
@@ -377,6 +433,10 @@ private:
     // without blocking on mutex_ — which a worker import holds for the whole
     // duration of each file. Blocking there would freeze the UI thread.
     std::atomic<bool> unlocked_{false};
+
+    // Incremented by every lock() so asynchronous callers can tell that the
+    // vault they were reading belongs to a session that has ended.
+    std::atomic<std::uint64_t> lock_generation_{0};
 
     std::filesystem::path root_;
     std::unique_ptr<Impl> impl_;

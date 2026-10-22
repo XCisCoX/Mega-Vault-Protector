@@ -9,6 +9,7 @@
 #include <functional>
 #include <istream>
 #include <limits>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -82,19 +83,38 @@ serialize_package_header(const PackageHeader& header);
 // Streaming, seekable, authenticated reader over a package file. Chunks are
 // decrypted on demand with a bounded LRU cache and every chunk tag is
 // verified before its plaintext is exposed.
+//
+// The reader carries the vault's SessionGuard: when the vault is hard-locked
+// the guard is revoked and this reader refuses to decrypt anything else, even
+// though it was opened while the vault was unlocked. Decrypted chunks are
+// zeroised when they are evicted and when the reader is destroyed, so closing
+// a player does not leave plaintext media behind in freed heap memory.
 class PackageReader final {
 public:
     PackageReader() noexcept = default;
+    ~PackageReader();
+
+    PackageReader(PackageReader&& other) noexcept;
+    PackageReader& operator=(PackageReader&& other) noexcept;
+    PackageReader(const PackageReader&) = delete;
+    PackageReader& operator=(const PackageReader&) = delete;
 
     [[nodiscard]] static Result<PackageReader> open(
         const std::filesystem::path& path,
-        SensitiveBuffer file_key);
+        SensitiveBuffer file_key,
+        std::shared_ptr<SessionGuard> guard = {});
 
     [[nodiscard]] bool is_open() const noexcept { return input_.is_open(); }
     [[nodiscard]] std::uint64_t plaintext_size() const noexcept {
         return plaintext_size_;
     }
     [[nodiscard]] std::uint64_t position() const noexcept { return position_; }
+
+    // True when the vault that opened this reader has been locked. No further
+    // read will decrypt anything.
+    [[nodiscard]] bool revoked() const noexcept {
+        return guard_ != nullptr && guard_->revoked();
+    }
 
     // Seeks to a plaintext offset; offsets past the end clamp to EOF.
     [[nodiscard]] Result<bool> seek(std::uint64_t offset);
@@ -103,6 +123,10 @@ public:
     // returns the number actually read (0 at EOF).
     [[nodiscard]] Result<std::size_t> read(
         std::span<unsigned char> destination);
+
+    // Zeroes every cached plaintext chunk. Called on destruction, on lock
+    // detection, and by callers that are done with the reader.
+    void clear_cache() noexcept;
 
 private:
     static constexpr std::size_t kMaxCachedChunks = 4U;
@@ -113,14 +137,18 @@ private:
         std::vector<unsigned char> plaintext;
     };
 
-    [[nodiscard]] Result<std::vector<unsigned char>> chunk(
+    // Returns a pointer into the cache, never a copy: a chunk read must not
+    // create another heap-resident copy of decrypted media.
+    [[nodiscard]] Result<const std::vector<unsigned char>*> chunk(
         std::uint32_t index);
     void note_access(std::size_t slot) noexcept;
+    void release_slot(std::size_t slot) noexcept;
 
     std::ifstream input_;
     PackageHeader header_{};
     Sha256Digest digest_{};
     SensitiveBuffer file_key_;
+    std::shared_ptr<SessionGuard> guard_;
     std::uint64_t plaintext_size_{0U};
     std::uint64_t position_{0U};
     std::array<CachedChunk, kMaxCachedChunks> cache_{};

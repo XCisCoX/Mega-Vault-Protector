@@ -1,11 +1,15 @@
 #pragma once
 
+#include "videovault/core/secret.hpp"
+
 #include <QByteArray>
 #include <QJsonObject>
 #include <QMap>
 #include <QString>
 #include <QStringList>
 #include <QUrl>
+
+#include <string_view>
 
 // The pieces the protocol 4 client shares between its engine, its dialog and
 // its tests: validation, package naming, key derivation and the encrypted
@@ -62,6 +66,9 @@ struct Keys {
 
     bool isEmpty() const { return package.isEmpty() || state.size() != 32; }
     void wipe();
+    // The keys die with the object that held them, on every path (success,
+    // failure, exception) instead of only where a caller remembered to wipe().
+    ~Keys();
 };
 
 // The package password is *not* re-derived from the vault password on every
@@ -82,6 +89,12 @@ void resealState(const QString& directory, const Keys& from, const Keys& to);
 bool resealForPasswordChange(const QString& stateDirectory, const QString& oldPassword,
                              const QString& newPassword);
 
+// The same operation from secure-memory passwords, so a password change never
+// materialises the vault password as a QString or QByteArray.
+bool resealForPasswordChange(const QString& stateDirectory,
+                             const core::Secret& oldPassword,
+                             const core::Secret& newPassword);
+
 // <AppLocalData>/sync-v4/<sha256 of the canonical vault folder>. One device may
 // hold several vaults; each keeps its own state.
 QString stateDirectoryFor(const QString& vaultRoot);
@@ -89,6 +102,12 @@ QString stateDirectoryFor(const QString& vaultRoot);
 // Derives the keys from the vault password and this device's random salt. The
 // salt is created on first use (create=true) and reused afterwards; losing it
 // only means the state file must be rebuilt, never that data is lost.
+Keys deriveKeysFromBytes(const QString& stateDirectory, std::string_view vaultPasswordUtf8,
+                         bool create = true);
+
+// Compatibility overload: converts the QString once, then derives. Prefer the
+// std::string_view form (or a core::Secret's view()) where the caller already
+// has the password as bytes.
 Keys deriveKeys(const QString& stateDirectory, const QString& vaultPassword, bool create = true);
 
 // One metadata row as the server keeps it, plus the local item it maps to.

@@ -126,3 +126,28 @@ add_executable(MegaVaultExtensionTests extension_runtime.cpp)
 target_link_libraries(MegaVaultExtensionTests PRIVATE MegaVaultExtensions Threads::Threads)
 add_test(NAME VideoVault.ExtensionRuntime COMMAND MegaVaultExtensionTests)
 set_tests_properties(VideoVault.ExtensionRuntime PROPERTIES TIMEOUT 20)
+
+# Memory-security regression suite. It reads this process's own committed memory
+# to prove that a hard lock leaves no usable master key behind, so it needs the
+# core's internal headers (SensitiveBuffer / PackageReader / derive_master_key).
+# It writes only to throwaway temporary vaults and never prints a secret.
+add_executable(VideoVaultSecurityMemoryTests security_memory.cpp)
+target_link_libraries(VideoVaultSecurityMemoryTests PRIVATE VideoVault::Core Threads::Threads)
+target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+    "${CMAKE_SOURCE_DIR}/core/src")
+if(WIN32)
+    target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+        "${MVP_VCPKG_PREFIX}/include")
+elseif(ANDROID)
+    target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+        ${MVP_DEP_INCLUDE_DIRS})
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SECMEM_SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    target_link_libraries(VideoVaultSecurityMemoryTests PRIVATE PkgConfig::SECMEM_SODIUM)
+endif()
+target_compile_features(VideoVaultSecurityMemoryTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultSecurityMemoryTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultSecurityMemoryTests)
+add_test(NAME VideoVaultCore.SecurityMemory COMMAND VideoVaultSecurityMemoryTests)
+set_tests_properties(VideoVaultCore.SecurityMemory PROPERTIES TIMEOUT 300)

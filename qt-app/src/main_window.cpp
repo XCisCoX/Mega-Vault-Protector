@@ -19,6 +19,7 @@
 #include "videovault/app/plugin_tools.hpp"
 #include "videovault/app/tag_filter_button.hpp"
 #include "videovault/app/theme.hpp"
+#include "videovault/app/secure_input.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -194,11 +195,12 @@ QString textFromPath(const std::filesystem::path& path) {
 // The sync keys come from the vault password, so they are derived while it is
 // still in the worker's hand; only the derived keys leave this function, never
 // the password. A failure here leaves sync locked and does not block the vault.
-sync::Keys deriveSyncKeys(const std::filesystem::path& root, const std::string& password) {
+sync::Keys deriveSyncKeys(const std::filesystem::path& root, const core::Secret& password) {
     try {
         const QString folder = textFromPath(root);
-        return sync::deriveKeys(SyncEngine::stateDirectoryFor(folder),
-                                QString::fromUtf8(password.data(), int(password.size())));
+        // password.view() is read straight out of locked memory: no QString or
+        // QByteArray copy of the vault password is created here.
+        return sync::deriveKeysFromBytes(SyncEngine::stateDirectoryFor(folder), password.view());
     } catch (...) {
         return {};
     }
@@ -749,20 +751,6 @@ FileIdentity identityFromName(const QString& name) {
     };
     identity.route = kPlayable.contains(suffix) ? 1 : 0;
     return identity;
-}
-
-void clearSecret(std::string& secret) noexcept {
-    if (!secret.empty()) {
-        // Portable best-effort wipe the optimizer cannot elide. Replaces the
-        // former Windows-only SecureZeroMemory so the app builds everywhere.
-        volatile unsigned char* bytes =
-            reinterpret_cast<volatile unsigned char*>(secret.data());
-        for (std::size_t i = 0; i < secret.size(); ++i) {
-            bytes[i] = 0U;
-        }
-        secret.clear();
-        secret.shrink_to_fit();
-    }
 }
 
 // Gallery items are recreated from scratch on every refreshGallery() (search
@@ -1672,6 +1660,8 @@ MainWindow::MainWindow(QWidget* parent)
         // A running share keeps its own vault, so locking this window does
         // not cut the phone off. Skip only while a batch holds the UI vault.
         if (!batchBusy_) {
+            // Idle lock is not a user gesture: no dialog, always hard lock.
+            interactiveLock_ = false;
             lockVault();
         }
     });
@@ -2376,6 +2366,29 @@ QWidget* MainWindow::buildLoginPage() {
     icons::withText(newVaultButton, QStringLiteral("plus"));
     layout->addWidget(unlockButton_);
     layout->addWidget(newVaultButton);
+
+    // Explicit "keep sharing" state. It has to be impossible to mistake for a
+    // real lock: the vault keys are still in memory and the phone still reads
+    // them, so the banner says exactly that and offers the hard lock.
+    privacyBanner_ = new QWidget(card);
+    auto* privacyLayout = new QVBoxLayout(privacyBanner_);
+    privacyLayout->setContentsMargins(0, 0, 0, 0);
+    privacyLayout->setSpacing(6);
+    privacyBannerText_ = new QLabel(privacyBanner_);
+    privacyBannerText_->setWordWrap(true);
+    privacyBannerText_->setProperty("problem", true);
+    privacyLockButton_ = new QPushButton(
+        QStringLiteral("Lock the vault now and stop sharing"), privacyBanner_);
+    icons::withText(privacyLockButton_, QStringLiteral("lock"));
+    privacyLockButton_->setProperty("primary", true);
+    privacyLayout->addWidget(privacyBannerText_);
+    privacyLayout->addWidget(privacyLockButton_);
+    privacyBanner_->hide();
+    layout->addWidget(privacyBanner_);
+    connect(privacyLockButton_, &QPushButton::clicked, this, [this] {
+        privacyScreenActive_ = false;
+        lockVault();
+    });
 
     connect(browse, &QPushButton::clicked, this, [this] { selectLoginLocation(); });
     connect(unlockButton_, &QPushButton::clicked, this, [this] { beginOpen(); });
@@ -3768,21 +3781,29 @@ void MainWindow::selectLoginLocation() {
 void MainWindow::beginCreate() {
     setError(setupError_, {});
     const auto root = pathFromText(setupLocation_->text());
-    const QString passwordText = setupPassword_->text();
     if (root.empty()) {
         setError(setupError_, QStringLiteral("Choose a vault storage location."));
         return;
     }
-    if (passwordText.isEmpty()) {
+    if (setupPassword_->text().isEmpty()) {
         setError(setupError_, QStringLiteral("Enter a password."));
         return;
     }
-    if (passwordText != setupConfirmation_->text()) {
+    if (setupPassword_->text() != setupConfirmation_->text()) {
         setError(setupError_, QStringLiteral("The password confirmation does not match."));
         return;
     }
-
-    auto password = std::make_shared<std::string>(passwordText.toUtf8().constData());
+    // The field is emptied here, before Argon2id runs, and the bytes live in a
+    // locked buffer that wipes itself when the worker drops it.
+    setupConfirmation_->clear();
+    auto password = std::make_shared<core::Secret>();
+    if (auto captured = takeSecretFromLineEdit(setupPassword_)) {
+        *password = std::move(*captured);
+    } else {
+        setError(setupError_, QStringLiteral(
+            "This password could not be held in protected memory. Try a shorter one."));
+        return;
+    }
     const auto parameters = selectedParameters(securityProfile_->currentIndex());
     setBusy(true);
     watcher_ = new QFutureWatcher<std::shared_ptr<VaultOperationResult>>(this);
@@ -3797,7 +3818,7 @@ void MainWindow::beginCreate() {
         } else {
             outcome->error = result.error();
         }
-        clearSecret(*password);
+        password->wipe();
         return outcome;
     }));
 }
@@ -3814,12 +3835,11 @@ void MainWindow::beginOpen() {
     }
     setError(loginError_, {});
     auto root = pathFromText(loginLocation_->text());
-    const QString passwordText = loginPassword_->text();
     if (root.empty()) {
         setError(loginError_, QStringLiteral("Choose a vault storage location."));
         return;
     }
-    if (passwordText.isEmpty()) {
+    if (loginPassword_->text().isEmpty()) {
         setError(loginError_, QStringLiteral("Enter the vault password."));
         return;
     }
@@ -3838,7 +3858,14 @@ void MainWindow::beginOpen() {
         // Validate the retained vault, never a path alias that could be retargeted.
         root = vault_->root_path();
     }
-    auto password = std::make_shared<std::string>(passwordText.toUtf8().constData());
+    auto password = std::make_shared<core::Secret>();
+    if (auto captured = takeSecretFromLineEdit(loginPassword_)) {
+        *password = std::move(*captured);
+    } else {
+        setError(loginError_, QStringLiteral(
+            "This password could not be held in protected memory. Try a shorter one."));
+        return;
+    }
     setBusy(true);
     watcher_ = new QFutureWatcher<std::shared_ptr<VaultOperationResult>>(this);
     connect(watcher_, &QFutureWatcherBase::finished, this, [this] { finishOperation(); });
@@ -3855,7 +3882,7 @@ void MainWindow::beginOpen() {
                 outcome->succeeded = true;
                 outcome->resumed = true;
             }
-            clearSecret(*password);
+            password->wipe();
             return outcome;
         }
         auto result = core::Vault::open(root, *password);
@@ -3866,7 +3893,7 @@ void MainWindow::beginOpen() {
         } else {
             outcome->error = result.error();
         }
-        clearSecret(*password);
+        password->wipe();
         return outcome;
     }));
 }
@@ -5492,9 +5519,21 @@ void MainWindow::beginExportPackage(const std::int64_t only_folder_id) {
     progressBar_->show();
     const auto vault = vault_;
     const auto path = std::make_shared<std::filesystem::path>(pathFromText(destination));
-    auto password = std::make_shared<std::string>(prompt.password.toUtf8().constData());
-    prompt.password.fill(QLatin1Char('\0'));
-    prompt.password.clear();
+    auto password = std::make_shared<core::Secret>();
+    if (auto captured = secretFromQString(prompt.password)) {
+        *password = std::move(*captured);
+    }
+    wipeString(prompt.password);
+    if (password->empty()) {
+        setError(galleryStatus_, QStringLiteral("The package password is not valid."));
+        // Undo the busy state: the batch never started.
+        batchBusy_ = false;
+        importButton_->setEnabled(true);
+        importFolderButton_->setEnabled(true);
+        settingsButton_->setEnabled(true);
+        progressBar_->hide();
+        return;
+    }
     const bool compress = prompt.compress;
     QMetaObject::invokeMethod(batchWorker_,
         [worker = batchWorker_, vault, path, password, files, directories, compress] {
@@ -5536,9 +5575,21 @@ bool MainWindow::importPackagePath(const QString& selected) {
     progressBar_->show();
     const auto vault = vault_;
     const auto path = std::make_shared<std::filesystem::path>(pathFromText(selected));
-    auto password = std::make_shared<std::string>(prompt.password.toUtf8().constData());
-    prompt.password.fill(QLatin1Char('\0'));
-    prompt.password.clear();
+    auto password = std::make_shared<core::Secret>();
+    if (auto captured = secretFromQString(prompt.password)) {
+        *password = std::move(*captured);
+    }
+    wipeString(prompt.password);
+    if (password->empty()) {
+        setError(galleryStatus_, QStringLiteral("The package password is not valid."));
+        // Undo the busy state: the batch never started.
+        batchBusy_ = false;
+        importButton_->setEnabled(true);
+        importFolderButton_->setEnabled(true);
+        settingsButton_->setEnabled(true);
+        progressBar_->hide();
+        return false;
+    }
     const auto folderId = currentFolderId_;
     QMetaObject::invokeMethod(batchWorker_,
         [worker = batchWorker_, vault, path, password, folderId] {
@@ -8352,14 +8403,21 @@ void MainWindow::beginChangePassword() {
     }
 
     const auto vault = vault_;
-    const auto current_text =
-        std::make_shared<std::string>(current->text().toUtf8().constData());
-    const auto next_text =
-        std::make_shared<std::string>(next->text().toUtf8().constData());
-    const auto parameters = selectedParameters(profile->currentIndex());
-    current->clear();
-    next->clear();
+    // Both passwords move into locked buffers and both fields are emptied
+    // before the (slow) re-key starts.
+    auto current_text = std::make_shared<core::Secret>();
+    auto next_text = std::make_shared<core::Secret>();
+    auto capturedCurrent = takeSecretFromLineEdit(current);
+    auto capturedNext = takeSecretFromLineEdit(next);
     confirmation->clear();
+    if (!capturedCurrent || !capturedNext) {
+        setError(galleryStatus_, QStringLiteral(
+            "A password could not be held in protected memory. Try a shorter one."));
+        return;
+    }
+    *current_text = std::move(*capturedCurrent);
+    *next_text = std::move(*capturedNext);
+    const auto parameters = selectedParameters(profile->currentIndex());
 
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
@@ -8378,12 +8436,13 @@ void MainWindow::beginChangePassword() {
             const auto utf8 = root.u8string();
             const QString folder = QString::fromUtf8(
                 reinterpret_cast<const char*>(utf8.data()), int(utf8.size()));
-            sync::resealForPasswordChange(sync::stateDirectoryFor(folder),
-                                          QString::fromStdString(*current_text),
-                                          QString::fromStdString(*next_text));
+            (void)sync::resealForPasswordChange(sync::stateDirectoryFor(folder),
+                                                *current_text, *next_text);
         }
-        clearSecret(*current_text);
-        clearSecret(*next_text);
+        // The core wipes its own copies; these holders are wiped here on every
+        // path (success, failure and the reseal exception path).
+        current_text->wipe();
+        next_text->wipe();
         return std::make_shared<core::Result<bool>>(std::move(result));
     }));
 }
@@ -8430,6 +8489,19 @@ void MainWindow::showLogin(const std::filesystem::path& path) {
     if (!path.empty()) {
         loginLocation_->setText(textFromPath(path));
     }
+    if (privacyBanner_ != nullptr) {
+        // A privacy screen is not a lock. Say so, name who still has access,
+        // and keep the way out one click away.
+        privacyBanner_->setVisible(privacyScreenActive_);
+        if (privacyScreenActive_) {
+            const QString who = peerLinked() ? shareServer_->peer()->name()
+                                             : QStringLiteral("the connected device");
+            privacyBannerText_->setText(QStringLiteral(
+                "Privacy screen: the vault is NOT locked. Its keys are still in "
+                "memory and %1 can still read and copy this library. Lock fully "
+                "to wipe them and stop sharing.").arg(who));
+        }
+    }
     fadeStack(pages_, loginPage_);
     loginPassword_->clear();
     loginPassword_->setFocus();
@@ -8439,6 +8511,10 @@ void MainWindow::showUnlocked() {
     if (pluginMusic_) pluginMusic_->setVault(vault_);
     if (!vault_ || !vault_->is_unlocked()) {
         return;
+    }
+    privacyScreenActive_ = false;
+    if (privacyBanner_ != nullptr) {
+        privacyBanner_->hide();
     }
     // Show only the vault's folder name. The full path used to sit here and
     // leaked the storage location in every screenshot and on a shared screen;
@@ -8587,9 +8663,14 @@ void MainWindow::peerChanged() {
     if (!linked) {
         dismissPeerBrowser();
     }
-    // The lock screen was only hiding the library. With the swap gone, lock for real.
-    if (!linked && pages_ != nullptr && pages_->currentIndex() == kLoginPage
-        && vault_ && vault_->is_unlocked()) {
+    // The privacy screen was only hiding the library. With the phone gone there
+    // is nothing left to share, so finish the lock instead of leaving the keys
+    // in memory behind a lock screen nobody is using.
+    if (!linked && privacyScreenActive_ && vault_ && vault_->is_unlocked()) {
+        privacyScreenActive_ = false;
+        if (privacyBanner_ != nullptr) {
+            privacyBanner_->hide();
+        }
         if (shareServer_) {
             shareServer_->setLocalVault(nullptr);
         }
@@ -9338,6 +9419,34 @@ void MainWindow::lockVault() {
         }
         return;
     }
+
+    // The ordinary Lock action is a HARD lock: sharing stops, the SQLCipher
+    // connection closes, the master key is wiped and every reader that outlived
+    // the vault mutex is revoked. Only when this PC is actually sharing does
+    // the user get a choice, and then the alternative is labelled as what it
+    // is — a screen-only lock that keeps the keys alive.
+    const bool interactive = interactiveLock_;
+    interactiveLock_ = true;
+    bool keepSharing = privacyScreenActive_ && interactive;
+    if (peerLinked() && interactive) {
+        InWindowSheet sheet(this);
+        sheet.setTitle(QStringLiteral("Lock this PC"));
+        sheet.setMessage(QStringLiteral(
+            "A phone is still connected.\n\n"
+            "Locking wipes the vault keys from memory and stops sharing. "
+            "Hiding the screen keeps the vault UNLOCKED in this program so the "
+            "phone can keep reading and copying it."));
+        sheet.addButton(QStringLiteral("Lock and stop sharing"), 1, true, QStringLiteral("lock"));
+        sheet.addButton(QStringLiteral("Hide screen, keep sharing"), 2, false, QStringLiteral("wifi"));
+        sheet.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
+        const int choice = sheet.run();
+        if (choice == 0) {
+            resetAutoLock(); // Nothing happened: the vault stays as it was.
+            return;
+        }
+        keepSharing = choice == 2;
+    }
+
     if (settingsPage_) {
         auto* page = settingsPage_;
         settingsPage_ = nullptr;
@@ -9349,8 +9458,6 @@ void MainWindow::lockVault() {
     if (pluginMusic_) { pluginMusic_->setVault({}); contentStack_->setCurrentWidget(pages_); }
     if (extensionTools_) { extensionTools_->stopAndClear(); contentStack_->setCurrentWidget(pages_); }
     syncKeys_.wipe(); // The derived sync keys die with the unlock.
-    // Sharing stays up until Stop sharing, including a swap. The lock screen
-    // only hides this library; the other side can still look and copy.
     finishPeerApproval(false);
     dismissPeerBrowser();
     std::filesystem::path root;
@@ -9401,28 +9508,6 @@ void MainWindow::lockVault() {
     }
     if (vault_) {
         root = vault_->root_path();
-        if (peerLinked()) {
-            importButton_->setEnabled(true);
-            importFolderButton_->setEnabled(true);
-            settingsButton_->setEnabled(true);
-            detailsTree_->clear();
-            iconList_->clear();
-            tagFilterNames_.clear();
-            {
-                const QSignalBlocker blocker(tagFilterButton_);
-                tagFilterButton_->setTags({});
-            }
-            searchText_.clear();
-            currentFolderId_ = 0;
-            folders_.clear();
-            showLogin(root);
-            return;
-        }
-        if (shareServer_) {
-            shareServer_->setLocalVault(nullptr);
-        }
-        vault_->lock();
-        vault_.reset();
     }
     importButton_->setEnabled(true);
     importFolderButton_->setEnabled(true);
@@ -9437,6 +9522,31 @@ void MainWindow::lockVault() {
     searchText_.clear();
     currentFolderId_ = 0;
     folders_.clear();
+
+    if (keepSharing && vault_ && vault_->is_unlocked()) {
+        enterPrivacyScreen(root);
+        return;
+    }
+
+    // Hard lock. Stopping the share server first is what actually revokes the
+    // phone's access: its per-connection vault handle is dropped and the
+    // session token and link key are wiped before the keys go away.
+    privacyScreenActive_ = false;
+    if (shareServer_) {
+        shareServer_->setLocalVault(nullptr);
+        shareServer_->stop();
+    }
+    if (vault_) {
+        vault_->lock();
+        vault_.reset();
+    }
+    showLogin(root);
+}
+
+void MainWindow::enterPrivacyScreen(const std::filesystem::path& root) {
+    // Deliberately does NOT touch the vault: sharing keeps working because the
+    // vault stays unlocked. The banner on the login page says so.
+    privacyScreenActive_ = true;
     showLogin(root);
 }
 

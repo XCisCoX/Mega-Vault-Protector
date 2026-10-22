@@ -21,12 +21,95 @@ constexpr std::size_t kMaximumPasswordBytes = 4096U;
 
 std::once_flag g_sodium_once;
 int g_sodium_status = -1;
+bool g_secure_memory_supported = false;
 
 VaultError crypto_error(std::string detail) {
     return {VaultErrorCode::CryptoFailure, std::move(detail)};
 }
 
+// Probes mlock() once at initialization so the UI can report when the OS
+// refuses to lock secret pages (RLIMIT_MEMLOCK, hardened kernels, Android
+// vendor restrictions). Sodium's own allocator falls back to an unlocked
+// heap allocation in that case; the bytes are still wiped on free.
+bool probe_secure_memory() noexcept {
+    void* probe = sodium_malloc(64U);
+    if (probe == nullptr) {
+        return false;
+    }
+    const bool locked = sodium_mlock(probe, 64U) == 0;
+    if (locked) {
+        (void)sodium_munlock(probe, 64U);
+    }
+    sodium_free(probe);
+    return locked;
+}
+
 } // namespace
+
+// Encodes UTF-16 code units into UTF-8 bytes.
+[[nodiscard]] std::size_t utf16_utf8_length(const std::span<const char16_t> text) noexcept {
+    const char16_t* units = text.data();
+    const std::size_t count = text.size();
+    std::size_t bytes = 0U;
+    for (std::size_t i = 0U; i < count; ++i) {
+        std::uint32_t code = units[i];
+        if (code >= 0xD800U && code <= 0xDBFFU && i + 1U < count
+            && units[i + 1U] >= 0xDC00U && units[i + 1U] <= 0xDFFFU) {
+            code = 0x10000U + ((code - 0xD800U) << 10U)
+                + (static_cast<std::uint32_t>(units[i + 1U]) - 0xDC00U);
+            ++i;
+        } else if (code >= 0xD800U && code <= 0xDFFFU) {
+            code = 0xFFFDU; // lone surrogate
+        }
+        bytes += code < 0x80U ? 1U : (code < 0x800U ? 2U : (code < 0x10000U ? 3U : 4U));
+    }
+    return bytes;
+}
+
+std::size_t encode_utf16_as_utf8(
+    const std::span<const char16_t> text,
+    const std::span<unsigned char> destination) noexcept {
+    const char16_t* units = text.data();
+    const std::size_t count = text.size();
+    unsigned char* out = destination.data();
+    std::size_t written = 0U;
+    for (std::size_t i = 0U; i < count; ++i) {
+        std::uint32_t code = units[i];
+        if (code >= 0xD800U && code <= 0xDBFFU && i + 1U < count
+            && units[i + 1U] >= 0xDC00U && units[i + 1U] <= 0xDFFFU) {
+            code = 0x10000U + ((code - 0xD800U) << 10U)
+                + (static_cast<std::uint32_t>(units[i + 1U]) - 0xDC00U);
+            ++i;
+        } else if (code >= 0xD800U && code <= 0xDFFFU) {
+            code = 0xFFFDU;
+        }
+        // How many bytes this code point needs, checked exactly: a blanket
+        // "room for 4" test truncates any password whose remaining slack is
+        // smaller than that (that bug ate the tail of most passwords).
+        const std::size_t needed = code < 0x80U ? 1U
+            : (code < 0x800U ? 2U : (code < 0x10000U ? 3U : 4U));
+        if (written + needed > destination.size()) {
+            break; // never write past the caller's buffer
+        }
+        if (code < 0x80U) {
+            out[written++] = static_cast<unsigned char>(code);
+        } else if (code < 0x800U) {
+            out[written++] = static_cast<unsigned char>(0xC0U | (code >> 6U));
+            out[written++] = static_cast<unsigned char>(0x80U | (code & 0x3FU));
+        } else if (code < 0x10000U) {
+            out[written++] = static_cast<unsigned char>(0xE0U | (code >> 12U));
+            out[written++] = static_cast<unsigned char>(0x80U | ((code >> 6U) & 0x3FU));
+            out[written++] = static_cast<unsigned char>(0x80U | (code & 0x3FU));
+        } else {
+            out[written++] = static_cast<unsigned char>(0xF0U | (code >> 18U));
+            out[written++] = static_cast<unsigned char>(0x80U | ((code >> 12U) & 0x3FU));
+            out[written++] = static_cast<unsigned char>(0x80U | ((code >> 6U) & 0x3FU));
+            out[written++] = static_cast<unsigned char>(0x80U | (code & 0x3FU));
+        }
+    }
+    return written;
+}
+
 
 SensitiveBuffer::SensitiveBuffer(const std::size_t size) : size_(size) {
     if (size == 0U) {
@@ -60,6 +143,26 @@ SensitiveBuffer& SensitiveBuffer::operator=(SensitiveBuffer&& other) noexcept {
     return *this;
 }
 
+void SensitiveBuffer::wipe() noexcept {
+    if (data_ != nullptr) {
+        sodium_memzero(data_, size_);
+    }
+}
+
+std::size_t SensitiveBuffer::assign(const std::span<const unsigned char> source) noexcept {
+    if (data_ == nullptr) {
+        return 0U;
+    }
+    const std::size_t copied = std::min(size_, source.size());
+    if (copied > 0U) {
+        std::copy_n(source.begin(), copied, data_);
+    }
+    if (copied < size_) {
+        sodium_memzero(data_ + copied, size_ - copied);
+    }
+    return copied;
+}
+
 void SensitiveBuffer::release() noexcept {
     if (data_ == nullptr) {
         return;
@@ -74,13 +177,29 @@ void SensitiveBuffer::release() noexcept {
     locked_ = false;
 }
 
+bool secure_memory_supported() noexcept {
+    return g_secure_memory_supported;
+}
+
+void wipe_bytes(const std::span<unsigned char> bytes) noexcept {
+    if (!bytes.empty()) {
+        sodium_memzero(bytes.data(), bytes.size());
+    }
+}
+
 Result<bool> initialize_crypto() {
-    std::call_once(g_sodium_once, [] { g_sodium_status = sodium_init(); });
+    std::call_once(g_sodium_once, [] {
+        g_sodium_status = sodium_init();
+        if (g_sodium_status >= 0) {
+            g_secure_memory_supported = probe_secure_memory();
+        }
+    });
     if (g_sodium_status < 0) {
         return crypto_error("libsodium initialization failed");
     }
     return true;
 }
+
 
 bool is_valid_argon2_parameters(const Argon2Parameters& parameters) noexcept {
     return parameters.memory_kib >= kMinimumMemoryKiB

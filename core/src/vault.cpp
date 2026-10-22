@@ -246,11 +246,13 @@ VaultError locked_error() {
 }
 
 // Unwraps a video's file key and opens a streaming authenticated reader over
-// its package. Callers must hold the vault mutex.
+// its package. Callers must hold the vault mutex. The session guard travels
+// with the reader so a Hard Lock invalidates it even after it leaves the mutex.
 Result<internal::PackageReader> open_package_reader(
     const std::filesystem::path& root,
     internal::Database& database,
     const internal::SensitiveBuffer& master_key,
+    const std::shared_ptr<internal::SessionGuard>& session,
     const std::int64_t video_id) {
     auto row = database.query_video(video_id);
     if (!row) {
@@ -277,10 +279,14 @@ Result<internal::PackageReader> open_package_reader(
     }
     internal::SensitiveBuffer file_key(32U);
     std::copy(unwrapped.value().begin(), unwrapped.value().end(), file_key.data());
-    // Best-effort wipe of the transient plaintext key copy.
-    std::fill(unwrapped.value().begin(), unwrapped.value().end(), 0U);
+    // Wipe the transient heap copy of the plaintext key (secure_memzero, not a
+    // fill the optimizer may drop).
+    internal::wipe_bytes(unwrapped.value());
+    if (session != nullptr && session->revoked()) {
+        return VaultError{VaultErrorCode::AuthenticationFailed, "the vault was locked"};
+    }
     const auto package = root / L"vault-data" / row.value().package_relative_path;
-    return internal::PackageReader::open(package, std::move(file_key));
+    return internal::PackageReader::open(package, std::move(file_key), session);
 }
 
 // Thumbnail AEAD associated data: video id (8 LE) || package id (16).
@@ -299,13 +305,14 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     const std::filesystem::path& root,
     internal::Database& database,
     const internal::SensitiveBuffer& master_key,
+    const std::shared_ptr<internal::SessionGuard>& session,
     const std::int64_t video_id,
     const std::uint32_t max_dimension) {
     auto row = database.query_video(video_id);
     if (!row) {
         return row.error();
     }
-    auto reader = open_package_reader(root, database, master_key, video_id);
+    auto reader = open_package_reader(root, database, master_key, session, video_id);
     if (!reader) {
         return reader.error();
     }
@@ -459,11 +466,15 @@ public:
         const Argon2Parameters parameters)
         : master_key_(std::move(master_key)),
           database_(std::move(database)),
-          parameters_(parameters) {}
+          parameters_(parameters),
+          session_(std::make_shared<internal::SessionGuard>()) {}
 
     internal::SensitiveBuffer master_key_;
     internal::Database database_;
     Argon2Parameters parameters_;
+    // Revocation switch shared with readers/probes that outlive the vault
+    // mutex. lock() flips it before releasing any key material.
+    std::shared_ptr<internal::SessionGuard> session_;
 };
 
 Vault::Vault() noexcept
@@ -474,12 +485,14 @@ Vault::~Vault() = default;
 Vault::Vault(Vault&& other) noexcept
     : mutex_(std::move(other.mutex_)),
       unlocked_(other.unlocked_.load()),
+      lock_generation_(other.lock_generation_.load()),
       root_(std::move(other.root_)),
       impl_(std::move(other.impl_)) {}
 Vault& Vault::operator=(Vault&& other) noexcept {
     if (this != &other) {
         mutex_ = std::move(other.mutex_);
         unlocked_.store(other.unlocked_.load());
+        lock_generation_.store(other.lock_generation_.load());
         root_ = std::move(other.root_);
         impl_ = std::move(other.impl_);
     }
@@ -500,14 +513,33 @@ bool Vault::exists(const std::filesystem::path& root) noexcept {
         && std::filesystem::is_regular_file(paths.ready, ignored);
 }
 
+bool Vault::secure_memory_available() noexcept {
+    (void)internal::initialize_crypto();
+    return internal::secure_memory_supported();
+}
+
 Result<Vault> Vault::create(
     const std::filesystem::path& root,
     const std::string_view password,
     const Argon2Parameters parameters) {
+    // Compatibility path: the caller's own text buffer cannot be wiped here,
+    // so it is copied once into secure memory and used from there.
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "the password is too long or secure memory is unavailable"};
+    }
+    return create(root, *secret, parameters);
+}
+
+Result<Vault> Vault::create(
+    const std::filesystem::path& root,
+    const Secret& password,
+    const Argon2Parameters parameters) {
     if (root.empty()) {
         return VaultError{VaultErrorCode::InvalidArgument, "vault storage location must not be empty"};
     }
-    const auto validation = internal::validate_argon2_parameters(parameters, password);
+    const auto validation = internal::validate_argon2_parameters(parameters, password.view());
     if (!validation.technical_detail.empty()) {
         return validation;
     }
@@ -545,7 +577,7 @@ Result<Vault> Vault::create(
         return metadata.error();
     }
     auto master_key = internal::derive_master_key(
-        password, metadata.value().salt, parameters);
+        password.view(), metadata.value().salt, parameters);
     if (!master_key) {
         remove_creation_artifacts(paths);
         return master_key.error();
@@ -620,6 +652,17 @@ Result<Vault> Vault::create(
 Result<Vault> Vault::open(
     const std::filesystem::path& root,
     const std::string_view password) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "the password is too long or secure memory is unavailable"};
+    }
+    return open(root, *secret);
+}
+
+Result<Vault> Vault::open(
+    const std::filesystem::path& root,
+    const Secret& password) {
     if (root.empty()) {
         return VaultError{VaultErrorCode::InvalidArgument, "vault storage location must not be empty"};
     }
@@ -646,7 +689,7 @@ Result<Vault> Vault::open(
         return marker.error();
     }
     auto master_key = internal::derive_master_key(
-        password, metadata.value().salt, metadata.value().parameters);
+        password.view(), metadata.value().salt, metadata.value().parameters);
     if (!master_key) {
         if (master_key.error().code == VaultErrorCode::InvalidArgument && password.empty()) {
             return VaultError{VaultErrorCode::WrongPassword, "password is empty"};
@@ -698,6 +741,17 @@ Result<Vault> Vault::open(
 Result<bool> Vault::validate_password(
     const std::filesystem::path& root,
     const std::string_view password) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "the password is too long or secure memory is unavailable"};
+    }
+    return validate_password(root, *secret);
+}
+
+Result<bool> Vault::validate_password(
+    const std::filesystem::path& root,
+    const Secret& password) {
     auto opened = open(root, password);
     if (!opened) {
         if (opened.error().code == VaultErrorCode::WrongPassword) {
@@ -718,8 +772,19 @@ bool Vault::is_unlocked() const noexcept {
 
 void Vault::lock() noexcept {
     std::lock_guard<std::mutex> guard(*mutex_);
+    // Order matters: revoke first so a reader that already left the mutex
+    // (a media probe, a share worker) cannot decrypt anything else, then drop
+    // the master key and the SQLCipher connection, then publish the lock.
+    if (impl_ != nullptr && impl_->session_ != nullptr) {
+        impl_->session_->revoke();
+    }
     impl_.reset();
+    lock_generation_.fetch_add(1, std::memory_order_acq_rel);
     unlocked_.store(false, std::memory_order_release);
+}
+
+std::uint64_t Vault::lock_generation() const noexcept {
+    return lock_generation_.load(std::memory_order_acquire);
 }
 
 const std::filesystem::path& Vault::root_path() const noexcept {
@@ -1078,7 +1143,7 @@ Result<std::int64_t> Vault::import_file(
     }
     for (const auto existing_id : unhashed.value()) {
         auto reader = open_package_reader(
-            root_, impl.database_, impl.master_key_, existing_id);
+            root_, impl.database_, impl.master_key_, impl.session_, existing_id);
         if (!reader) {
             continue;
         }
@@ -1337,7 +1402,8 @@ Result<std::vector<unsigned char>> Vault::read_video_range(
     if (!impl_) {
         return locked_error();
     }
-    auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
+    auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_,
+        impl_->session_, video_id);
     if (!reader) {
         return reader.error();
     }
@@ -1374,7 +1440,8 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
         // gallery shows their real resolution and codec, and the media test
         // asserts that a 1x1 PNG reports png at 1x1. Do not short-circuit
         // images here — an early return left those columns blank.
-        auto opened = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
+        auto opened = open_package_reader(root_, impl_->database_, impl_->master_key_,
+            impl_->session_, video_id);
         if (!opened) {
             return opened.error();
         }
@@ -1459,8 +1526,8 @@ Result<ThumbnailInfo> Vault::generate_thumbnail(
     if (!impl_) {
         return locked_error();
     }
-    return generate_thumbnail_locked(
-        root_, impl_->database_, impl_->master_key_, video_id, max_dimension);
+    return generate_thumbnail_locked(root_, impl_->database_, impl_->master_key_,
+        impl_->session_, video_id, max_dimension);
 }
 
 Result<ThumbnailInfo> Vault::thumbnail(const std::int64_t video_id) const {
@@ -1533,8 +1600,8 @@ Result<ThumbnailInfo> Vault::display_thumbnail(
         info.bytes = std::move(decrypted.value());
         return info;
     }
-    auto generated = generate_thumbnail_locked(
-        root_, impl.database_, impl.master_key_, video_id, max_dimension);
+    auto generated = generate_thumbnail_locked(root_, impl.database_, impl.master_key_,
+        impl.session_, video_id, max_dimension);
     if (generated) {
         return generated;
     }
@@ -1699,7 +1766,7 @@ Result<std::filesystem::path> Vault::restore_video(
     }
     const auto target = target_dir / row_result.value().display_name;
     auto reader = open_package_reader(
-        root_, impl_->database_, impl_->master_key_, video_id);
+        root_, impl_->database_, impl_->master_key_, impl_->session_, video_id);
     if (!reader) {
         return reader.error();
     }
@@ -1992,6 +2059,24 @@ Result<bool> Vault::change_password(
     const std::string_view current_password,
     const std::string_view new_password,
     const Argon2Parameters parameters) {
+    // Compatibility path: copy both into secure memory, then run the real
+    // implementation. The caller's buffers are outside the core's control.
+    auto current = Secret::from_utf8(current_password);
+    auto next = Secret::from_utf8(new_password);
+    if (!current || !next) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "a password is too long or secure memory is unavailable"};
+    }
+    auto result = change_password(*current, *next, parameters);
+    current->wipe();
+    next->wipe();
+    return result;
+}
+
+Result<bool> Vault::change_password(
+    const Secret& current_password,
+    const Secret& new_password,
+    const Argon2Parameters parameters) {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
@@ -1999,7 +2084,7 @@ Result<bool> Vault::change_password(
     if (current_password.empty() || new_password.empty()) {
         return VaultError{VaultErrorCode::InvalidArgument, "passwords must not be empty"};
     }
-    const auto validation = internal::validate_argon2_parameters(parameters, new_password);
+    const auto validation = internal::validate_argon2_parameters(parameters, new_password.view());
     if (!validation.technical_detail.empty()) {
         return validation;
     }
@@ -2013,7 +2098,7 @@ Result<bool> Vault::change_password(
         return metadata.error();
     }
     auto current_master = internal::derive_master_key(
-        current_password, metadata.value().salt, metadata.value().parameters);
+        current_password.view(), metadata.value().salt, metadata.value().parameters);
     if (!current_master) {
         return current_master.error();
     }
@@ -2026,7 +2111,7 @@ Result<bool> Vault::change_password(
     // New key hierarchy.
     std::array<unsigned char, 16> new_salt{};
     internal::random_bytes(new_salt);
-    auto new_master = internal::derive_master_key(new_password, new_salt, parameters);
+    auto new_master = internal::derive_master_key(new_password.view(), new_salt, parameters);
     if (!new_master) {
         return new_master.error();
     }

@@ -1,4 +1,6 @@
 #include "videovault/app/settings_dialog.hpp"
+
+#include "videovault/app/secure_input.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/proxy_settings.hpp"
@@ -614,18 +616,27 @@ void SettingsDialog::beginPasswordChange() {
         return;
     }
     setStatus({});
-    const QString current_text = currentPassword_->text();
-    const QString next_text = newPassword_->text();
-    if (current_text.isEmpty() || next_text.isEmpty()) {
+    if (currentPassword_->text().isEmpty() || newPassword_->text().isEmpty()) {
         setStatus(QStringLiteral("Enter the current and a new password."), true);
         return;
     }
-    if (next_text != confirmPassword_->text()) {
+    if (newPassword_->text() != confirmPassword_->text()) {
         setStatus(QStringLiteral("The new password confirmation does not match."), true);
         return;
     }
-    auto current = std::make_shared<std::string>(current_text.toUtf8().constData());
-    auto next = std::make_shared<std::string>(next_text.toUtf8().constData());
+    // Password bytes go straight into locked, self-wiping buffers and both
+    // fields are emptied before the re-key starts.
+    auto current = std::make_shared<core::Secret>();
+    auto next = std::make_shared<core::Secret>();
+    auto capturedCurrent = takeSecretFromLineEdit(currentPassword_);
+    auto capturedNext = takeSecretFromLineEdit(newPassword_);
+    confirmPassword_->clear();
+    if (!capturedCurrent || !capturedNext) {
+        setStatus(QStringLiteral("A password could not be held in protected memory."), true);
+        return;
+    }
+    *current = std::move(*capturedCurrent);
+    *next = std::move(*capturedNext);
     const auto parameters = securityProfile_->currentIndex() == 0
         ? core::Argon2Parameters{256U * 1024U, 3U, 1U}
         : core::Argon2Parameters{512U * 1024U, 4U, 1U};
@@ -650,12 +661,11 @@ void SettingsDialog::beginPasswordChange() {
             const auto utf8 = root.u8string();
             const QString folder = QString::fromUtf8(
                 reinterpret_cast<const char*>(utf8.data()), int(utf8.size()));
-            videovault::app::sync::resealForPasswordChange(
-                videovault::app::sync::stateDirectoryFor(folder),
-                QString::fromStdString(*current), QString::fromStdString(*next));
+            (void)videovault::app::sync::resealForPasswordChange(
+                videovault::app::sync::stateDirectoryFor(folder), *current, *next);
         }
-        current->assign(current->size(), '\0');
-        next->assign(next->size(), '\0');
+        current->wipe();
+        next->wipe();
         return outcome;
     }));
 }

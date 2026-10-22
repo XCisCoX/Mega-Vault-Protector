@@ -62,6 +62,7 @@ set(MVP_APP_SOURCES
     src/in_window_sheet.cpp
     src/record_document.cpp
     src/record_window.cpp
+    src/secure_input.cpp
     src/settings_dialog.cpp
     src/tag_filter_button.cpp
     src/theme.cpp
@@ -121,6 +122,7 @@ endif()
 
 add_library(MegaVaultSync STATIC
     src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp src/icons.cpp
+    src/secure_input.cpp
     include/videovault/app/sync_state.hpp
     include/videovault/app/sync_client.hpp
     include/videovault/app/sync_engine.hpp
@@ -370,7 +372,7 @@ if(MVP_BUILD_TESTS)
 
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
         src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/icons.cpp
-        src/sync_state.cpp src/proxy_settings.cpp src/record_document.cpp
+        src/sync_state.cpp src/secure_input.cpp src/proxy_settings.cpp src/record_document.cpp
         resources/icons.qrc resources/resources.qrc
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/record_document.hpp include/videovault/app/sync_state.hpp)

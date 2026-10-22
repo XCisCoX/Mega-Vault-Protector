@@ -329,6 +329,23 @@ Result<bool> Vault::export_package(
     const std::vector<std::string>& directories,
     const bool compress,
     const std::function<void(double)>& progress) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return fail(VaultErrorCode::InvalidArgument,
+            "The package password is too long or secure memory is unavailable.");
+    }
+    auto result = export_package(destination, *secret, files, directories, compress, progress);
+    secret->wipe();
+    return result;
+}
+
+Result<bool> Vault::export_package(
+    const std::filesystem::path& destination,
+    const Secret& password,
+    const std::vector<PackageItem>& files,
+    const std::vector<std::string>& directories,
+    const bool compress,
+    const std::function<void(double)>& progress) {
     auto crypto = internal::initialize_crypto();
     if (!crypto) {
         return crypto.error();
@@ -371,7 +388,7 @@ Result<bool> Vault::export_package(
 
     std::array<unsigned char, 16> salt{};
     internal::random_bytes(salt);
-    auto key = internal::derive_master_key(password, salt, kPackageKdf);
+    auto key = internal::derive_master_key(password.view(), salt, kPackageKdf);
     if (!key) {
         return key.error();
     }
@@ -476,6 +493,23 @@ Result<int> Vault::import_package(
     const std::function<void(double)>& progress,
     const std::function<void(std::int64_t, const std::string&, std::uint64_t, std::int64_t)>& on_file,
     const std::function<void(std::int64_t, std::int64_t, const std::string&)>& on_folder) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return fail(VaultErrorCode::InvalidArgument,
+            "The package password is too long or secure memory is unavailable.");
+    }
+    auto result = import_package(source, *secret, folder_id, progress, on_file, on_folder);
+    secret->wipe();
+    return result;
+}
+
+Result<int> Vault::import_package(
+    const std::filesystem::path& source,
+    const Secret& password,
+    const std::int64_t folder_id,
+    const std::function<void(double)>& progress,
+    const std::function<void(std::int64_t, const std::string&, std::uint64_t, std::int64_t)>& on_file,
+    const std::function<void(std::int64_t, std::int64_t, const std::string&)>& on_folder) {
     auto crypto = internal::initialize_crypto();
     if (!crypto) {
         return crypto.error();
@@ -514,7 +548,7 @@ Result<int> Vault::import_package(
     if (!read_exact(in, salt.data(), salt.size())) {
         return fail(VaultErrorCode::PackageModified, "The package is incomplete.");
     }
-    auto key = internal::derive_master_key(password, salt, kdf);
+    auto key = internal::derive_master_key(password.view(), salt, kdf);
     if (!key) {
         return key.error();
     }

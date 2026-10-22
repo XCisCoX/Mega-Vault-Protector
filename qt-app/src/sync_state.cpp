@@ -1,5 +1,7 @@
 #include "videovault/app/sync_state.hpp"
 
+#include "videovault/app/secure_input.hpp"
+
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -160,16 +162,16 @@ QString operationId(const QString& recordId, int baseVersion, const QString& pac
 }
 
 void Keys::wipe() {
-    package.fill(QLatin1Char('\0'));
-    package.clear();
-    if (!state.isEmpty()) {
-        sodium_memzero(state.data(), size_t(state.size()));
-        state.clear();
-    }
-    if (!legacyState.isEmpty()) {
-        sodium_memzero(legacyState.data(), size_t(legacyState.size()));
-        legacyState.clear();
-    }
+    // QString::fill() on a shared string detaches first, which leaves the old
+    // buffer — with the .mvpk password in it — untouched on the heap. wipeString
+    // detaches deliberately and then zeroes the buffer this object owns.
+    wipeString(package);
+    wipeByteArray(state);
+    wipeByteArray(legacyState);
+}
+
+Keys::~Keys() {
+    wipe();
 }
 
 QString adoptedPackageKey(const QString& stored, const Keys& keys) {
@@ -186,12 +188,30 @@ QString stateDirectoryFor(const QString& vaultRoot) {
 }
 
 Keys deriveKeys(const QString& stateDirectory, const QString& vaultPassword, bool create) {
+    const QByteArray utf8 = vaultPassword.toUtf8();
+    try {
+        Keys keys = deriveKeysFromBytes(stateDirectory,
+            std::string_view(utf8.data(), static_cast<std::size_t>(utf8.size())), create);
+        return keys;
+    } catch (...) {
+        // The compatibility path converted the password into a QByteArray;
+        // zero it before the exception leaves this frame.
+        QByteArray scrub = utf8;
+        wipeByteArray(scrub);
+        throw;
+    }
+}
+
+Keys deriveKeysFromBytes(const QString& stateDirectory,
+                         const std::string_view vaultPasswordUtf8, bool create) {
     ensureCrypto();
-    if (vaultPassword.isEmpty()) fail(QStringLiteral("The vault password is required to unlock sync."));
+    if (vaultPasswordUtf8.empty()) fail(QStringLiteral("The vault password is required to unlock sync."));
     if (!ensureDirectory(stateDirectory)) fail(QStringLiteral("Cannot create the private sync directory."));
 
     const QByteArray salt = readSalt(stateDirectory, create);
-    const QByteArray password = vaultPassword.toUtf8();
+    // No QByteArray copy of the password: the caller's bytes are used directly
+    // and this function never owns them.
+    const std::string_view password = vaultPasswordUtf8;
 
     // The package key is device independent on purpose: two devices of the
     // same vault must derive the same .mvpk password, and neither ever sends
@@ -202,7 +222,7 @@ Keys deriveKeys(const QString& stateDirectory, const QString& vaultPassword, boo
     // every device of this vault.
     const QByteArray fixedSalt = QByteArray(kPackageContext).left(kSaltBytes);
     if (crypto_pwhash(reinterpret_cast<unsigned char*>(package.data()), size_t(package.size()),
-                      password.constData(), static_cast<unsigned long long>(password.size()),
+                      password.data(), static_cast<unsigned long long>(password.size()),
                       reinterpret_cast<const unsigned char*>(fixedSalt.constData()),
                       crypto_pwhash_OPSLIMIT_INTERACTIVE, crypto_pwhash_MEMLIMIT_INTERACTIVE,
                       crypto_pwhash_ALG_ARGON2ID13) != 0) {
@@ -229,7 +249,7 @@ Keys deriveKeys(const QString& stateDirectory, const QString& vaultPassword, boo
     // does not change, which is what keeps already shared packages readable.
     QByteArray current(kKeyBytes, 0);
     if (crypto_pwhash(reinterpret_cast<unsigned char*>(current.data()), size_t(current.size()),
-                      password.constData(), static_cast<unsigned long long>(password.size()),
+                      password.data(), static_cast<unsigned long long>(password.size()),
                       reinterpret_cast<const unsigned char*>(salt.constData()),
                       crypto_pwhash_OPSLIMIT_INTERACTIVE, crypto_pwhash_MEMLIMIT_INTERACTIVE,
                       crypto_pwhash_ALG_ARGON2ID13) != 0) {
@@ -340,8 +360,9 @@ SyncState SyncState::fromJson(const QJsonObject& object) {
 }
 
 void SyncState::clearToken() {
-    token.fill(QLatin1Char('\0'));
-    token.clear();
+    // A detaching wipe: fill() would have zeroed a fresh buffer and left the
+    // device token's bytes in the old one.
+    wipeString(token);
     tokenId.clear();
 }
 
@@ -429,21 +450,37 @@ void resealState(const QString& directory, const Keys& from, const Keys& to) {
     saveState(path, to.state, state);
 }
 
-bool resealForPasswordChange(const QString& stateDirectory, const QString& oldPassword,
-                             const QString& newPassword) {
+// Byte-level implementation shared by both public overloads: it never creates a
+// QString or QByteArray copy of either password.
+bool resealFromBytes(const QString& stateDirectory, std::string_view oldPassword,
+                     std::string_view newPassword) {
     try {
-        Keys from = deriveKeys(stateDirectory, oldPassword, false);
-        Keys to = deriveKeys(stateDirectory, newPassword, false);
-        const bool sealed = [&] {
-            resealState(stateDirectory, from, to);
-            return true;
-        }();
-        from.wipe();
-        to.wipe();
-        return sealed;
+        Keys from = deriveKeysFromBytes(stateDirectory, oldPassword, false);
+        Keys to = deriveKeysFromBytes(stateDirectory, newPassword, false);
+        resealState(stateDirectory, from, to);
+        return true;
     } catch (const std::exception&) {
         return false;
     }
+}
+
+bool resealForPasswordChange(const QString& stateDirectory, const QString& oldPassword,
+                             const QString& newPassword) {
+    const QByteArray from = oldPassword.toUtf8();
+    const QByteArray to = newPassword.toUtf8();
+    const bool sealed = resealFromBytes(stateDirectory,
+        std::string_view(from.data(), static_cast<std::size_t>(from.size())),
+        std::string_view(to.data(), static_cast<std::size_t>(to.size())));
+    QByteArray fromScrub = from;
+    QByteArray toScrub = to;
+    wipeByteArray(fromScrub);
+    wipeByteArray(toScrub);
+    return sealed;
+}
+
+bool resealForPasswordChange(const QString& stateDirectory, const core::Secret& oldPassword,
+                             const core::Secret& newPassword) {
+    return resealFromBytes(stateDirectory, oldPassword.view(), newPassword.view());
 }
 
 }  // namespace videovault::app::sync
