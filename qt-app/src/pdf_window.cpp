@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QCursor>
+#include <QFrame>
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -20,6 +21,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QPalette>
+#include <QPainterPath>
 #include <QPainter>
 #include <QPen>
 #include <QPointer>

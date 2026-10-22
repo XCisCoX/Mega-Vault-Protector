@@ -20,6 +20,7 @@
 #include <QCursor>
 #include <QEvent>
 #include <QFileInfo>
+#include <QIcon>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>

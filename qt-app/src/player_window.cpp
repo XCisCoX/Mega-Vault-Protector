@@ -16,6 +16,7 @@ extern "C" {
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
+#include <QIcon>
 #include <QFont>
 #include <QGridLayout>
 #include <QDateTime>

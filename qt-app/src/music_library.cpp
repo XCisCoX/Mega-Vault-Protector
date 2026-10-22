@@ -6,6 +6,7 @@
 #include "videovault/core/vault.hpp"
 
 #include <QApplication>
+#include <QFrame>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
@@ -13,6 +14,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPainter>
+#include <QPalette>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
