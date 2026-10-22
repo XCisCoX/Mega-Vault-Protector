@@ -117,7 +117,10 @@ class IntegrationGuards(unittest.TestCase):
         login = source('LoginScreen.kt')
         self.assertNotIn('Cloud login', login)
         self.assertNotIn('cloudAddress', login)
-        self.assertIn('RemoteVault.login(code, password)', login)  # PC share is retained
+        # PC share login is retained. The typed password is moved into a local
+        # before the call so Compose state does not hold it across the KDF, so
+        # the second argument's name is not part of the contract: match the call.
+        self.assertRegex(login, r'RemoteVault\.login\(\s*code\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*\)')
 
     def test_pc_share_cannot_override_sync_tls_defaults(self):
         remote = source('RemoteVault.kt')

@@ -24,9 +24,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -193,28 +191,29 @@ class MainActivity : ComponentActivity() {
                 // walks up one folder, then leaves only after a second press.
                 // Login leaves on one press. Setup has nowhere to go back to.
                 if (lockChoice) {
-                    AlertDialog(
-                        onDismissRequest = { lockChoice = false },
-                        title = { Text("Lock the vault?") },
-                        text = {
-                            Text(
-                                "Choosing “keep sharing” only hides the screen: the vault stays " +
-                                    "unlocked in memory and the PC can still read and copy it.",
-                            )
+                    // The app's own blurred sheet, like every other confirmation:
+                    // a Material AlertDialog was the last one left and reads as a
+                    // different product next to the library's sheets.
+                    MvpSheet(
+                        title = "Lock the vault?",
+                        confirmLabel = "Lock and stop sharing",
+                        dismissLabel = "Hide screen, keep sharing",
+                        onDismiss = {
+                            lockChoice = false
+                            lockNow(keepSharing = true)
                         },
-                        confirmButton = {
-                            TextButton(onClick = {
-                                lockChoice = false
-                                lockNow(keepSharing = false)
-                            }) { Text("Lock and stop sharing") }
+                        onConfirm = {
+                            lockChoice = false
+                            lockNow(keepSharing = false)
                         },
-                        dismissButton = {
-                            TextButton(onClick = {
-                                lockChoice = false
-                                lockNow(keepSharing = true)
-                            }) { Text("Hide screen, keep sharing") }
-                        },
-                    )
+                    ) {
+                        Text(
+                            "Choosing “hide screen” only hides the screen: the vault stays " +
+                                "unlocked in memory and the PC can still read and copy it.",
+                            color = Mvp.text,
+                            fontSize = 14.sp,
+                        )
+                    }
                 }
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {

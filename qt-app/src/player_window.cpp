@@ -24,6 +24,7 @@ extern "C" {
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QList>
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
