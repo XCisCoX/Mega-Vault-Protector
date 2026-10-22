@@ -139,6 +139,40 @@ public:
         const auto* excluded_begin = static_cast<const unsigned char*>(bytes.data());
         const auto* excluded_end = excluded_begin + bytes.size();
         std::size_t found = 0;
+        // The region read buffer lives inside the process being scanned, so a
+        // CRT-heap buffer is itself scannable: it holds copies of every region
+        // read so far and the scan reports them as leaks. Release made that
+        // collision reliable while Debug happened to miss it. Allocate the
+        // buffer from libsodium (its own guarded mapping), skip that mapping
+        // explicitly, and zero it before every read.
+        unsigned char* read_buffer = nullptr;
+        std::size_t read_buffer_size = 0U;
+        const auto ensure_read_buffer = [&](const std::size_t size) -> bool {
+            if (read_buffer != nullptr && size <= read_buffer_size) {
+                return true;
+            }
+            if (read_buffer != nullptr) {
+                sodium_memzero(read_buffer, read_buffer_size);
+                sodium_free(read_buffer);
+                read_buffer = nullptr;
+                read_buffer_size = 0U;
+            }
+            read_buffer = static_cast<unsigned char*>(sodium_malloc(size));
+            if (read_buffer == nullptr) {
+                return false;
+            }
+            read_buffer_size = size;
+            return true;
+        };
+        const auto overlaps_read_buffer = [&](const std::uintptr_t begin,
+                                              const std::size_t size) {
+            if (read_buffer == nullptr) {
+                return false;
+            }
+            const auto buffer_begin = reinterpret_cast<std::uintptr_t>(read_buffer);
+            const auto buffer_end = buffer_begin + read_buffer_size;
+            return buffer_begin < begin + size && begin < buffer_end;
+        };
 #if defined(_WIN32)
         SYSTEM_INFO info{};
         GetSystemInfo(&info);
@@ -147,21 +181,23 @@ public:
             static_cast<const unsigned char*>(info.lpMaximumApplicationAddress);
         HANDLE process = GetCurrentProcess();
         MEMORY_BASIC_INFORMATION region{};
-        std::vector<unsigned char> buffer;
         while (address < last && VirtualQuery(address, &region, sizeof(region)) != 0) {
             const DWORD protect = region.Protect;
             const bool readable = region.State == MEM_COMMIT
                 && (protect & PAGE_NOACCESS) == 0 && (protect & PAGE_GUARD) == 0
                 && (protect & (PAGE_READWRITE | PAGE_WRITECOPY
                         | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
-            if (readable && region.RegionSize >= bytes.size()) {
-                buffer.resize(region.RegionSize);
+            const auto region_begin = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+            if (readable && region.RegionSize >= bytes.size()
+                && !overlaps_read_buffer(region_begin, region.RegionSize)
+                && ensure_read_buffer(region.RegionSize)) {
+                sodium_memzero(read_buffer, read_buffer_size);
                 SIZE_T read = 0;
-                if (ReadProcessMemory(process, region.BaseAddress, buffer.data(),
+                if (ReadProcessMemory(process, region.BaseAddress, read_buffer,
                         region.RegionSize, &read) != 0 && read >= bytes.size()) {
                     found += count_in(
-                        std::span<const unsigned char>(buffer.data(), read), bytes,
-                        reinterpret_cast<std::uintptr_t>(region.BaseAddress),
+                        std::span<const unsigned char>(read_buffer, read), bytes,
+                        region_begin,
                         excluded_begin, excluded_end, extra_begin, extra_size);
                 }
             }
@@ -171,7 +207,6 @@ public:
         std::ifstream maps("/proc/self/maps");
         std::string line;
         const int memory = ::open("/proc/self/mem", O_RDONLY);
-        std::vector<unsigned char> buffer;
         while (std::getline(maps, line) && memory >= 0) {
             unsigned long long begin = 0;
             unsigned long long end = 0;
@@ -186,12 +221,16 @@ public:
             if (size < bytes.size() || size > (64ULL << 20)) {
                 continue;
             }
-            buffer.resize(size);
+            if (overlaps_read_buffer(static_cast<std::uintptr_t>(begin), size)
+                || !ensure_read_buffer(size)) {
+                continue;
+            }
+            sodium_memzero(read_buffer, read_buffer_size);
             const ssize_t read = ::pread(
-                memory, buffer.data(), size, static_cast<off_t>(begin));
+                memory, read_buffer, size, static_cast<off_t>(begin));
             if (read >= static_cast<ssize_t>(bytes.size())) {
                 found += count_in(
-                    std::span<const unsigned char>(buffer.data(),
+                    std::span<const unsigned char>(read_buffer,
                         static_cast<std::size_t>(read)),
                     bytes, static_cast<std::uintptr_t>(begin),
                     excluded_begin, excluded_end, extra_begin, extra_size);
@@ -201,6 +240,10 @@ public:
             ::close(memory);
         }
 #endif
+        if (read_buffer != nullptr) {
+            sodium_memzero(read_buffer, read_buffer_size);
+            sodium_free(read_buffer);
+        }
         return found;
     }
 
@@ -407,7 +450,9 @@ void test_vault_lifecycle() {
         auto plain = vault.read_video_bytes(video_id);
         check(static_cast<bool>(plain), "decrypted content read back");
         if (plain) {
-            const auto content = plain.value();
+            // A reference, not a copy: a copy here would be the test's own
+            // plaintext and would be reported as a leak by the scan below.
+            const auto& content = plain.value();
             const bool matches = std::search(content.begin(), content.end(),
                 record_needle.bytes().begin(), record_needle.bytes().end()) != content.end();
             check(matches, "the reading path returns the decrypted marker");

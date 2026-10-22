@@ -408,6 +408,19 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     return info;
 }
 
+// An std::streambuf over caller-owned bytes. Importing content that is already
+// in memory must not copy it: the old code built a std::string *and* a
+// stringstream (two full plaintext copies) and freed both unzeroed, which is
+// exactly the residue a memory dump after an import would show.
+class SpanStreamBuffer final : public std::streambuf {
+public:
+    explicit SpanStreamBuffer(const std::span<const unsigned char> bytes) {
+        auto* begin = const_cast<char*>(
+            reinterpret_cast<const char*>(bytes.data()));
+        setg(begin, begin, begin + bytes.size());
+    }
+};
+
 struct Paths {
     explicit Paths(const std::filesystem::path& root)
         : metadata(root / L"vault.meta"),
@@ -1229,9 +1242,8 @@ Result<std::int64_t> Vault::import_bytes(
 
     // The package writer streams, so in-memory content is wrapped in a string
     // stream. Nothing is written to disk outside the vault's own staging file.
-    const auto raw = std::string_view(
-        reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    std::istringstream source{std::string(raw)};
+    SpanStreamBuffer content(bytes);
+    std::istream source(&content);
     const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
     return seal_and_commit(root_, impl.database_, impl.master_key_, source,
         static_cast<std::uint64_t>(bytes.size()), content_hash, name,
@@ -1258,9 +1270,8 @@ Result<bool> Vault::replace_video_content(
     }
 
     const auto content_hash = internal::sha256(bytes);
-    const auto raw = std::string_view(
-        reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    std::istringstream source{std::string(raw)};
+    SpanStreamBuffer content(bytes);
+    std::istream source(&content);
 
     internal::SensitiveBuffer file_key(32U);
     const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
