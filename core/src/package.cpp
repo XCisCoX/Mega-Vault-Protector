@@ -284,6 +284,252 @@ Result<PackageWriteResult> write_package_file(
     return result;
 }
 
+// --- Incremental package writer -------------------------------------------
+//
+// The chunk sealing here is deliberately the same code path as
+// write_package_file: one AEAD tag per chunk, associated data bound to the
+// header digest, chunk index, plaintext length and the final-chunk flag, so a
+// package produced piecemeal is byte-identical in shape to one produced from a
+// seekable source and is read back by the same PackageReader.
+
+StreamPackageWriter::~StreamPackageWriter() {
+    abort();
+}
+
+StreamPackageWriter::StreamPackageWriter(StreamPackageWriter&& other) noexcept
+    : output_(std::move(other.output_)),
+      destination_(std::move(other.destination_)),
+      header_(other.header_),
+      digest_(other.digest_),
+      accumulator_(std::move(other.accumulator_)),
+      file_key_(std::move(other.file_key_)),
+      pending_(std::move(other.pending_)),
+      written_(other.written_),
+      next_index_(other.next_index_),
+      finished_(other.finished_) {
+    // The moved-from writer must not delete the destination on destruction.
+    other.pending_.clear();
+    other.destination_.clear();
+    other.finished_ = true;
+}
+
+StreamPackageWriter& StreamPackageWriter::operator=(
+    StreamPackageWriter&& other) noexcept {
+    if (this != &other) {
+        abort();
+        output_ = std::move(other.output_);
+        destination_ = std::move(other.destination_);
+        header_ = other.header_;
+        digest_ = other.digest_;
+        accumulator_ = std::move(other.accumulator_);
+        file_key_ = std::move(other.file_key_);
+        pending_ = std::move(other.pending_);
+        written_ = other.written_;
+        next_index_ = other.next_index_;
+        finished_ = other.finished_;
+        other.pending_.clear();
+        other.destination_.clear();
+        other.finished_ = true;
+    }
+    return *this;
+}
+
+Result<StreamPackageWriter> StreamPackageWriter::create(
+    const std::filesystem::path& destination,
+    SensitiveBuffer file_key,
+    const std::uint32_t chunk_size,
+    const std::uint64_t plaintext_size) {
+    if (file_key.size() != 32U) {
+        return VaultError{VaultErrorCode::CryptoFailure, "invalid file key length"};
+    }
+    if (chunk_size < kMinimumPackageChunkSize || chunk_size > kMaximumPackageChunkSize) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package chunk size is outside supported bounds"};
+    }
+    const auto count = chunk_count_for(plaintext_size, chunk_size);
+    if (count == 0U && plaintext_size != 0U) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package is too large for the requested chunk size"};
+    }
+
+    StreamPackageWriter writer;
+    writer.header_.chunk_size = chunk_size;
+    writer.header_.plaintext_size = plaintext_size;
+    writer.header_.chunk_count = count;
+    random_bytes(writer.header_.package_id);
+    random_bytes(writer.header_.nonce_prefix);
+    writer.digest_ = package_header_digest(writer.header_);
+    writer.file_key_ = std::move(file_key);
+    writer.destination_ = destination;
+    // One chunk of plaintext is the only buffering this writer needs: the
+    // memory cost of an import is independent of the track's length.
+    writer.pending_.reserve(static_cast<std::size_t>(chunk_size));
+
+    writer.output_.open(destination, std::ios::binary | std::ios::trunc);
+    if (!writer.output_) {
+        writer.destination_.clear();
+        writer.finished_ = true;
+        return VaultError{VaultErrorCode::DatabaseFailure,
+            "unable to open package destination for writing"};
+    }
+
+    const auto header_bytes = serialize_package_header(writer.header_);
+    auto header_tag = encrypt_xchacha20_poly1305(
+        {}, header_bytes, header_nonce(writer.header_), writer.file_key_);
+    if (!header_tag) {
+        writer.abort();
+        return header_tag.error();
+    }
+    if (header_tag.value().size() != kPackageTagSize) {
+        writer.abort();
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "package header tag has an invalid size"};
+    }
+    auto wrote_header = writer.write_all(header_bytes);
+    if (!wrote_header) {
+        writer.abort();
+        return wrote_header.error();
+    }
+    auto wrote_tag = writer.write_all(header_tag.value());
+    if (!wrote_tag) {
+        writer.abort();
+        return wrote_tag.error();
+    }
+    return std::move(writer);
+}
+
+Result<bool> StreamPackageWriter::write_all(
+    const std::span<const unsigned char> bytes) {
+    if (!output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (!bytes.empty()) {
+        output_.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        accumulator_.update(bytes);
+    }
+    if (!output_) {
+        // A full disk or a closed handle lands here: the caller aborts, which
+        // removes the staging package, so nothing partial is ever published.
+        return VaultError{VaultErrorCode::DiskFull, "package write failed"};
+    }
+    return true;
+}
+
+Result<bool> StreamPackageWriter::seal_pending(const bool final_chunk) {
+    if (pending_.empty()) {
+        return true;
+    }
+    if (next_index_ >= header_.chunk_count) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package has more chunks than its header declares"};
+    }
+    const auto length = static_cast<std::uint32_t>(pending_.size());
+    const auto ad = chunk_ad(digest_, header_, next_index_, length, final_chunk);
+    auto ciphertext = encrypt_xchacha20_poly1305(
+        std::span<const unsigned char>(pending_.data(), pending_.size()),
+        ad, chunk_nonce(header_, next_index_), file_key_);
+    // The plaintext of this chunk is sealed; zero it before the buffer is
+    // reused so a completed import leaves no decodable audio on the heap.
+    wipe_bytes(pending_);
+    pending_.clear();
+    if (!ciphertext) {
+        return ciphertext.error();
+    }
+    auto written = write_all(ciphertext.value());
+    if (!written) {
+        return written.error();
+    }
+    ++next_index_;
+    return true;
+}
+
+Result<bool> StreamPackageWriter::append(
+    const std::span<const unsigned char> bytes) {
+    if (finished_ || !output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (bytes.empty()) {
+        return true;
+    }
+    if (written_ + bytes.size() > header_.plaintext_size) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "stream is longer than the declared plaintext size"};
+    }
+    auto remaining = bytes;
+    while (!remaining.empty()) {
+        const auto space = static_cast<std::size_t>(header_.chunk_size) - pending_.size();
+        const auto take = std::min<std::size_t>(space, remaining.size());
+        pending_.insert(pending_.end(), remaining.begin(),
+            remaining.begin() + static_cast<std::ptrdiff_t>(take));
+        remaining = remaining.subspan(take);
+        written_ += static_cast<std::uint64_t>(take);
+        // A full chunk is sealed immediately only when another one follows: the
+        // last chunk carries the final-chunk flag, which is decided by
+        // finalize(). That keeps the tail (<= one chunk) buffered, never more.
+        if (pending_.size() >= header_.chunk_size
+            && static_cast<std::uint64_t>(next_index_) + 1U < header_.chunk_count) {
+            auto sealed = seal_pending(false);
+            if (!sealed) {
+                return sealed.error();
+            }
+        }
+    }
+    return true;
+}
+
+Result<PackageWriteResult> StreamPackageWriter::finalize() {
+    if (finished_ || !output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (written_ != header_.plaintext_size) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "stream ended before the declared plaintext size"};
+    }
+    if (header_.chunk_count != 0U) {
+        auto sealed = seal_pending(true);
+        if (!sealed) {
+            return sealed.error();
+        }
+        if (next_index_ != header_.chunk_count) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "package chunk count does not match the declared size"};
+        }
+    }
+    output_.flush();
+    output_.close();
+    if (!output_) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "package finalize failed"};
+    }
+    auto flushed = flush_existing_file(destination_);
+    if (!flushed) {
+        return flushed.error();
+    }
+    finished_ = true;
+    PackageWriteResult result;
+    result.sha256 = accumulator_.digest();
+    result.package_id = header_.package_id;
+    result.package_size = package_file_size(header_, kPackageHeaderAndTagSize);
+    return result;
+}
+
+void StreamPackageWriter::abort() noexcept {
+    wipe_bytes(pending_);
+    pending_.clear();
+    if (output_.is_open()) {
+        output_.close();
+    }
+    if (!destination_.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(destination_, ignored);
+        destination_.clear();
+    }
+    finished_ = true;
+}
+
 Result<std::vector<unsigned char>> read_package_content(
     const std::filesystem::path& path,
     const SensitiveBuffer& file_key) {

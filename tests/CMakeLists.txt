@@ -151,3 +151,14 @@ set_target_properties(VideoVaultSecurityMemoryTests PROPERTIES FOLDER "Tests")
 mvp_copy_runtime_dlls(VideoVaultSecurityMemoryTests)
 add_test(NAME VideoVaultCore.SecurityMemory COMMAND VideoVaultSecurityMemoryTests)
 set_tests_properties(VideoVaultCore.SecurityMemory PROPERTIES TIMEOUT 300)
+
+# Progressive (streamed) provider import: bytes are encrypted into the vault as
+# they arrive (no plaintext staging file, no whole-track buffer), and only a
+# complete stream becomes a library item with provider provenance.
+add_executable(VideoVaultStreamImportTests stream_import.cpp)
+target_link_libraries(VideoVaultStreamImportTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultStreamImportTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultStreamImportTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultStreamImportTests)
+add_test(NAME VideoVaultCore.StreamImport COMMAND VideoVaultStreamImportTests)
+set_tests_properties(VideoVaultCore.StreamImport PROPERTIES TIMEOUT 180)

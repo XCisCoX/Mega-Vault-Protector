@@ -80,6 +80,71 @@ serialize_package_header(const PackageHeader& header);
     const std::filesystem::path& path,
     const SensitiveBuffer& file_key);
 
+// Incremental package writer: the same format as write_package_file, but the
+// plaintext arrives in pieces instead of a seekable stream of known length.
+//
+// Bytes are sealed chunk by chunk as they are appended, so an import fed by a
+// live network stream never holds the whole track in memory and never writes
+// plaintext to disk. The declared plaintext size is part of the authenticated
+// header and must be known before the first byte is appended; the writer
+// refuses to append past it and refuses to finalize short of it, so a truncated
+// stream can never be published as a readable item.
+//
+// The writer is single-threaded: one thread appends (and finalizes), and
+// abort() may be called from a cancellation path only while append() is not
+// running.
+class StreamPackageWriter final {
+public:
+    StreamPackageWriter() noexcept = default;
+    ~StreamPackageWriter();
+
+    StreamPackageWriter(StreamPackageWriter&& other) noexcept;
+    StreamPackageWriter& operator=(StreamPackageWriter&& other) noexcept;
+    StreamPackageWriter(const StreamPackageWriter&) = delete;
+    StreamPackageWriter& operator=(const StreamPackageWriter&) = delete;
+
+    // Creates the destination and writes the authenticated header immediately,
+    // so a later crash leaves a header-only file that no reader accepts.
+    // `file_key` must be 32 bytes and is copied (it outlives the caller).
+    [[nodiscard]] static Result<StreamPackageWriter> create(
+        const std::filesystem::path& destination,
+        SensitiveBuffer file_key,
+        std::uint32_t chunk_size,
+        std::uint64_t plaintext_size);
+
+    // Seals whatever `bytes` completes. Rejects input that would exceed the
+    // declared plaintext size, and rejects a closed writer.
+    [[nodiscard]] Result<bool> append(std::span<const unsigned char> bytes);
+
+    // Seals the tail chunk, flushes and closes the file. Fails when fewer bytes
+    // than declared were appended; the caller is expected to abort() then.
+    [[nodiscard]] Result<PackageWriteResult> finalize();
+
+    [[nodiscard]] std::uint64_t written() const noexcept { return written_; }
+    [[nodiscard]] std::uint64_t plaintext_size() const noexcept {
+        return header_.plaintext_size;
+    }
+    [[nodiscard]] bool is_open() const noexcept { return output_.is_open(); }
+
+    // Closes the destination and removes it. Pending plaintext is zeroised.
+    void abort() noexcept;
+
+private:
+    [[nodiscard]] Result<bool> seal_pending(bool final_chunk);
+    [[nodiscard]] Result<bool> write_all(std::span<const unsigned char> bytes);
+
+    std::ofstream output_;
+    std::filesystem::path destination_;
+    PackageHeader header_{};
+    Sha256Digest digest_{};
+    Sha256Accumulator accumulator_;
+    SensitiveBuffer file_key_;
+    std::vector<unsigned char> pending_;
+    std::uint64_t written_{0U};
+    std::uint32_t next_index_{0U};
+    bool finished_{false};
+};
+
 // Streaming, seekable, authenticated reader over a package file. Chunks are
 // decrypted on demand with a bounded LRU cache and every chunk tag is
 // verified before its plaintext is exposed.

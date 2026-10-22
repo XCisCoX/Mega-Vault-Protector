@@ -1,5 +1,6 @@
 #pragma once
 
+#include "videovault/core/provenance.hpp"
 #include "videovault/core/secret.hpp"
 
 #include <array>
@@ -9,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -126,6 +128,62 @@ struct ThumbnailInfo {
     std::vector<unsigned char> bytes;
 };
 
+// Defined in vault.cpp; the handle that the vault keeps private access to.
+class StreamImportImpl;
+
+// One import whose bytes are still arriving (a provider stream).
+//
+// Bytes are authenticated-encrypted chunk by chunk into a vault staging package
+// as they are appended, so no plaintext is ever written to disk and memory use
+// does not grow with the track's length. commit() finalizes the package,
+// atomically publishes it and records the row plus its provenance in one
+// transaction; destroying an uncommitted handle discards the staging package,
+// so a cancelled, crashed or short stream can never publish a playable item.
+//
+// The handle borrows the Vault it was created from: it must not outlive that
+// Vault, and it stops being usable once the vault is locked (commit() then
+// fails with the vault-locked error and leaves nothing behind).
+class StreamImport final {
+public:
+    StreamImport() noexcept;
+    ~StreamImport();
+
+    StreamImport(StreamImport&& other) noexcept;
+    StreamImport& operator=(StreamImport&& other) noexcept;
+
+    StreamImport(const StreamImport&) = delete;
+    StreamImport& operator=(const StreamImport&) = delete;
+
+    // False once the handle was committed, aborted or destructured.
+    [[nodiscard]] bool active() const noexcept;
+    // The plaintext size declared at begin; the import fails unless exactly
+    // this many bytes arrive.
+    [[nodiscard]] std::uint64_t expected_size() const noexcept;
+    [[nodiscard]] std::uint64_t written() const noexcept;
+
+    // Appends bytes observed from the provider. Rejects input past the declared
+    // size and any call after commit/abort. Not thread-safe: call it from one
+    // thread at a time.
+    [[nodiscard]] Result<std::uint64_t> append(
+        std::span<const unsigned char> bytes);
+
+    // Finalizes and publishes. Returns the new item id. When the vault already
+    // holds this provider track, the staged package is discarded, the existing
+    // id is returned and already_present() reports true.
+    [[nodiscard]] Result<std::int64_t> commit();
+
+    // Discards the staging package. Idempotent and safe from a cancellation
+    // path as long as no append() is running concurrently.
+    void abort() noexcept;
+
+    [[nodiscard]] bool already_present() const noexcept;
+
+private:
+    friend class Vault;
+    explicit StreamImport(std::unique_ptr<StreamImportImpl> impl) noexcept;
+    std::unique_ptr<StreamImportImpl> impl_;
+};
+
 class Vault final {
 public:
     Vault() noexcept;
@@ -232,6 +290,41 @@ public:
         std::int64_t video_id,
         std::span<const unsigned char> bytes,
         std::string_view display_name);
+
+    // Phase 9: progressive import. Begins an item whose bytes will arrive in
+    // pieces (a provider stream) and returns a handle that seals them into a
+    // vault package as they are appended. The declared plaintext size is
+    // authenticated in the package header, so it must be known up front
+    // (Content-Length, or the sum of the resolved segments); an import that
+    // receives a different number of bytes fails and publishes nothing.
+    //
+    // `provenance`, when given, is recorded in the same transaction as the row,
+    // which is what makes a provider track resolvable to its offline copy.
+    // Nothing is created in the database until commit() succeeds.
+    [[nodiscard]] Result<StreamImport> begin_stream_import(
+        std::string_view display_name,
+        std::uint64_t expected_plaintext_size,
+        std::int64_t folder_id = 0,
+        const TrackProvenance* provenance = nullptr);
+
+    // Phase 9: provider provenance inside the encrypted database.
+    // `provider_id` + `provider_track_id` are unique per vault, so an item
+    // imported from a provider can be found again after a restart without
+    // matching file names or re-downloading anything.
+    [[nodiscard]] Result<bool> set_video_provenance(
+        std::int64_t video_id,
+        const TrackProvenance& provenance);
+
+    [[nodiscard]] Result<std::optional<TrackProvenance>> video_provenance(
+        std::int64_t video_id) const;
+
+    [[nodiscard]] Result<std::optional<std::int64_t>> find_video_by_provenance(
+        std::string_view provider_id,
+        std::string_view provider_track_id) const;
+
+    // Every provider-linked item in this vault, so a library can mark tracks
+    // that are already available offline with one query.
+    [[nodiscard]] Result<std::vector<TrackProvenance>> list_video_provenance() const;
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 
@@ -424,6 +517,9 @@ public:
 
 private:
     class Impl;
+    // StreamImportImpl::commit() publishes and records the row; it needs the
+    // vault mutex and the pinned Impl the import was started from.
+    friend class StreamImportImpl;
     explicit Vault(std::filesystem::path root, std::unique_ptr<Impl> impl) noexcept;
 
     // Guards impl_ and all operations on it. Held by unique_ptr so the mutex

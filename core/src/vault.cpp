@@ -2257,6 +2257,434 @@ Result<bool> Vault::change_password(
     return true;
 }
 
+// --- Progressive (streaming) import ---------------------------------------
+//
+// The package is written and encrypted by the caller's thread as bytes arrive;
+// only finalization needs the vault (to publish the file and record the row).
+// Plaintext never reaches the disk and RAM use is one chunk plus the caller's
+// own buffer.
+
+namespace {
+
+// Bounds on provenance fields. They are metadata the provider supplied, so they
+// are bounded like every other manifest-sourced string: a provider cannot grow
+// the encrypted database with an unbounded field.
+constexpr std::size_t kMaxProviderIdBytes = 120U;
+constexpr std::size_t kMaxTrackIdBytes = 256U;
+constexpr std::size_t kMaxSourceUrlBytes = 2048U;
+constexpr std::size_t kMaxProvenanceTextBytes = 400U;
+constexpr std::size_t kMaxCodecBytes = 40U;
+constexpr std::size_t kMaxQualityBytes = 64U;
+constexpr std::size_t kArtworkHashHexBytes = 64U;
+
+bool valid_sha256_hex(const std::string& value) {
+    if (value.empty()) {
+        return true;
+    }
+    if (value.size() != kArtworkHashHexBytes) {
+        return false;
+    }
+    for (const char c : value) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!hex) {
+            return false;
+        }
+    }
+    return true;
+}
+
+VaultError provenance_rejected(const char* detail) {
+    return {VaultErrorCode::InvalidArgument, std::string("track provenance: ") + detail};
+}
+
+Result<bool> validate_provenance(const TrackProvenance& row) {
+    if (row.provider_id.empty() || row.provider_id.size() > kMaxProviderIdBytes) {
+        return provenance_rejected("provider id is missing or too long");
+    }
+    if (row.provider_track_id.empty() || row.provider_track_id.size() > kMaxTrackIdBytes) {
+        return provenance_rejected("track id is missing or too long");
+    }
+    if (row.source_url.size() > kMaxSourceUrlBytes) {
+        return provenance_rejected("source URL is too long");
+    }
+    if (row.title.size() > kMaxProvenanceTextBytes
+        || row.artist.size() > kMaxProvenanceTextBytes
+        || row.album.size() > kMaxProvenanceTextBytes) {
+        return provenance_rejected("title, artist or album is too long");
+    }
+    if (row.codec.size() > kMaxCodecBytes || row.quality.size() > kMaxQualityBytes) {
+        return provenance_rejected("codec or quality is too long");
+    }
+    if (!valid_sha256_hex(row.artwork_sha256)) {
+        return provenance_rejected("artwork hash is not a lower-case SHA-256");
+    }
+    return true;
+}
+
+} // namespace
+
+class StreamImportImpl final {
+public:
+    StreamImportImpl(
+        Vault* vault,
+        const void* pinned,
+        const std::string& display_name,
+        const std::int64_t folder_id,
+        std::optional<TrackProvenance> provenance,
+        std::filesystem::path data_directory,
+        std::filesystem::path staging_path,
+        internal::SensitiveBuffer file_key,
+        internal::StreamPackageWriter writer)
+        : vault_(vault),
+          pinned_(pinned),
+          display_name_(display_name),
+          folder_id_(folder_id),
+          provenance_(std::move(provenance)),
+          data_directory_(std::move(data_directory)),
+          staging_path_(std::move(staging_path)),
+          file_key_(std::move(file_key)),
+          writer_(std::move(writer)) {}
+
+    ~StreamImportImpl() { abort(); }
+
+    StreamImportImpl(const StreamImportImpl&) = delete;
+    StreamImportImpl& operator=(const StreamImportImpl&) = delete;
+
+    [[nodiscard]] bool active() const noexcept { return active_; }
+    [[nodiscard]] std::uint64_t expected_size() const noexcept {
+        return writer_.plaintext_size();
+    }
+    [[nodiscard]] std::uint64_t written() const noexcept { return writer_.written(); }
+    [[nodiscard]] bool already_present() const noexcept { return already_present_; }
+
+    Result<std::uint64_t> append(const std::span<const unsigned char> bytes) {
+        if (!active_ || committed_) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "this streamed import is no longer accepting bytes"};
+        }
+        auto stored = writer_.append(bytes);
+        if (!stored) {
+            // A write failure (full disk, closed handle) discards the staging
+            // package here: the caller only sees the error.
+            abort();
+            return stored.error();
+        }
+        content_hasher_.update(bytes);
+        return writer_.written();
+    }
+
+    Result<std::int64_t> commit() {
+        if (!active_ || committed_) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "this streamed import is not active"};
+        }
+        // Finalizing writes the tail chunk: the slow part happens before the
+        // vault mutex is taken, so playback through the same vault never waits
+        // on an import.
+        auto finalized = writer_.finalize();
+        if (!finalized) {
+            abort();
+            return finalized.error();
+        }
+        const auto content_hash = content_hasher_.digest();
+        const auto package_sha = finalized.value().sha256;
+        const auto hex_hash = to_hex_lower(package_sha);
+        const auto relative = std::filesystem::path(hex_hash.substr(0U, 2U))
+            / hex_hash.substr(2U, 2U) / (hex_hash + ".vvp");
+        const auto published = data_directory_ / relative;
+
+        std::error_code error;
+        std::filesystem::create_directories(published.parent_path(), error);
+        if (error) {
+            abort();
+            return filesystem_error(error, "create package directory");
+        }
+        if (std::filesystem::exists(published, error) && !error) {
+            // An orphan from an interrupted import: the database has no row for
+            // it, so the freshly sealed package replaces it.
+            std::filesystem::remove(published, error);
+            if (error) {
+                abort();
+                return filesystem_error(error, "replace orphan package");
+            }
+        }
+        error.clear();
+        auto moved = internal::move_file_atomic(staging_path_, published);
+        if (!moved) {
+            abort();
+            return moved.error();
+        }
+        staging_path_.clear();
+
+        std::unique_lock<std::mutex> guard(*vault_->mutex_);
+        const auto discard = [this, &published] {
+            std::error_code ignored;
+            std::filesystem::remove(published, ignored);
+            abort();
+        };
+        if (!vault_->impl_ || vault_->impl_.get() != pinned_) {
+            guard.unlock();
+            discard();
+            return locked_error();
+        }
+        auto& impl = *vault_->impl_;
+
+        // One offline copy per provider track: if this track already has an
+        // item, the staged package is thrown away instead of duplicated.
+        if (provenance_) {
+            auto existing = impl.database_.query_video_id_by_provenance(
+                provenance_->provider_id, provenance_->provider_track_id);
+            if (!existing) {
+                guard.unlock();
+                discard();
+                return existing.error();
+            }
+            if (existing.value()) {
+                guard.unlock();
+                discard();
+                already_present_ = true;
+                return existing.value().value();
+            }
+        }
+
+        internal::VideoRow row;
+        row.display_name = display_name_;
+        row.original_size = writer_.plaintext_size();
+        const auto relative_u8 = relative.generic_u8string();
+        row.package_relative_path.assign(
+            reinterpret_cast<const char*>(relative_u8.data()), relative_u8.size());
+        row.package_size = finalized.value().package_size;
+        row.package_sha256 = package_sha;
+        row.content_sha256 = content_hash;
+        row.has_content_sha256 = true;
+        row.format_version = internal::kPackageFormatVersion;
+        row.algorithm_id = internal::kPackageAlgorithmXChaCha20Poly1305;
+        row.chunk_size = internal::kDefaultPackageChunkSize;
+        row.package_id = finalized.value().package_id;
+        row.imported_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+        row.folder_id = folder_id_ > 0 ? folder_id_ : 0;
+
+        auto key = wrap_file_key(impl.master_key_, file_key_, row.package_id);
+        if (!key) {
+            guard.unlock();
+            discard();
+            return key.error();
+        }
+        auto inserted = impl.database_.insert_video(
+            row, key.value(), provenance_ ? &provenance_.value() : nullptr);
+        if (!inserted) {
+            const auto failure = inserted.error();
+            // Two saves of the same track can finish together; the unique
+            // provider identity index lets exactly one of them win.
+            if (provenance_) {
+                auto existing = impl.database_.query_video_id_by_provenance(
+                    provenance_->provider_id, provenance_->provider_track_id);
+                if (existing && existing.value()) {
+                    guard.unlock();
+                    discard();
+                    already_present_ = true;
+                    return existing.value().value();
+                }
+            }
+            guard.unlock();
+            discard();
+            return failure;
+        }
+        committed_ = true;
+        active_ = false;
+        return inserted.value();
+    }
+
+    void abort() noexcept {
+        if (active_ || writer_.is_open()) {
+            writer_.abort();
+        }
+        if (!staging_path_.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove(staging_path_, ignored);
+            staging_path_.clear();
+        }
+        active_ = false;
+    }
+
+private:
+    Vault* vault_{nullptr};
+    const void* pinned_{nullptr};
+    std::string display_name_;
+    std::int64_t folder_id_{0};
+    std::optional<TrackProvenance> provenance_;
+    std::filesystem::path data_directory_;
+    std::filesystem::path staging_path_;
+    internal::SensitiveBuffer file_key_;
+    internal::StreamPackageWriter writer_;
+    internal::Sha256Accumulator content_hasher_;
+    bool active_{true};
+    bool committed_{false};
+    bool already_present_{false};
+};
+
+StreamImport::StreamImport() noexcept = default;
+StreamImport::~StreamImport() = default;
+StreamImport::StreamImport(std::unique_ptr<StreamImportImpl> impl) noexcept
+    : impl_(std::move(impl)) {}
+StreamImport::StreamImport(StreamImport&& other) noexcept
+    : impl_(std::move(other.impl_)) {}
+StreamImport& StreamImport::operator=(StreamImport&& other) noexcept {
+    if (this != &other) {
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
+bool StreamImport::active() const noexcept {
+    return impl_ != nullptr && impl_->active();
+}
+std::uint64_t StreamImport::expected_size() const noexcept {
+    return impl_ != nullptr ? impl_->expected_size() : 0U;
+}
+std::uint64_t StreamImport::written() const noexcept {
+    return impl_ != nullptr ? impl_->written() : 0U;
+}
+Result<std::uint64_t> StreamImport::append(
+    const std::span<const unsigned char> bytes) {
+    if (impl_ == nullptr) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "this streamed import is not active"};
+    }
+    return impl_->append(bytes);
+}
+Result<std::int64_t> StreamImport::commit() {
+    if (impl_ == nullptr) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "this streamed import is not active"};
+    }
+    return impl_->commit();
+}
+void StreamImport::abort() noexcept {
+    if (impl_ != nullptr) {
+        impl_->abort();
+    }
+}
+bool StreamImport::already_present() const noexcept {
+    return impl_ != nullptr && impl_->already_present();
+}
+
+Result<StreamImport> Vault::begin_stream_import(
+    const std::string_view display_name,
+    const std::uint64_t expected_plaintext_size,
+    const std::int64_t folder_id,
+    const TrackProvenance* provenance) {
+    std::unique_lock<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    const void* pinned = impl_.get();
+    if (folder_id > 0) {
+        auto folder = impl.database_.query_folder(folder_id);
+        if (!folder) {
+            return folder.error();
+        }
+    } else if (folder_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    const std::string name = normalize_entry_name(display_name);
+    if (name.empty()) {
+        return name_rejected();
+    }
+    std::optional<TrackProvenance> owned;
+    if (provenance != nullptr) {
+        auto valid = validate_provenance(*provenance);
+        if (!valid) {
+            return valid.error();
+        }
+        owned = *provenance;
+        owned->video_id = 0;
+    }
+    if (expected_plaintext_size
+        > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "the declared stream size is too large"};
+    }
+
+    const auto data_directory = root_ / L"vault-data";
+    const auto staging_directory = data_directory / L".tmp";
+    std::error_code error;
+    std::filesystem::create_directories(staging_directory, error);
+    if (error) {
+        return filesystem_error(error, "create package staging directory");
+    }
+    std::array<unsigned char, 8> staging_suffix{};
+    internal::random_bytes(staging_suffix);
+    const auto staging_package = staging_directory
+        / ("import_" + to_hex_lower(staging_suffix) + ".vvp");
+
+    internal::SensitiveBuffer file_key(32U);
+    internal::SensitiveBuffer writer_key(32U);
+    internal::random_bytes(std::span(file_key.data(), file_key.size()));
+    std::copy(file_key.data(), file_key.data() + file_key.size(), writer_key.data());
+
+    auto writer = internal::StreamPackageWriter::create(
+        staging_package, std::move(writer_key),
+        internal::kDefaultPackageChunkSize, expected_plaintext_size);
+    if (!writer) {
+        return writer.error();
+    }
+    auto state = std::make_unique<StreamImportImpl>(
+        this, pinned, name, folder_id > 0 ? folder_id : 0, std::move(owned),
+        data_directory, staging_package, std::move(file_key),
+        std::move(writer.value()));
+    return StreamImport(std::move(state));
+}
+
+Result<bool> Vault::set_video_provenance(
+    const std::int64_t video_id,
+    const TrackProvenance& provenance) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto valid = validate_provenance(provenance);
+    if (!valid) {
+        return valid.error();
+    }
+    auto existing = impl_->database_.query_video(video_id);
+    if (!existing) {
+        return existing.error();
+    }
+    TrackProvenance owned = provenance;
+    owned.video_id = video_id;
+    return impl_->database_.set_provenance(owned);
+}
+
+Result<std::optional<TrackProvenance>> Vault::video_provenance(
+    const std::int64_t video_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.query_provenance(video_id);
+}
+
+Result<std::optional<std::int64_t>> Vault::find_video_by_provenance(
+    const std::string_view provider_id,
+    const std::string_view provider_track_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.query_video_id_by_provenance(
+        std::string(provider_id), std::string(provider_track_id));
+}
+
+Result<std::vector<TrackProvenance>> Vault::list_video_provenance() const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.list_provenance();
+}
+
 std::string_view user_message(const VaultErrorCode code) noexcept {
     switch (code) {
     case VaultErrorCode::WrongPassword: return "The password is incorrect.";
