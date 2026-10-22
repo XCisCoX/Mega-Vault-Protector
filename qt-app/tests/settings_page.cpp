@@ -78,18 +78,42 @@ int main(int argc, char** argv) {
             auto* result = page.findChild<T*>(QString::fromLatin1(name));
             check(result != nullptr, name); return result;
         };
-        auto* tabs = child.operator()<QTabBar>("settingsNavigation");
+        // The navigation is a sidebar of named sections, not a strip of tabs:
+        // tests address sections by name so reordering cannot silently pass.
+        auto* nav = child.operator()<QListWidget>("settingsNavigation");
         auto* sections = child.operator()<QStackedWidget>("settingsSections");
         check(page.findChild<QCheckBox*>("useProxy") != nullptr, "proxy settings switch must be reachable");
+        auto goTo = [&app](QListWidget* bar, QStackedWidget* stack, const QString& name) {
+            for (int row = 0; row < bar->count(); ++row) {
+                auto* entry = bar->item(row);
+                if (entry->flags() == Qt::NoItemFlags) continue;
+                if (entry->text() == name) {
+                    bar->setCurrentRow(row);
+                    app.processEvents();
+                    return stack->currentIndex() == entry->data(Qt::UserRole).toInt();
+                }
+            }
+            return false;
+        };
+        auto select = [&](const QString& name) { return goTo(nav, sections, name); };
         QStringList sectionNames;
-        for (int index = 0; index < tabs->count(); ++index) {
-            sectionNames.append(tabs->tabText(index));
+        for (int row = 0; row < nav->count(); ++row) {
+            auto* entry = nav->item(row);
+            if (entry->flags() == Qt::NoItemFlags) continue;
+            sectionNames.append(entry->text());
         }
-        check(tabs->count() == sections->count(), "every settings tab has a page");
-        check(sectionNames.value(0) == "Updates", "the first section is Updates");
-        check(sectionNames.contains("Library"), "the library section is present");
+        check(sectionNames.size() == sections->count(), "every settings section has a page");
+        check(sectionNames.value(0) == "Appearance", "Appearance opens first, not Updates");
+        check(sectionNames.contains("Tags") && sectionNames.contains("Playback")
+                && sectionNames.contains("Thumbnails"),
+            "library and playback settings are grouped, not piled on one page");
         check(sectionNames.contains("Record templates"),
             "templates are managed in settings, not in the library");
+        check(sectionNames.contains("Extensions") && sectionNames.contains("Security")
+                && sectionNames.contains("Network") && sectionNames.contains("About & updates"),
+            "every existing section stays reachable");
+        check(nav->currentItem() != nullptr && nav->currentItem()->text() == "Appearance",
+            "the page opens on Appearance");
         page.resize(480, 640); page.show(); app.processEvents();
         stageMark("page shown");
         {
@@ -132,7 +156,7 @@ int main(int argc, char** argv) {
         check(child.operator()<QLabel>("updateStatus")->text() == "Checking test release", "inline update state");
         page.setUpdateStatus("Up to date"); check(manual->isEnabled(), "manual check restored");
         stageMark("updates section");
-        tabs->setCurrentIndex(1); app.processEvents();
+        check(select("Appearance"), "appearance page reached by name");
         check(child.operator()<QPushButton>("theme_dark")->isChecked(), "default dark appearance");
         for (const auto& theme : {QString("light"), QString("system"), QString("dark")}) {
             auto* button = page.findChild<QPushButton*>("theme_" + theme);
@@ -142,12 +166,12 @@ int main(int argc, char** argv) {
         }
         check(appearanceChanges == 3 && libraryChanges == 0, "appearance isolated signal");
         stageMark("appearance section");
-        tabs->setCurrentIndex(2); app.processEvents();
+        check(select("Extensions"), "extensions page reached by name");
         check(page.findChild<QWidget*>("pluginManager") != nullptr, "real data-only plugin manager");
         check(!child.operator()<QCheckBox>("pluginEnable_org.megavault.monochrome")->isChecked(), "Monochrome starts disabled");
         check(child.operator()<QPushButton>("installPlugin")->isVisible(), "manifest installer reachable");
         stageMark("extensions section");
-        tabs->setCurrentIndex(3); app.processEvents();
+        check(select("Security"), "security page reached by name");
         auto* lock = child.operator()<QComboBox>("autoLockMinutes");
         check(lock->currentData().toInt() == 5 && lock->count() == 5, "auto-lock choices and default");
         lock->setCurrentIndex(lock->findData(15));
@@ -177,10 +201,11 @@ int main(int argc, char** argv) {
         check(current->text().isEmpty() && next->text().isEmpty() && confirm->text().isEmpty(), "password fields cleared after rotation");
         check(bool(videovault::core::Vault::validate_password(root, "new-test-password")), "new password opens generated vault");
         stageMark("security section");
-        tabs->setCurrentIndex(4); app.processEvents();
+        check(select("Tags"), "tags page reached by name");
         auto* tagList = child.operator()<QListWidget>("tagList");
         child.operator()<QLineEdit>("newTag")->setText("Settings test tag"); child.operator()<QPushButton>("addTag")->click();
         check(tagList->count() == 1, "add tag using real vault");
+        check(tagList->maximumHeight() <= 60, "a short tag list does not reserve a blank panel");
         tagList->setCurrentRow(0); tagList->item(0)->setText("Renamed test tag");
         auto storedTags = vault->list_tags();
         check(storedTags && storedTags.value().front().name == "Renamed test tag", "inline tag rename persists");
@@ -201,12 +226,23 @@ int main(int argc, char** argv) {
         stageMark("library section");
         for (const auto size : {QSize(1100, 760), QSize(480, 640)}) {
             page.resize(size);
-            for (int index = 0; index < tabs->count(); ++index) {
-                tabs->setCurrentIndex(index); app.processEvents();
-                check(sections->currentIndex() == index, "navigation changes actual page");
+            // The compact navigation switch and the layout pass it triggers both
+            // happen on the resize event, so settle before measuring widths.
+            app.processEvents();
+            app.processEvents();
+            if (size.width() < 620) {
+                check(nav->isHidden(), "narrow settings replaces the sidebar with a switcher");
+                check(page.findChild<QComboBox*>("settingsNavigationCompact")->isVisible(),
+                    "narrow settings still offers every section");
+            }
+            for (int row = 0; row < nav->count(); ++row) {
+                auto* entry = nav->item(row);
+                if (entry->flags() == Qt::NoItemFlags) continue;
+                nav->setCurrentRow(row); app.processEvents();
+                check(sections->currentIndex() == entry->data(Qt::UserRole).toInt(), "navigation changes actual page");
                 auto* scroll = qobject_cast<QScrollArea*>(sections->currentWidget());
                 if (scroll && scroll->widget()->width() > scroll->viewport()->width()) {
-                    std::cerr << "layout size=" << size.width() << " section=" << index << " content=" << scroll->widget()->width() << " viewport=" << scroll->viewport()->width() << '\n';
+                    std::cerr << "layout size=" << size.width() << " section=" << row << " content=" << scroll->widget()->width() << " viewport=" << scroll->viewport()->width() << '\n';
                     // Name the controls that force the width so a font-dependent
                     // failure on another platform is diagnosable from CI logs.
                     std::vector<std::pair<int, std::string>> widest;
@@ -233,8 +269,7 @@ int main(int argc, char** argv) {
         stageMark("responsive layout");
         videovault::app::initializeTheme(app);
         videovault::app::setThemeMode(videovault::app::ThemeMode::Light);
-        tabs->setCurrentIndex(0);
-        app.processEvents();
+        check(select("About & updates"), "updates page reached by name");
         const QPalette light = videovault::app::lightPalette();
         check(current->palette().color(QPalette::Text) == light.color(QPalette::Text), "live field palette updates to light");
         check(current->palette().color(QPalette::Base) == light.color(QPalette::Base), "live field background follows the light theme");
@@ -252,9 +287,9 @@ int main(int argc, char** argv) {
         if (!qEnvironmentVariableIsEmpty("MVP_SETTINGS_SCREENSHOTS")) {
             const QString folder = qEnvironmentVariable("MVP_SETTINGS_SCREENSHOTS");
             page.resize(480, 640); app.processEvents(); page.grab().save(folder + "/settings-dark-480.png");
-            tabs->setCurrentIndex(3); app.processEvents(); page.grab().save(folder + "/settings-security-480.png");
+            select("Security"); app.processEvents(); page.grab().save(folder + "/settings-security-480.png");
         }
-        tabs->setCurrentIndex(5); app.processEvents();
+        check(select("Network"), "network page reached by name");
         auto* proxySwitch = child.operator()<QCheckBox>("useProxy");
         auto* proxyList = child.operator()<QListWidget>("proxyList");
         check(proxyList->count() == 0 && !proxySwitch->isChecked(), "empty proxies start disabled");

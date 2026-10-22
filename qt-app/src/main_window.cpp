@@ -1304,6 +1304,9 @@ private:
 QLabel* heading(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setObjectName(QStringLiteral("pageTitle"));
+    // A wrapped title is what lets the auth card shrink with the window instead
+    // of forcing a card (and a window) wider than a small screen.
+    label->setWordWrap(true);
     return label;
 }
 
@@ -1312,6 +1315,30 @@ QLabel* description(const QString& text, QWidget* parent) {
     label->setObjectName(QStringLiteral("description"));
     label->setWordWrap(true);
     return label;
+}
+
+// Height a labelled control needs once the stylesheet's border, padding and the
+// platform font are accounted for. The literal 38 this replaces was measured on
+// one font: at larger text sizes the glyphs, the caret and the bottom border no
+// longer fit, which read as "the path field and Browse are cut off".
+int authControlHeight(const QFontMetrics& metrics) {
+    return std::max(38, metrics.height() + 20);
+}
+
+// The storage-path row: text field plus its Browse action. Both keep the same
+// height, the row keeps that height as a floor, and vertical policies are Fixed
+// so a window dragged short makes the card scroll rather than shave the row.
+void configureAuthRow(QWidget* row, QLineEdit* field, QPushButton* browse) {
+    if (row == nullptr || field == nullptr || browse == nullptr) {
+        return;
+    }
+    const int height = authControlHeight(field->fontMetrics());
+    field->setMinimumHeight(height);
+    field->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    browse->setMinimumHeight(height);
+    browse->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    row->setMinimumHeight(height);
+    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 }
 
 QLabel* errorLabel(QWidget* parent) {
@@ -1353,10 +1380,13 @@ void placeCard(QWidget* page, QFrame* card) {
     area->setWidget(host);
     outer->addWidget(area);
     // The scroll area's own size hint is small, which let the window shrink to
-    // below the card once the auth page was shown. Hold the window at the card's
-    // size, as the plain centred layout used to.
+    // below the card once the auth page was shown. Floor the window at the
+    // card's MINIMUM size, not its preferred size: "sizeHint + 192" produced an
+    // 812x520 slab that would not fit a small laptop screen, and a frame dragged
+    // below the floor clipped the card's controls. Height beyond that scrolls.
     // QSize::grownBy is unavailable in the Windows build's Qt 5.12.
-    page->setMinimumSize(card->sizeHint() + QSize(192, 192));
+    const QSize cardMinimum = card->minimumSizeHint();
+    page->setMinimumSize(QSize(cardMinimum.width() + 96, cardMinimum.height() + 48));
 }
 
 core::Argon2Parameters selectedParameters(const int profile) {
@@ -2236,20 +2266,21 @@ QWidget* MainWindow::buildSetupPage() {
         QStringLiteral("Choose a private storage location and a strong password. "
                        "The password is never stored."), card));
 
-    auto* locationRow = new QHBoxLayout();
-    setupLocation_ = new QLineEdit(card);
+    auto* locationHost = new QWidget(card);
+    auto* locationRow = new QHBoxLayout(locationHost);
+    locationRow->setContentsMargins(0, 0, 0, 0);
+    setupLocation_ = new QLineEdit(locationHost);
     setupLocation_->setPlaceholderText(QStringLiteral("Vault storage folder"));
     setupLocation_->setTextMargins(10, 0, 8, 0);
-    setupLocation_->setMinimumHeight(38);
     setupLocation_->setCursorPosition(0);
-    auto* browse = new QPushButton(QStringLiteral("Browse…"), card);
+    auto* browse = new QPushButton(QStringLiteral("Browse…"), locationHost);
     icons::withText(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(setupLocation_, 1);
     locationRow->addWidget(browse);
-    layout->addLayout(locationRow);
+    configureAuthRow(locationHost, setupLocation_, browse);
+    layout->addWidget(locationHost);
 
     setupPassword_ = new QLineEdit(card);
-    setupPassword_->setMinimumHeight(38);
     setupPassword_->setEchoMode(QLineEdit::Password);
     setupPassword_->setPlaceholderText(QStringLiteral("Password"));
     setupConfirmation_ = new QLineEdit(card);
@@ -2300,12 +2331,12 @@ QWidget* MainWindow::buildLoginPage() {
     loginLocation_ = new QLineEdit(loginLocationRow_);
     loginLocation_->setPlaceholderText(QStringLiteral("Vault storage folder"));
     loginLocation_->setTextMargins(10, 0, 8, 0);
-    loginLocation_->setMinimumHeight(38);
     loginLocation_->setCursorPosition(0);
     auto* browse = new QPushButton(QStringLiteral("Browse…"), loginLocationRow_);
     icons::withText(browse, QStringLiteral("folder-open"));
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
+    configureAuthRow(loginLocationRow_, loginLocation_, browse);
     // The remembered vault path is longer than this field, and a line edit that
     // keeps the caret at the end shows only "...\scratch\ux-vault", which reads
     // as a clipped control. Show the start of the path and keep the whole value
@@ -2341,20 +2372,19 @@ QWidget* MainWindow::buildLoginPage() {
 #endif
 
     loginPassword_ = new QLineEdit(card);
-    loginPassword_->setMinimumHeight(38);
     loginPassword_->setEchoMode(QLineEdit::Password);
     loginPassword_->setPlaceholderText(QStringLiteral("Password"));
     layout->addWidget(loginPassword_);
-    // The card's vertical layout was squeezing these rows, so the text fields
-    // and Browse rendered with their bottom halves clipped. Give them a floor
-    // instead of letting the layout compress them below their usable height.
-    for (QLineEdit* field : {loginLocation_, loginPassword_, setupLocation_}) {
+    // Every auth field keeps a font-derived floor. A squeezed card must scroll
+    // (placeCard puts the card in a scroll area) instead of compressing a field
+    // below the height its border, padding and glyphs need.
+    for (QLineEdit* field : {loginLocation_, loginPassword_, setupLocation_,
+             setupPassword_, setupConfirmation_}) {
         if (field != nullptr) {
-            field->setMinimumHeight(38);
+            field->setMinimumHeight(authControlHeight(field->fontMetrics()));
+            field->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         }
     }
-    browse->setMinimumHeight(38);
-    browse->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     loginError_ = errorLabel(card);
     layout->addWidget(loginError_);
@@ -2646,6 +2676,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
     galleryStack_->addWidget(iconList_);
+    // The footer follows the selection: four selected files report their own
+    // combined size instead of the whole folder's.
+    connect(iconList_, &QListWidget::itemSelectionChanged, this, [this] {
+        updateSelectionFooter();
+    });
+    connect(detailsTree_, &QTreeWidget::itemSelectionChanged, this, [this] {
+        updateSelectionFooter();
+    });
 
     // Explorer-style folder pane. It sits beside both gallery views and is laid
     // out by layoutLibraryChrome, because the library page uses floating bars
@@ -4615,12 +4653,12 @@ void MainWindow::updatePluginFolderStatus(const int songs, const int albums) {
         return;
     }
     if (pluginAlbumId_.isEmpty()) {
-        statusCountLabel_->setText(QStringLiteral("%1 items · %2 songs · %3 albums")
+        setFooterSummary(QStringLiteral("%1 items · %2 songs · %3 albums")
             .arg(songs + albums)
             .arg(songs)
             .arg(albums));
     } else {
-        statusCountLabel_->setText(
+        setFooterSummary(
             QStringLiteral("%1 tracks · %2").arg(songs).arg(pluginAlbumName_));
     }
     if (emptyState_ != nullptr) {
@@ -7011,7 +7049,7 @@ void MainWindow::recountLibrary() {
             bytes += iconList_->item(i)->data(Qt::UserRole + 6).toLongLong();
         }
     }
-    statusCountLabel_->setText(QStringLiteral("%1 items · %2")
+    setFooterSummary(QStringLiteral("%1 items · %2")
         .arg(items)
         .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, bytes)))));
     if (emptyState_ != nullptr) {
@@ -7025,6 +7063,70 @@ void MainWindow::recountLibrary() {
             emptyState_->hide();
         }
     }
+}
+
+// The footer reports what the user is acting on. Selecting rows must never
+// trigger a scan: sizes come from the row data the listing already carries, so
+// selecting a folder shows its count, not a recursive total nobody asked for.
+QString MainWindow::selectionFooterText() const {
+    if (galleryStack_ == nullptr) {
+        return {};
+    }
+    auto* view = qobject_cast<QAbstractItemView*>(galleryStack_->currentWidget());
+    if (view == nullptr || view->selectionModel() == nullptr) {
+        return {};
+    }
+    int files = 0;
+    int folders = 0;
+    qlonglong bytes = 0;
+    QSet<int> visitedRows;
+    const auto indexes = view->selectionModel()->selectedIndexes();
+    for (const auto& index : indexes) {
+        // The details tree reports one index per column of the same row.
+        if (visitedRows.contains(index.row())) {
+            continue;
+        }
+        visitedRows.insert(index.row());
+        const int kind = index.data(Qt::UserRole + 12).toInt();
+        if (kind == 0) {
+            ++files;
+            bytes += index.data(Qt::UserRole + 6).toLongLong();
+        } else if (kind == 1) {
+            ++folders;
+        }
+    }
+    if (files == 0 && folders == 0) {
+        return {};
+    }
+    const QString size = compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, bytes)));
+    if (folders == 0) {
+        return QStringLiteral("%1 selected · %2").arg(files).arg(size);
+    }
+    if (files == 0) {
+        return QStringLiteral("%1 folder%2 selected · contents not counted")
+            .arg(folders)
+            .arg(folders == 1 ? QString() : QStringLiteral("s"));
+    }
+    return QStringLiteral("%1 selected · %2 in files · folder contents not counted")
+        .arg(files + folders)
+        .arg(size);
+}
+
+void MainWindow::setFooterSummary(const QString& summary) {
+    footerSummary_ = summary;
+    updateSelectionFooter();
+}
+
+void MainWindow::updateSelectionFooter() {
+    if (statusCountLabel_ == nullptr) {
+        return;
+    }
+    const QString selection = selectionFooterText();
+    statusCountLabel_->setText(selection.isEmpty() ? footerSummary_ : selection);
+    statusCountLabel_->setToolTip(selection.isEmpty()
+        ? QString()
+        : QStringLiteral("Selected files only. Subfolder contents are never "
+                         "counted, so large libraries stay responsive."));
 }
 
 QListWidgetItem* MainWindow::galleryIconItem(const qlonglong id) const {
@@ -7840,7 +7942,7 @@ void MainWindow::refreshGallery() {
                 emptyState_->hide();
             }
         }
-        statusCountLabel_->setText(QStringLiteral("%1 items · %2")
+        setFooterSummary(QStringLiteral("%1 items · %2")
             .arg(visible.size() + realFolders)
             .arg(compactSize(static_cast<std::uint64_t>(std::max<qlonglong>(0, total_bytes)))));
         watcher->deleteLater();

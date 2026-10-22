@@ -114,6 +114,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -3212,14 +3213,27 @@ private fun Crumb(
     )
 }
 
+/**
+ * Folder glyph on a soft rounded chip. The old hairline outline was stretched
+ * across a whole tile, which read as a generic shape rather than a folder; a
+ * filled glyph on a tinted chip says "folder" at any size and keeps the same
+ * footprint in the details, list and grid views.
+ */
 @Composable
-private fun FolderGlyph(modifier: Modifier = Modifier) {
-    Icon(
-        painterResource(R.drawable.ic_lucide_folder),
-        contentDescription = null,
-        tint = Mvp.accent,
-        modifier = modifier,
-    )
+private fun FolderGlyph(modifier: Modifier = Modifier, glyph: Dp = 24.dp) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(percent = 32))
+            .background(Mvp.accent.copy(alpha = 0.14f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            painterResource(R.drawable.ic_folder_filled),
+            contentDescription = null,
+            tint = Mvp.accent,
+            modifier = Modifier.size(glyph),
+        )
+    }
 }
 
 private fun folderModifier(
@@ -3269,7 +3283,7 @@ internal fun FolderDetailRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FolderGlyph(Modifier.size(44.dp))
+        FolderGlyph(Modifier.size(44.dp), glyph = 24.dp)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(name, color = Mvp.text, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
@@ -3316,7 +3330,7 @@ internal fun FolderListRow(
             .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FolderGlyph(Modifier.size(36.dp))
+        FolderGlyph(Modifier.size(34.dp), glyph = 20.dp)
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(name, color = Mvp.text, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
@@ -3366,7 +3380,7 @@ internal fun FolderTile(
             )
             .then(folderModifier(onClick, onLongPress, transfer, hint, refusal, onDrop)),
     ) {
-        FolderGlyph(Modifier.align(Alignment.Center).fillMaxSize().padding(18.dp))
+        FolderGlyph(Modifier.align(Alignment.Center).size(56.dp), glyph = 30.dp)
         Column(
             Modifier
                 .align(Alignment.BottomStart)

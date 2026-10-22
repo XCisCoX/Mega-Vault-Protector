@@ -82,13 +82,18 @@ int main() {
     if (!media || media.value().codec_name != "pcm_u8" ||
         media.value().duration_ms < 950 || media.value().duration_ms > 1050)
         return fail("Real FFmpeg probe did not recognize the memory-imported WAV.");
-    const auto duplicate = vault.import_bytes(audio, "Same audio, another name.wav", 0);
-    if (!duplicate || duplicate.value() != saved.value())
-        return fail("Duplicate memory download created a second item.");
+    // A deliberate second save of the same audio is its own item.
+    const auto second_save = vault.import_bytes(audio, "Same audio, another name.wav", 0);
+    if (!second_save || second_save.value() == saved.value())
+        return fail("A second memory import must be an independent item.");
     auto videos = vault.list_videos();
-    if (!videos || videos.value().size() != 1 ||
-        videos.value()[0].folder_id != folder.value())
-        return fail("Target folder or deduplication was not preserved.");
+    if (!videos || videos.value().size() != 2)
+        return fail("Every deliberate import must add exactly one item.");
+    for (const auto& video : videos.value()) {
+        const auto expected = video.id == saved.value() ? folder.value() : 0;
+        if (video.folder_id != expected)
+            return fail("Target folder was not preserved.");
+    }
     if (vault.import_bytes(audio, "Invalid destination.wav", -1))
         return fail("An invalid target folder must not silently become the root.");
     if (vault.import_bytes(audio, "Missing destination.wav", 999999))
@@ -113,7 +118,9 @@ int main() {
             return fail("Plaintext audio marker leaked into a persisted file.");
         if (entry.path().extension() == ".vvp") ++packages;
     }
-    if (packages != 1) return fail("Expected exactly one encrypted audio package.");
+    // Two deliberate imports of the same audio: one package each, and the
+    // vault never keeps a plaintext copy alongside them.
+    if (packages != 2) return fail("Expected one encrypted package per imported item.");
     vault.lock();
     if (vault.import_bytes(audio, "Locked import.wav", folder.value()))
         return fail("Locked vault accepted memory audio.");

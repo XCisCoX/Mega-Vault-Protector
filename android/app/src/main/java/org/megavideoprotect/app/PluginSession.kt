@@ -309,7 +309,7 @@ class PluginSession(
                 }
                 if (!closed && token == generation) {
                     saved = result.ok
-                    playbackMessage = if (result.ok) "Saved to encrypted vault (existing content is deduplicated)" else "Vault import failed: ${result.error}"
+                    playbackMessage = if (result.ok) "Saved to the encrypted vault." else "Vault import failed: ${result.error}"
                     if (result.ok) GalleryCache.clear()
                 }
             } catch (_: Exception) { if (!closed && token == generation) playbackMessage = "Cannot import: vault or destination changed, or encrypted import failed." }

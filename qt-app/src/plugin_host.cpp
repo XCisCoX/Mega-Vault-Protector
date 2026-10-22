@@ -6,6 +6,7 @@
 #include <QBuffer>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QFrame>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDir>
@@ -476,6 +477,7 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
     auto *list = new QWidget(page);
     auto *rows = new QVBoxLayout(list);
     rows->setContentsMargins(0, 0, 0, 0);
+    rows->setSpacing(12);
     layout->addWidget(list);
     auto rebuild = [this, rows, vault, list] {
         while (auto *item = rows->takeAt(0)) {
@@ -483,23 +485,52 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
             delete item;
         }
         for (const auto &m : manifests_) {
-            auto *panel = new QWidget(list);
+            // One card per extension. Without a boundary the descriptions,
+            // permissions and switches of two extensions read as a single form.
+            auto *panel = new QFrame(list);
+            panel->setObjectName("pluginCard");
+            panel->setAttribute(Qt::WA_StyledBackground, true);
+            panel->setStyleSheet(QStringLiteral(
+                "QFrame#pluginCard { background: palette(base);"
+                " border: 1px solid palette(midlight); border-radius: 14px; }"));
             auto *box = new QVBoxLayout(panel);
+            box->setContentsMargins(14, 12, 14, 12);
+            box->setSpacing(8);
             auto *top = new QHBoxLayout;
-            auto *title = new QLabel(m.name + " · " + m.version, panel);
+            auto *title = new QLabel(m.name, panel);
             title->setTextFormat(Qt::PlainText);
+            QFont titleFont = title->font();
+            titleFont.setBold(true);
+            title->setFont(titleFont);
             top->addWidget(title, 1);
             auto *enable = new Switch(panel);
             enable->setObjectName("pluginEnable_" + m.id);
+            enable->setAccessibleName("Enable " + m.name);
             enable->setChecked(enabled(m.id));
             top->addWidget(enable);
             box->addLayout(top);
+            // Type and version are secondary information: keeping them out of the
+            // title line makes each card's name the first thing read.
+            const QString kind = m.protocol == "monochrome-tracks-v1"
+                ? QStringLiteral("Music provider") : QStringLiteral("Local tool");
+            auto *subtitle = new QLabel(kind + " · version " + m.version, panel);
+            subtitle->setTextFormat(Qt::PlainText);
+            subtitle->setProperty("secondary", true);
+            subtitle->setForegroundRole(QPalette::PlaceholderText);
+            box->addWidget(subtitle);
             const auto permissionNotice = m.protocol=="monochrome-tracks-v1" ? "Permissions: network (" + m.hosts.join(", ") + "), audio playback, encrypted vault import." : QString("Host permissions: none. Commands run locally inside the sandbox.");
-            auto *notice = new QLabel(m.description + "\n" + m.sourceNotice + "\n" + permissionNotice,
-                                      panel);
+            auto *notice = new QLabel(m.description + "\n" + m.sourceNotice, panel);
             notice->setTextFormat(Qt::PlainText);
             notice->setWordWrap(true);
             box->addWidget(notice);
+            // Permissions get their own line, so they are readable before the
+            // extension is switched on rather than buried in the description.
+            auto *permissions = new QLabel(permissionNotice, panel);
+            permissions->setTextFormat(Qt::PlainText);
+            permissions->setWordWrap(true);
+            permissions->setProperty("secondary", true);
+            permissions->setForegroundRole(QPalette::PlaceholderText);
+            box->addWidget(permissions);
             auto *options = new QWidget(panel);
             auto *opts = new QVBoxLayout(options);
             opts->setContentsMargins(0, 4, 0, 4);
@@ -1295,7 +1326,7 @@ void MusicPluginPage::saveAudio() {
         importBusy_ = false;
         saved_ = result.isEmpty();
         download_->setEnabled(!saved_);
-        status_->setText(saved_ ? "Saved in encrypted vault (identical content is deduplicated)." : result);
+        status_->setText(saved_ ? "Saved in the encrypted vault." : result);
         if (saved_)
             emit imported();
     });

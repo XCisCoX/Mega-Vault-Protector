@@ -10,6 +10,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QStackedWidget;
 
 template <typename T>
 class QFutureWatcher;
@@ -55,6 +56,9 @@ private:
     void reloadTemplates();
     void removeTemplate(qint64 templateId, const QString& name);
     void showEvent(QShowEvent* event) override;
+    // Narrow windows drop the section sidebar for a switcher above the page, so
+    // a 480px-wide settings window never clips the content it is showing.
+    void resizeEvent(QResizeEvent* event) override;
     void beginPasswordChange();
     void finishPasswordChange();
     void addTag();
@@ -91,6 +95,11 @@ private:
     // Rebuilds stored thumbnails that import never managed to create.
     QPushButton* regenerateButton_{nullptr};
     QFutureWatcher<std::shared_ptr<std::pair<int, int>>>* regenerateWatcher_{nullptr};
+
+    // Section navigation: a list on wide windows, a combo box when space is tight.
+    QListWidget* navigationList_{nullptr};
+    QComboBox* navigationCombo_{nullptr};
+    QStackedWidget* navigationPages_{nullptr};
 
     QLabel* status_{nullptr};
     QPushButton* checkUpdatesButton_{nullptr};

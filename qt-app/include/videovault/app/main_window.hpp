@@ -167,6 +167,12 @@ private:
     void paintGalleryBatch();
     void decorateVisible();
     void recountLibrary();
+    // The footer shows the current folder's totals, or the selection while one
+    // exists. Both paths go through setFooterSummary so an async listing cannot
+    // overwrite a selected-item summary with the folder total.
+    void setFooterSummary(const QString& summary);
+    void updateSelectionFooter();
+    QString selectionFooterText() const;
     void openFolder(std::int64_t folder_id);
     void rebuildBreadcrumb();
     void beginNewFolder();
@@ -436,6 +442,9 @@ private:
     struct GalleryCache;
     std::unique_ptr<GalleryCache> galleryCache_;
     QLabel* statusCountLabel_{nullptr};
+    // Folder total last reported by a listing/recount; the label falls back to
+    // this whenever nothing is selected.
+    QString footerSummary_;
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
     QStringList tagFilterNames_;

@@ -376,12 +376,24 @@ private fun PeerFolderTile(name: String, picked: Boolean, onClick: () -> Unit, o
             .background(Mvp.tileBg)
             .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
-        Icon(
-            painterResource(R.drawable.ic_lucide_folder),
-            contentDescription = null,
-            tint = Mvp.accent,
-            modifier = Modifier.align(Alignment.Center).fillMaxSize().padding(22.dp),
-        )
+        // Same filled folder on a tinted chip as the library tiles, so a folder
+        // in the phone's browser and a folder in the library look like the same
+        // kind of thing.
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .size(56.dp)
+                .clip(RoundedCornerShape(percent = 32))
+                .background(Mvp.accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painterResource(R.drawable.ic_folder_filled),
+                contentDescription = null,
+                tint = Mvp.accent,
+                modifier = Modifier.size(30.dp),
+            )
+        }
         Text(
             name,
             color = Color.White,

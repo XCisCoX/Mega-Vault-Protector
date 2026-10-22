@@ -1,0 +1,19 @@
+<!-- Hand-authored filled folder glyph for library/peer folder rows and tiles.
+     The Lucide master (ic_lucide_folder) is a 2px outline that turns into a
+     hairline when scaled across a tile; this solid silhouette reads as a folder
+     at every size. Both paths are filled with the same colour: the tint applied
+     by Icon() keeps each path's alpha, so the tab behind the body reads as a
+     lighter second tone without a second colour to maintain per theme. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:fillAlpha="0.45"
+        android:pathData="M3.5,7C3.5,6.17 4.17,5.5 5,5.5h4.1c0.5,0 0.97,0.21 1.3,0.59l1.1,1.25H19c0.83,0 1.5,0.67 1.5,1.5v1.16h-17z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M3.5,9.9h17v8.6c0,0.83 -0.67,1.5 -1.5,1.5H5c-0.83,0 -1.5,-0.67 -1.5,-1.5z" />
+</vector>

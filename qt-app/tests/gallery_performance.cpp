@@ -27,6 +27,7 @@
 #include <QFile>
 #include <QDir>
 #include <QDialog>
+#include <QFrame>
 #include <QCheckBox>
 #include <QPushButton>
 #include <QMenu>
@@ -224,6 +225,105 @@ struct GalleryPerformanceTestAccess {
             std::printf("PASS real setup worker: profile %d creation, unlock, reopen\n", profile);
         }
         return 0;
+    }
+
+    // Auth layout regression. The unlock card's storage-path field and its
+    // Browse button were reported as clipped, so this measures the real widget
+    // geometry instead of trusting the minimum heights set in the source: a
+    // layout may still compress a row below them when the card is squeezed.
+    static int authLayout() {
+        int failures = 0;
+        const auto check = [&failures](bool condition, const char* message) {
+            if (!condition) {
+                std::fprintf(stderr, "FAIL %s\n", message);
+                ++failures;
+            }
+        };
+        for (const QSize size : {QSize(460, 340), QSize(520, 400), QSize(900, 700)}) {
+            for (const bool setup : {false, true}) {
+                MainWindow window;
+                if (setup) window.showSetup(); else window.showLogin({});
+                window.show();
+                window.resize(size);
+                QApplication::processEvents();
+                QApplication::processEvents();
+                auto* card = window.loginPage_->findChild<QFrame*>(QStringLiteral("card"));
+                if (setup) card = window.setupPage_->findChild<QFrame*>(QStringLiteral("card"));
+                auto* row = setup ? window.setupLocation_->parentWidget() : window.loginLocationRow_;
+                auto* field = setup ? window.setupLocation_ : window.loginLocation_;
+                if (card == nullptr || row == nullptr || field == nullptr) {
+                    std::fprintf(stderr, "FAIL auth controls missing\n");
+                    return 1;
+                }
+                auto* browse = row->findChild<QPushButton*>();
+                if (browse == nullptr) { std::fprintf(stderr, "FAIL browse button missing\n"); return 1; }
+                window.show();
+                QApplication::processEvents();
+                const QRect rowRect = row->rect();
+                const QRect fieldRect = field->geometry();
+                const QRect browseRect = browse->geometry();
+                const QSize rowMinimum = row->layout()->minimumSize();
+                const QSize cardMinimum = card->layout()->minimumSize();
+                std::printf(
+                    "%s window=%dx%d card=%dx%d(cardMin h=%d) row=%dx%d(rowMin h=%d) "
+                    "field h=%d(min %d) bottom=%d browse h=%d(min %d) bottom=%d\n",
+                    setup ? "setup " : "unlock", window.width(), window.height(),
+                    card->width(), card->height(), cardMinimum.height(),
+                    rowRect.width(), rowRect.height(), rowMinimum.height(),
+                    fieldRect.height(), field->minimumSizeHint().height(), fieldRect.bottom(),
+                    browseRect.height(), browse->minimumSizeHint().height(), browseRect.bottom());
+                check(rowRect.height() >= rowMinimum.height(), "row keeps its layout minimum height");
+                check(fieldRect.height() >= field->minimumSizeHint().height(),
+                    "path field keeps its styled height");
+                check(browseRect.height() >= browse->minimumSizeHint().height(),
+                    "browse button keeps its styled height");
+                check(rowRect.contains(fieldRect) && rowRect.contains(browseRect),
+                    "row contains both controls");
+                check(card->height() >= cardMinimum.height(), "card keeps its layout minimum height");
+                check(field->sizePolicy().verticalPolicy() != QSizePolicy::Ignored,
+                    "path field is not vertically ignored");
+            }
+        }
+        // A small window is the reported case: the app must scroll the auth card
+        // instead of compressing the path row below its styled height. The
+        // window and page minimums are cleared here so the layout is exercised
+        // at a frame size a user can actually drag to.
+        for (const bool setup : {false, true}) {
+            MainWindow window;
+            if (setup) window.showSetup(); else window.showLogin({});
+            window.setMinimumSize(0, 0);
+            window.loginPage_->setMinimumSize(0, 0);
+            window.setupPage_->setMinimumSize(0, 0);
+            window.show();
+            window.resize(475, 345);
+            QApplication::processEvents();
+            QApplication::processEvents();
+            auto* row = setup ? window.setupLocation_->parentWidget() : window.loginLocationRow_;
+            auto* field = setup ? window.setupLocation_ : window.loginLocation_;
+            auto* browse = row->findChild<QPushButton*>();
+            const QSize rowMinimum = row->layout()->minimumSize();
+            const int rowHeight = row->height();
+            const int fieldHeight = field->height();
+            const int browseHeight = browse->height();
+            std::printf("compressed %s window=%dx%d row h=%d(min %d) field h=%d(min %d) browse h=%d(min %d)\n",
+                setup ? "setup " : "unlock", window.width(), window.height(),
+                rowHeight, rowMinimum.height(), fieldHeight, field->minimumSizeHint().height(),
+                browseHeight, browse->minimumSizeHint().height());
+            check(fieldHeight >= field->minimumSizeHint().height(),
+                "compressed window: path field keeps its styled height");
+            check(browseHeight >= browse->minimumSizeHint().height(),
+                "compressed window: browse button keeps its styled height");
+            check(rowHeight >= rowMinimum.height(),
+                "compressed window: row keeps its layout minimum height");
+            check(row->rect().contains(field->geometry()) && row->rect().contains(browse->geometry()),
+                "compressed window: row contains both controls");
+            if (const auto shots = qEnvironmentVariable("MVP_AUTH_SHOT"); !shots.isEmpty()) {
+                QDir().mkpath(shots);
+                window.grab().save(shots + QStringLiteral("/auth-") + (setup ? "setup" : "unlock") + ".png");
+            }
+        }
+        if (failures == 0) std::printf("auth layout: controls keep their full height at every size\n");
+        return failures == 0 ? 0 : 1;
     }
 
     // Theme screenshots of the real folder surface (no user vault involved).
@@ -1039,5 +1139,7 @@ int main(int argc, char** argv) {
         return videovault::app::GalleryPerformanceTestAccess::libraryCommands();
     if (qEnvironmentVariableIsSet("MVP_SHARE_UNLOCK_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::shareUnlock();
+    if (qEnvironmentVariableIsSet("MVP_AUTH_LAYOUT_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::authLayout();
     return videovault::app::GalleryPerformanceTestAccess::run();
 }

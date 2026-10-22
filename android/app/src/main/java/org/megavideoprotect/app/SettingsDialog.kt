@@ -90,7 +90,9 @@ fun SettingsDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(TAB_UPDATES) }
+    // Appearance opens first: Updates was the opening page, which put a page
+    // people rarely touch in front of the ones they open settings for.
+    var tab by remember { mutableStateOf(TAB_APPEARANCE) }
     var idleLabel by remember { mutableStateOf(VaultLocation.idleLockLabel(context)) }
     var current by remember { mutableStateOf("") }
     var newPass by remember { mutableStateOf("") }
@@ -536,9 +538,22 @@ fun SettingsDialog(
     }
 }
 
+/**
+ * Section order and names for the compact strip. It mirrors the desktop sidebar:
+ * the appearance first, tools and network in the middle, updates last, and the
+ * same names on both clients ("Extensions" and "Network", not "Plugins"/"Proxy").
+ */
+private val settingsSections = listOf(
+    TAB_APPEARANCE to "Appearance",
+    TAB_LIBRARY to "Tags",
+    TAB_SECURITY to "Security",
+    TAB_PLUGINS to "Extensions",
+    TAB_PROXY to "Network",
+    TAB_UPDATES to "About & updates",
+)
+
 @Composable
 private fun SettingsTabs(selected: Int, onSelect: (Int) -> Unit) {
-    val labels = listOf("Updates", "Appearance", "Plugins", "Security", "Library", "Proxy")
     Row(
         Modifier
             .fillMaxWidth()
@@ -547,8 +562,8 @@ private fun SettingsTabs(selected: Int, onSelect: (Int) -> Unit) {
             .heightIn(min = 42.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        labels.forEachIndexed { index, label ->
-            val active = selected == index
+        settingsSections.forEach { (id, label) ->
+            val active = selected == id
             val color by animateColorAsState(
                 if (active) Mvp.accent else Mvp.description,
                 tween(160),
@@ -557,7 +572,7 @@ private fun SettingsTabs(selected: Int, onSelect: (Int) -> Unit) {
             Column(
                 Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .clickable { onSelect(index) }
+                    .clickable { onSelect(id) }
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {

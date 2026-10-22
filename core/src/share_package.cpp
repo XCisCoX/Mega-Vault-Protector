@@ -680,7 +680,10 @@ Result<int> Vault::import_package(
             return folder.error();
         }
         bool already = false;
-        auto imported = import_file(current.temp, {}, folder.value(), &already);
+        // A package import can be resumed after a disconnect, so identical
+        // content resolves onto the item already received instead of stacking
+        // a second copy of every record on a retry.
+        auto imported = import_file(current.temp, {}, folder.value(), &already, true);
         std::error_code ignored;
         std::filesystem::remove(current.temp, ignored);
         const auto relative = current.relative;

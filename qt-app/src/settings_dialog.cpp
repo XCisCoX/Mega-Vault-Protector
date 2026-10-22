@@ -7,6 +7,7 @@
 #include "videovault/app/record_document.hpp"
 #include <QDialog>
 #include <QIntValidator>
+#include <QResizeEvent>
 #include <QUuid>
 #include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
@@ -153,6 +154,11 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
         "QListWidget { background: palette(base); color: palette(text); border: none; }"
         "QListWidget::item { min-height: 46px; border-bottom: 1px solid palette(midlight); }"
         "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
+        "QListWidget#settingsNavigation { background: transparent; border: none; outline: none; padding: 2px; }"
+        "QListWidget#settingsNavigation::item { min-height: 32px; padding: 0 10px; border-radius: 8px; border-bottom: none; color: palette(window-text); }"
+        "QListWidget#settingsNavigation::item:selected { background: palette(highlight); color: palette(highlighted-text); }"
+        "QListWidget#settingsNavigation::item:hover:!selected { background: palette(alternate-base); }"
+        "QListWidget#settingsNavigation::item:disabled { color: palette(mid); }"
         "QTabBar::tab { color: palette(window-text); background: transparent; padding: 11px 9px; border-bottom: 2px solid transparent; }"
         "QTabBar::tab:selected { color: palette(highlight); border-bottom: 2px solid palette(highlight); }"
         "QTabBar::tab:hover { background: palette(alternate-base); }"
@@ -169,16 +175,46 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     auto* title = new QLabel(QStringLiteral("Settings"), this);
     QFont titleFont = title->font(); titleFont.setPointSize(21); titleFont.setBold(true); title->setFont(titleFont);
     header->addWidget(title); header->addStretch(); outer->addLayout(header);
-    auto* tabs = new QTabBar(this);
-    tabs->setObjectName(QStringLiteral("settingsNavigation"));
-    tabs->setExpanding(false); tabs->setDrawBase(false); tabs->setUsesScrollButtons(true);
-    tabs->setAccessibleName(QStringLiteral("Settings sections"));
-    outer->addWidget(tabs);
+    auto* body = new QHBoxLayout;
+    body->setSpacing(16);
+    auto* nav = new QListWidget(this);
+    nav->setObjectName(QStringLiteral("settingsNavigation"));
+    nav->setAccessibleName(QStringLiteral("Settings sections"));
+    nav->setFrameShape(QFrame::NoFrame);
+    nav->setMinimumWidth(148);
+    nav->setMaximumWidth(210);
+    nav->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    nav->setSelectionMode(QAbstractItemView::SingleSelection);
+    nav->setFocusPolicy(Qt::StrongFocus);
+    body->addWidget(nav);
     auto* pages = new QStackedWidget(this);
     pages->setObjectName(QStringLiteral("settingsSections"));
-    outer->addWidget(pages, 1);
-    auto section = [tabs, pages](const QString& name, const QString& description) {
-        tabs->addTab(name);
+    body->addWidget(pages, 1);
+    // Compact mode: below ~620px the sidebar becomes a switcher above the page.
+    // A 210px column on a 480px window left the content narrower than its cards.
+    auto* navCombo = new QComboBox(this);
+    navCombo->setObjectName(QStringLiteral("settingsNavigationCompact"));
+    navCombo->setAccessibleName(QStringLiteral("Settings section"));
+    navCombo->hide();
+    outer->addWidget(navCombo);
+    outer->addLayout(body, 1);
+    // Each section is built in whatever order its controls need; the sidebar is
+    // assembled afterwards from this list, so the navigation order is explicit
+    // instead of an accident of construction order.
+    QHash<QString, int> pageForSection;
+    const QStringList navigationOrder{
+        QStringLiteral("appearance"),
+        QStringLiteral("|library"),
+        QStringLiteral("tags"),
+        QStringLiteral("playback"),
+        QStringLiteral("thumbnails"),
+        QStringLiteral("templates"),
+        QStringLiteral("extensions"),
+        QStringLiteral("security"),
+        QStringLiteral("network"),
+        QStringLiteral("updates")};
+    auto section = [nav, pages, &pageForSection](const QString& key, const QString& name,
+                         const QString& description) {
         auto* scroll = new QScrollArea;
         scroll->setObjectName(QStringLiteral("settingsSection"));
         scroll->setFrameShape(QFrame::NoFrame); scroll->setWidgetResizable(true);
@@ -192,9 +228,12 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
         layout->addWidget(heading);
         layout->addWidget(textLabel(description, content, true));
         scroll->setWidget(content); pages->addWidget(scroll);
+        pageForSection.insert(key, pages->count() - 1);
+        Q_UNUSED(nav);
         return layout;
     };
-    auto* updates = section(QStringLiteral("Updates"), QStringLiteral("Keep Mega Vault up to date, on your terms."));
+    auto* updates = section(QStringLiteral("updates"), QStringLiteral("About & updates"),
+        QStringLiteral("Version, update channel, and checking for a new release."));
     auto* updateCard = card(updates);
     auto toggle = [this, updateCard](const QString& title, const QString& detail, const QString& key, bool fallback, const QString& name) {
         auto* button = new PillSwitch(this);
@@ -218,7 +257,8 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     manual->addWidget(updateStatus_);
     connect(checkUpdatesButton_, &QPushButton::clicked, this, &SettingsDialog::updateCheckRequested);
 
-    auto* appearance = section(QStringLiteral("Appearance"), QStringLiteral("Choose a look for the whole app."));
+    auto* appearance = section(QStringLiteral("appearance"), QStringLiteral("Appearance"),
+        QStringLiteral("Choose a look for the whole app."));
     auto* appearanceCard = card(appearance);
     auto* segments = new QHBoxLayout;
     segments->setSpacing(8);
@@ -240,11 +280,12 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     appearanceCard->addLayout(segments);
     appearance->addWidget(textLabel(QStringLiteral("System follows your device’s appearance. Your choice is saved for the next launch."), this, true));
 
-    auto* plugins = section(QStringLiteral("Extensions"), QStringLiteral("Local sandboxed tools and permission-controlled providers."));
+    auto* plugins = section(QStringLiteral("extensions"), QStringLiteral("Extensions"),
+        QStringLiteral("Local sandboxed tools and permission-controlled providers."));
     if (!pluginHost) pluginHost = new PluginHost({}, this);
     plugins->addWidget(pluginHost->manager(vault_, this));
 
-    auto* templates = section(QStringLiteral("Record templates"),
+    auto* templates = section(QStringLiteral("templates"), QStringLiteral("Record templates"),
         QStringLiteral("Structures to start a record from. They are kept here rather than in "
                        "the library, so they never look like files."));
     auto* templateCard = card(templates);
@@ -260,7 +301,8 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     templateRows_->setSpacing(6);
     templateCard->addWidget(templateHost);
 
-    auto* security = section(QStringLiteral("Security"), QStringLiteral("Protect your vault and control when it locks."));
+    auto* security = section(QStringLiteral("security"), QStringLiteral("Security"),
+        QStringLiteral("Protect your vault and control when it locks."));
     auto* lockCard = card(security);
     auto* lockAfter = new QComboBox(this);
     lockAfter->setObjectName(QStringLiteral("autoLockMinutes"));
@@ -297,11 +339,12 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     passwordCard->addWidget(changePasswordButton_);
     connect(changePasswordButton_, &QPushButton::clicked, this, &SettingsDialog::beginPasswordChange);
 
-    auto* library = section(QStringLiteral("Library"), QStringLiteral("Organize tags and maintain your media library."));
+    auto* library = section(QStringLiteral("tags"), QStringLiteral("Tags"),
+        QStringLiteral("Organize the tags you put on library items."));
     auto* tags = card(library);
     tags->addWidget(textLabel(QStringLiteral("Tags"), this));
     tagList_ = new QListWidget(this); tagList_->setObjectName(QStringLiteral("tagList"));
-    tagList_->setAccessibleName(QStringLiteral("Library tags")); tagList_->setMinimumHeight(150);
+    tagList_->setAccessibleName(QStringLiteral("Library tags"));
     tagList_->setMaximumHeight(240); tagList_->setSelectionMode(QAbstractItemView::SingleSelection);
     tagList_->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     tags->addWidget(tagList_);
@@ -333,19 +376,31 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
         { const QSignalBlocker block(tagList_); item->setText(item->text().trimmed()); item->setData(Qt::UserRole + 1, item->text()); }
         emit settingsChanged();
     });
-    auto* playback = card(library);
+    auto* playback = section(QStringLiteral("playback"), QStringLiteral("Playback"),
+        QStringLiteral("Buffering for smooth playback. A change applies the next time you open a video."));
+    auto* playbackCard = card(playback);
     cacheCombo_ = new QComboBox(this); cacheCombo_->setObjectName(QStringLiteral("streamCacheMib"));
     for (const int mib : {64, 128, 256, 512}) cacheCombo_->addItem(QStringLiteral("%1 MiB").arg(mib), mib);
     int cacheIndex = cacheCombo_->findData(QSettings().value(QStringLiteral("player/streamCacheMib"), 128).toInt());
     cacheCombo_->setCurrentIndex(cacheIndex < 0 ? 1 : cacheIndex);
-    row(playback, QStringLiteral("Streaming cache"), QStringLiteral("Used when you next open a video."), cacheCombo_);
+    row(playbackCard, QStringLiteral("Streaming cache"), QStringLiteral("Memory reserved while a video plays."), cacheCombo_);
     connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { applyCacheSelection(); });
-    regenerateButton_ = action(QStringLiteral("Regenerate missing"), QStringLiteral("regenerateMissing"), this);
+
+    auto* thumbnails = section(QStringLiteral("thumbnails"), QStringLiteral("Thumbnails"),
+        QStringLiteral("Maintain the preview images the library shows. Nothing here touches your files' contents."));
+    auto* thumbnailCard = card(thumbnails);
+    row(thumbnailCard, QStringLiteral("Missing previews"),
+        QStringLiteral("Only items without a stored thumbnail are processed."), new QWidget(this));
+    regenerateButton_ = action(QStringLiteral("Regenerate missing thumbnails"),
+        QStringLiteral("regenerateMissing"), this);
     regenerateButton_->setToolTip(QStringLiteral("Regenerate missing thumbnails"));
-    playback->addWidget(regenerateButton_);
-    playback->addWidget(textLabel(QStringLiteral("Only items without a stored thumbnail are processed."), this, true));
+    thumbnailCard->addWidget(regenerateButton_);
+    thumbnailCard->addWidget(textLabel(
+        QStringLiteral("Items that already have a preview are left untouched, so this is safe to run again."),
+        this, true));
     connect(regenerateButton_, &QPushButton::clicked, this, &SettingsDialog::beginRegenerateMissing);
-    auto* proxies = section(QStringLiteral("Proxy"), QStringLiteral("Route internet requests through HTTP or SOCKS5. SOCKS5 resolves destination names on the proxy. No MTProto."));
+    auto* proxies = section(QStringLiteral("network"), QStringLiteral("Network"),
+        QStringLiteral("Route internet requests through HTTP or SOCKS5. SOCKS5 resolves destination names on the proxy. No MTProto."));
     auto* proxyCard = card(proxies);
     QString proxyError;
     auto proxyState = std::make_shared<ProxySettings>(loadProxySettings(&proxyError));
@@ -486,7 +541,79 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     proxies->addWidget(textLabel(QStringLiteral("Credentials are kept in your operating system’s protected credential store, not plaintext preferences. HTTP proxies and SOCKS5 authentication are not encrypted on the proxy hop; use a trusted local or secure-network proxy. Existing transfers finish on their original connection."), this, true));
     status_ = textLabel(QString(), this); status_->setObjectName(QStringLiteral("settingsStatus")); status_->hide();
     outer->addWidget(status_);
-    connect(tabs, &QTabBar::currentChanged, pages, &QStackedWidget::setCurrentIndex);
+    // Build the sidebar from the explicit order above. Group headers are
+    // unselectable labels, so keyboard and pointer navigation both skip them.
+    nav->clear();
+    for (const QString& key : navigationOrder) {
+        if (key == QStringLiteral("|library")) {
+            auto* group = new QListWidgetItem(QStringLiteral("LIBRARY & PLAYBACK"), nav);
+            group->setFlags(Qt::NoItemFlags);
+            group->setData(Qt::UserRole, -1);
+            QFont groupFont = group->font();
+            groupFont.setPointSize(8);
+            groupFont.setBold(true);
+            group->setFont(groupFont);
+            group->setForeground(palette().color(QPalette::PlaceholderText));
+            continue;
+        }
+        const auto found = pageForSection.constFind(key);
+        if (found == pageForSection.constEnd()) {
+            continue;
+        }
+        const int page = found.value();
+        auto* item = new QListWidgetItem(nav);
+        // The visible label is the page's own heading, so the sidebar can never
+        // drift from what the page calls itself.
+        if (auto* scroll = qobject_cast<QScrollArea*>(pages->widget(page))) {
+            if (auto* headingLabel = scroll->widget() == nullptr
+                    ? nullptr : scroll->widget()->findChild<QLabel*>()) {
+                item->setText(headingLabel->text());
+            }
+        }
+        item->setData(Qt::UserRole, page);
+        item->setData(Qt::AccessibleTextRole, item->text());
+        navCombo->addItem(item->text(), page);
+    }
+    auto showPage = [nav, pages](const QListWidgetItem* item) {
+        if (item == nullptr) {
+            return;
+        }
+        const int page = item->data(Qt::UserRole).toInt();
+        if (page >= 0 && page < pages->count()) {
+            pages->setCurrentIndex(page);
+        }
+    };
+    connect(nav, &QListWidget::currentItemChanged, pages,
+        [showPage, navCombo](QListWidgetItem* current, QListWidgetItem*) {
+            showPage(current);
+            if (current == nullptr || navCombo->isHidden()) {
+                return;
+            }
+            const QSignalBlocker block(navCombo);
+            navCombo->setCurrentIndex(navCombo->findData(current->data(Qt::UserRole).toInt()));
+        });
+    connect(navCombo, qOverload<int>(&QComboBox::currentIndexChanged), pages,
+        [navCombo, nav, pages](const int index) {
+            if (index < 0) {
+                return;
+            }
+            const int page = navCombo->itemData(index).toInt();
+            pages->setCurrentIndex(page);
+            const QSignalBlocker block(nav);
+            for (int row = 0; row < nav->count(); ++row) {
+                if (nav->item(row)->data(Qt::UserRole).toInt() == page) {
+                    nav->setCurrentRow(row);
+                    break;
+                }
+            }
+        });
+    navigationList_ = nav;
+    navigationCombo_ = navCombo;
+    navigationPages_ = pages;
+    // Appearance first: the old strip opened on Updates, which put a
+    // rarely-used page in front of everything people actually change.
+    nav->setCurrentRow(0);
+    pages->setCurrentIndex(pageForSection.value(QStringLiteral("appearance"), 0));
     const bool unlocked = vault_ && vault_->is_unlocked();
     changePasswordButton_->setEnabled(unlocked); regenerateButton_->setEnabled(unlocked); addTagButton_->setEnabled(unlocked);
     reloadTags();
@@ -509,6 +636,29 @@ void SettingsDialog::setStatus(const QString& message, bool error) {
     status_->setText(message); status_->setVisible(!message.isEmpty());
     status_->setAccessibleName(error ? QStringLiteral("Settings error") : QStringLiteral("Settings status"));
 }
+void SettingsDialog::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (navigationList_ == nullptr || navigationCombo_ == nullptr
+        || navigationPages_ == nullptr) {
+        return;
+    }
+    // One navigation control at a time: the sidebar needs ~210px, which a narrow
+    // window does not have, and hiding it must not lose the current section.
+    const bool compact = width() < 620;
+    // Already in the matching mode: sidebar visible and wide, or hidden and narrow.
+    if (navigationList_->isHidden() == compact) {
+        return;
+    }
+    navigationList_->setVisible(!compact);
+    navigationCombo_->setVisible(compact);
+    if (compact) {
+        const auto* current = navigationList_->currentItem();
+        const QSignalBlocker block(navigationCombo_);
+        navigationCombo_->setCurrentIndex(current == nullptr ? 0
+            : navigationCombo_->findData(current->data(Qt::UserRole).toInt()));
+    }
+}
+
 void SettingsDialog::showEvent(QShowEvent* event) {
     // The page outlives sessions of use, and a template can be saved from the record editor
     // while it is hidden, so the list is rebuilt every time it comes back.
@@ -596,7 +746,7 @@ void SettingsDialog::removeTemplate(const qint64 templateId, const QString& name
 void SettingsDialog::reloadTags() {
     const QSignalBlocker block(tagList_);
     tagList_->clear(); renameTagButton_->setEnabled(false); removeTagButton_->setEnabled(false);
-    if (!vault_ || !vault_->is_unlocked()) return;
+    if (!vault_ || !vault_->is_unlocked()) { tagList_->setFixedHeight(52); return; }
     const auto tags = vault_->list_tags();
     if (!tags) { setStatus(QStringLiteral("Could not list tags."), true); return; }
     for (const auto& tag : tags.value()) {
@@ -606,6 +756,9 @@ void SettingsDialog::reloadTags() {
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setToolTip(QStringLiteral("%1 item(s). Double-click to rename.").arg(tag.video_count));
     }
+    // A tag list is as tall as its tags: two tags used to sit under ~150px of
+    // empty panel, which read as a broken table rather than a settings list.
+    tagList_->setFixedHeight(std::min(240, std::max(52, tagList_->count() * 48 + 4)));
 }
 void SettingsDialog::renameSelectedTag() {
     if (auto* item = tagList_->currentItem()) tagList_->editItem(item);

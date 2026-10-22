@@ -191,34 +191,37 @@ public:
 
     // Phase 3: import and gallery.
     // Imports an opaque file as an encrypted package and records it in the
-    // vault database. The same bytes are stored once: a second copy, even
-    // under another name, returns the existing id and adds nothing.
+    // vault database. Every import is an independent item; see
+    // `collapse_identical` below for the replaying-transport exception.
     // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
     // file processed, called from the importing thread.
-    // folder_id 0 stores the new video in the library root. An existing
-    // copy of the same file keeps the folder it already has.
-    // already_present, when given, is set true when the bytes were already
-    // in the vault and false when a new item was stored.
+    // folder_id 0 stores the new video in the library root. Importing bytes that
+    // are already in the vault stores another independent item: the user asked
+    // for a copy, so the vault does not silently resolve to the first one.
+    // `collapse_identical` exists for transports that replay a whole batch (a
+    // sync package resumed after a disconnect): those resolve identical content
+    // onto the existing item and set `already_present` instead of adding copies.
     [[nodiscard]] Result<std::int64_t> import_file(
         const std::filesystem::path& source_path,
         const std::function<void(double)>& progress = {},
         std::int64_t folder_id = 0,
-        bool* already_present = nullptr);
+        bool* already_present = nullptr,
+        bool collapse_identical = false);
 
     // Phase 8: text records. Imports content supplied in memory instead
     // of a file on disk, so the app can author an item that lives in the library
     // exactly like an imported file: the same package format, folders, tags,
     // search, sharing and password-change behavior. The caller decides the
     // content format; the core stores it as opaque bytes. Identical content
-    // returns the item already in the vault, exactly as import_file does.
-    // `already_present`, when given, is set to true in that case so a caller can
-    // tell the user instead of leaving them wondering where the new item went.
+    // becomes its own item, exactly as import_file does. `collapse_identical`
+    // has the same replay-only meaning as in import_file.
     // `display_name` follows the folder/file naming rule (1–120 characters).
     [[nodiscard]] Result<std::int64_t> import_bytes(
         std::span<const unsigned char> bytes,
         std::string_view display_name,
         std::int64_t folder_id = 0,
-        bool* already_present = nullptr);
+        bool* already_present = nullptr,
+        bool collapse_identical = false);
 
     // Replaces an existing item's content in place. A new package is sealed and
     // the row, its wrapped key and the content hash are updated in one

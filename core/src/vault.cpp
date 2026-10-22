@@ -863,15 +863,6 @@ Result<internal::Sha256Digest> hash_plaintext(internal::PackageReader& reader) {
     return accumulator.digest();
 }
 
-void note_existing(bool* already_present, const std::function<void(double)>& progress) {
-    if (already_present != nullptr) {
-        *already_present = true;
-    }
-    if (progress) {
-        progress(1.0);
-    }
-}
-
 // A package published at its content-addressed path, plus the metadata a
 // gallery row needs. The file key itself is returned through the caller's
 // buffer so the wrap step stays with the caller.
@@ -1013,6 +1004,7 @@ Result<std::int64_t> seal_and_commit(
     const std::int64_t folder_id,
     const std::function<void(double)>& progress,
     bool* already_present,
+    const bool collapse_identical,
     std::unique_lock<std::mutex>& guard,
     const std::function<bool()>& still_pinned) {
     internal::SensitiveBuffer file_key(32U);
@@ -1027,34 +1019,39 @@ Result<std::int64_t> seal_and_commit(
         std::filesystem::remove(sealed.value().published, ignored);
     };
 
-    // A fresh random file key makes the ciphertext unique, so this can only
-    // match a pre-existing package for the same bytes if a caller re-sealed
-    // identical content with a key that collided.
-    auto duplicate = database.query_video_by_sha256(sealed.value().package_sha256);
-    if (!duplicate) {
-        discard();
-        return duplicate.error();
+    // Identical content normally becomes its own item: the vault used to
+    // collapse it onto the first copy, which silently refused a deliberate
+    // second import (and pointed at a row in another folder). A batch transport
+    // that may be replayed opts back into collapsing here, after the encryption,
+    // so a resumed sync never stores the same record twice.
+    if (collapse_identical) {
+        auto duplicate = database.query_video_by_sha256(sealed.value().package_sha256);
+        if (!duplicate) {
+            discard();
+            return duplicate.error();
+        }
+        if (duplicate.value()) {
+            discard();
+            if (already_present != nullptr) {
+                *already_present = true;
+            }
+            return duplicate.value()->id;
+        }
+        // The mutex was released for the encryption, so another import may have
+        // committed the same bytes in the meantime.
+        auto again = database.query_video_id_by_content_sha256(content_hash);
+        if (!again) {
+            discard();
+            return again.error();
+        }
+        if (again.value()) {
+            discard();
+            if (already_present != nullptr) {
+                *already_present = true;
+            }
+            return again.value().value();
+        }
     }
-    if (duplicate.value()) {
-        discard();
-        note_existing(already_present, progress);
-        return duplicate.value()->id;
-    }
-
-    // The mutex was released for the encryption, so another import may have
-    // committed the same bytes in the meantime. Re-check the content hash and
-    // collapse onto that item instead of storing a second copy.
-    auto again = database.query_video_id_by_content_sha256(content_hash);
-    if (!again) {
-        discard();
-        return again.error();
-    }
-    if (again.value()) {
-        discard();
-        note_existing(already_present, progress);
-        return again.value().value();
-    }
-
     internal::VideoRow row;
     row.display_name = display_name;
     row.original_size = plaintext_size;
@@ -1091,7 +1088,8 @@ Result<std::int64_t> Vault::import_file(
     const std::filesystem::path& source_path,
     const std::function<void(double)>& progress,
     const std::int64_t folder_id,
-    bool* already_present) {
+    bool* already_present,
+    const bool collapse_identical) {
     std::unique_lock<std::mutex> guard(*mutex_);
     if (already_present != nullptr) {
         *already_present = false;
@@ -1140,35 +1138,23 @@ Result<std::int64_t> Vault::import_file(
     if (impl_.get() != pinned) {
         return locked_error();
     }
-    auto known = impl.database_.query_video_id_by_content_sha256(content_hash.value());
-    if (!known) {
-        return known.error();
-    }
-    if (known.value()) {
-        note_existing(already_present, progress);
-        return known.value().value();
-    }
-    // Items imported before content hashes existed are identified by size,
-    // then hashed from the stored package. Only same-size files are opened.
-    auto unhashed = impl.database_.list_videos_missing_content_hash(source_size);
-    if (!unhashed) {
-        return unhashed.error();
-    }
-    for (const auto existing_id : unhashed.value()) {
-        auto reader = open_package_reader(
-            root_, impl.database_, impl.master_key_, impl.session_, existing_id);
-        if (!reader) {
-            continue;
+    // The plaintext hash is still computed (integrity, records and export all
+    // use it). It only decides identity for a replaying transport, which asks to
+    // collapse identical content onto the item it already imported; a deliberate
+    // second import of the same bytes becomes its own library item.
+    if (collapse_identical) {
+        auto known = impl.database_.query_video_id_by_content_sha256(content_hash.value());
+        if (!known) {
+            return known.error();
         }
-        auto existing_hash = hash_plaintext(reader.value());
-        if (!existing_hash) {
-            continue;
-        }
-        const bool same = existing_hash.value() == content_hash.value();
-        (void)impl.database_.set_content_sha256(existing_id, existing_hash.value());
-        if (same) {
-            note_existing(already_present, progress);
-            return existing_id;
+        if (known.value()) {
+            if (already_present != nullptr) {
+                *already_present = true;
+            }
+            if (progress) {
+                progress(1.0);
+            }
+            return known.value().value();
         }
     }
 
@@ -1190,7 +1176,7 @@ Result<std::int64_t> Vault::import_file(
     auto inserted = seal_and_commit(root_, impl.database_, impl.master_key_, source,
         source_size, content_hash.value(), display_name,
         folder_id > 0 ? folder_id : 0, package_progress, already_present,
-        guard, still_pinned);
+        collapse_identical, guard, still_pinned);
     if (!inserted) {
         return inserted.error();
     }
@@ -1206,7 +1192,8 @@ Result<std::int64_t> Vault::import_bytes(
     const std::span<const unsigned char> bytes,
     const std::string_view display_name,
     const std::int64_t folder_id,
-    bool* already_present) {
+    bool* already_present,
+    const bool collapse_identical) {
     std::unique_lock<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
@@ -1229,15 +1216,17 @@ Result<std::int64_t> Vault::import_bytes(
     }
 
     const auto content_hash = internal::sha256(bytes);
-    auto known = impl.database_.query_video_id_by_content_sha256(content_hash);
-    if (!known) {
-        return known.error();
-    }
-    if (known.value()) {
-        if (already_present != nullptr) {
-            *already_present = true;
+    if (collapse_identical) {
+        auto known = impl.database_.query_video_id_by_content_sha256(content_hash);
+        if (!known) {
+            return known.error();
         }
-        return known.value().value();
+        if (known.value()) {
+            if (already_present != nullptr) {
+                *already_present = true;
+            }
+            return known.value().value();
+        }
     }
 
     // The package writer streams, so in-memory content is wrapped in a string
@@ -1247,7 +1236,8 @@ Result<std::int64_t> Vault::import_bytes(
     const auto still_pinned = [this, pinned] { return impl_.get() == pinned; };
     return seal_and_commit(root_, impl.database_, impl.master_key_, source,
         static_cast<std::uint64_t>(bytes.size()), content_hash, name,
-        folder_id > 0 ? folder_id : 0, {}, nullptr, guard, still_pinned);
+        folder_id > 0 ? folder_id : 0, {}, already_present, collapse_identical,
+        guard, still_pinned);
 }
 
 Result<bool> Vault::replace_video_content(

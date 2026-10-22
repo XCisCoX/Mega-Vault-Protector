@@ -312,6 +312,9 @@ if(MVP_BUILD_TESTS)
     add_test(NAME share_unlock COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(share_unlock PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_SHARE_UNLOCK_TEST=1" TIMEOUT 60)
+    add_test(NAME auth_layout COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(auth_layout PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_AUTH_LAYOUT_TEST=1" TIMEOUT 60)
     add_test(NAME library_chrome COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(library_chrome PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_LIBRARY_CHROME_TEST=1" TIMEOUT 90)
