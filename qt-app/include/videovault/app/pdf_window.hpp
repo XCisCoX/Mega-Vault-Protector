@@ -10,6 +10,7 @@
 class QEvent;
 class QKeyEvent;
 class QObject;
+class QResizeEvent;
 class QShowEvent;
 
 namespace videovault::core {
@@ -21,6 +22,9 @@ namespace videovault::app {
 // Renders the first page of a PDF for the library. A protected or unreadable
 // file returns a null image; the library then keeps the plain document tile.
 QImage renderPdfFirstPage(const std::vector<unsigned char>& bytes, int maxEdge);
+
+// How the page width is derived from the viewport.
+enum class PdfFit { Width, Page, Custom };
 
 // Reads a PDF from the vault and shows it: continuous pages, zoom, fit, and a
 // page strip. The plaintext stays in memory for as long as the document is open.
@@ -51,6 +55,7 @@ signals:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void changeEvent(QEvent* event) override;
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
@@ -67,6 +72,12 @@ private:
     void applyRender();
     void applyDetachedFrame();
     void updatePopButton();
+    void setFitMode(PdfFit mode);
+    void setControlsEnabled(bool enabled);
+    void goToPage(int index);
+    void restyle();
+    [[nodiscard]] std::pair<int, double> scrollAnchor() const;
+    void restoreScrollAnchor(int page, double fraction);
     [[nodiscard]] int pageWidth() const;
 
     bool detached_{false};

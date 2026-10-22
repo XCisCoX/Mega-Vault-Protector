@@ -1,18 +1,21 @@
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/icons.hpp"
 #include "videovault/app/pdf_window.hpp"
+#include "videovault/app/theme.hpp"
 
 #include "videovault/core/vault.hpp"
 
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QColor>
 #include <QCursor>
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QIntValidator>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -24,6 +27,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QShowEvent>
 #include <QSizePolicy>
 #include <QStackedWidget>
@@ -34,6 +38,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -57,6 +62,38 @@
 namespace videovault::app {
 namespace {
 
+// Every surface in the viewer is derived from the live palette. The reader used
+// to be a fixed dark surface (#000000 backdrop, white labels, light-only icons),
+// which is what made it look wrong in the light theme while the library around
+// it was pale.
+QColor pdfBackdrop() {
+    return isDarkTheme() ? QColor(12, 12, 14) : QColor(236, 236, 240);
+}
+QColor pdfChrome() {
+    return isDarkTheme() ? QColor(20, 20, 22) : QColor(250, 250, 252);
+}
+QColor pdfInk() {
+    return QApplication::palette().color(QPalette::WindowText);
+}
+QColor pdfSecondary() {
+    return QApplication::palette().color(QPalette::PlaceholderText);
+}
+QColor pdfHairline() {
+    QColor color = QApplication::palette().color(QPalette::Midlight);
+    color.setAlpha(isDarkTheme() ? 90 : 170);
+    return color;
+}
+QColor pdfPageBorder() {
+    return isDarkTheme() ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 34);
+}
+QColor pdfPageShadow() {
+    QColor color(0, 0, 0);
+    color.setAlpha(isDarkTheme() ? 120 : 34);
+    return color;
+}
+// Space around each page that carries the drop shadow.
+constexpr int kPageMargin = 8;
+
 enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
 
 class CaptionButton final : public QAbstractButton {
@@ -78,11 +115,14 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
         if (underMouse()) {
-            painter.fillRect(rect(), glyph_ == CaptionGlyph::Close
-                ? QColor(232, 17, 35)
-                : QColor(255, 255, 255, 28));
+            QColor hover = isDarkTheme() ? QColor(255, 255, 255, 28) : QColor(0, 0, 0, 20);
+            if (glyph_ == CaptionGlyph::Close) {
+                hover = QColor(232, 17, 35);
+            }
+            painter.fillRect(rect(), hover);
         }
-        painter.setPen(QPen(Qt::white, 1.2));
+        painter.setPen(QPen(glyph_ == CaptionGlyph::Close && underMouse()
+            ? QColor(Qt::white) : pdfInk(), 1.2));
         const QPointF center = rect().center();
         switch (glyph_) {
         case CaptionGlyph::Minimize:
@@ -115,15 +155,63 @@ public:
 
     QImage image;
     int renderedWidth{0};
+    int rotation{0};
+    bool failed{false};
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        painter.fillRect(rect(), Qt::white);
-        if (!image.isNull()) {
-            painter.drawImage(rect(), image);
+        const QRectF page = QRectF(rect()).adjusted(kPageMargin, kPageMargin,
+            -kPageMargin, -kPageMargin);
+        // A soft shadow under each sheet separates the page from the backdrop the
+        // way every other reader does; the old flat white rectangle on black gave
+        // no edge at all in the dark theme and none in the light one either.
+        for (int step = 4; step >= 1; --step) {
+            QColor shade = pdfPageShadow();
+            shade.setAlpha(std::max(6, shade.alpha() / (step + 1)));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(shade);
+            painter.drawRoundedRect(page.adjusted(-step, -step + 2, step, step + 2), 6, 6);
         }
+        QPainterPath clip;
+        clip.addRoundedRect(page, 3, 3);
+        painter.setClipPath(clip);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::white);
+        painter.drawRect(page);
+        if (!image.isNull()) {
+            if (rotation % 180 == 0) {
+                painter.drawImage(page, image);
+            } else {
+                // The frame already carries the rotated aspect; draw the bitmap
+                // turned so its long edge follows the frame's long edge.
+                painter.save();
+                painter.translate(page.center());
+                painter.rotate(rotation);
+                const qreal turnedW = page.height();
+                const qreal turnedH = page.width();
+                painter.drawImage(QRectF(-turnedW / 2.0, -turnedH / 2.0, turnedW, turnedH), image);
+                painter.restore();
+            }
+        } else if (failed) {
+            painter.setPen(pdfSecondary());
+            QFont font = painter.font();
+            font.setPixelSize(13);
+            painter.setFont(font);
+            painter.drawText(page, Qt::AlignCenter, QStringLiteral("This page could not be rendered."));
+        } else {
+            painter.setPen(pdfSecondary());
+            QFont font = painter.font();
+            font.setPixelSize(13);
+            painter.setFont(font);
+            painter.drawText(page, Qt::AlignCenter, QStringLiteral("Rendering…"));
+        }
+        painter.setClipping(false);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(pdfPageBorder(), 1));
+        painter.drawRoundedRect(page.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
     }
 };
 
@@ -309,11 +397,30 @@ struct PdfWindow::Impl {
     CaptionButton* captionMax{nullptr};
     QPushButton* pop{nullptr};
     QLabel* title{nullptr};
-    QLabel* pageLabel{nullptr};
+    QLabel* pageLabel{nullptr};      // header: "12 pages"
     QLabel* zoomLabel{nullptr};
     QLabel* message{nullptr};
+    QWidget* header{nullptr};
+    QWidget* footer{nullptr};
+    QLineEdit* pageField{nullptr};   // footer: current page, editable
+    QLabel* pageTotal{nullptr};      // footer: "/ 12"
     QPushButton* previous{nullptr};
     QPushButton* next{nullptr};
+    QPushButton* fitWidth{nullptr};
+    QPushButton* fitPage{nullptr};
+    QPushButton* zoomOut{nullptr};
+    QPushButton* zoomIn{nullptr};
+    QPushButton* rotate{nullptr};
+    PdfFit fit{PdfFit::Width};
+    int rotation{0};
+    QString titleText;
+    // restyle() writes stylesheets, which can emit another PaletteChange; without
+    // these two the reader recursed into itself until the stack died.
+    bool restyling{false};
+    QPalette appliedPalette;
+    // Icon-only buttons carry their glyph name so a palette change can re-tint
+    // them; icons::lucideSolid bakes the colour into the pixmap.
+    std::vector<std::pair<QPushButton*, QString>> iconButtons;
     QStackedWidget* stack{nullptr};
     QScrollArea* scroll{nullptr};
     QWidget* host{nullptr};
@@ -337,25 +444,23 @@ struct PdfWindow::Impl {
 PdfWindow::PdfWindow(QWidget* parent)
     : QWidget(parent), impl_(std::make_unique<Impl>()) {
     setFocusPolicy(Qt::StrongFocus);
-    setStyleSheet(QStringLiteral("PdfWindow { background: #000000; }"));
+    setObjectName(QStringLiteral("pdfWindow"));
+    setAttribute(Qt::WA_StyledBackground, true);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    // Frameless caption, shown only while the reader is a separate window.
     impl_->caption = new QWidget(this);
     impl_->caption->setFixedHeight(32);
     impl_->caption->setObjectName(QStringLiteral("pdfCaption"));
     impl_->caption->setAttribute(Qt::WA_StyledBackground, true);
-    impl_->caption->setStyleSheet(QStringLiteral(
-        "QWidget#pdfCaption { background: #000000; border: none; }"));
     auto* captionLayout = new QHBoxLayout(impl_->caption);
     captionLayout->setContentsMargins(14, 0, 0, 0);
     captionLayout->setSpacing(0);
     impl_->captionTitle = new QLabel(QStringLiteral("PDF"), impl_->caption);
     impl_->captionTitle->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    impl_->captionTitle->setStyleSheet(QStringLiteral(
-        "color: rgba(255, 255, 255, 210); background: transparent;"));
     captionLayout->addWidget(impl_->captionTitle, 1);
     auto* minimize = new CaptionButton(CaptionGlyph::Minimize, impl_->caption);
     impl_->captionMax = new CaptionButton(CaptionGlyph::Maximize, impl_->caption);
@@ -375,18 +480,22 @@ PdfWindow::PdfWindow(QWidget* parent)
     impl_->caption->hide();
     root->addWidget(impl_->caption);
 
-    auto* header = new QWidget(this);
-    auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(12, 8, 12, 8);
-    headerLayout->setSpacing(8);
-    auto* back = new QPushButton(QStringLiteral("Back"), header);
+    // Header: back, document name, page count, pop out/dock.
+    impl_->header = new QWidget(this);
+    impl_->header->setObjectName(QStringLiteral("pdfHeader"));
+    impl_->header->setAttribute(Qt::WA_StyledBackground, true);
+    auto* headerLayout = new QHBoxLayout(impl_->header);
+    headerLayout->setContentsMargins(10, 7, 10, 7);
+    headerLayout->setSpacing(10);
+    auto* back = new QPushButton(QStringLiteral("Back"), impl_->header);
     back->setProperty("quiet", true);
     back->setCursor(Qt::PointingHandCursor);
-    impl_->title = new QLabel(header);
-    impl_->title->setStyleSheet(QStringLiteral("color: white; font-size: 15px; background: transparent;"));
-    impl_->pageLabel = new QLabel(header);
-    impl_->pageLabel->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
-    impl_->pop = new QPushButton(QStringLiteral("Pop out"), header);
+    back->setFocusPolicy(Qt::NoFocus);
+    impl_->title = new QLabel(impl_->header);
+    impl_->title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    impl_->title->setMinimumWidth(0);
+    impl_->pageLabel = new QLabel(impl_->header);
+    impl_->pop = new QPushButton(QStringLiteral("Pop out"), impl_->header);
     impl_->pop->setProperty("quiet", true);
     impl_->pop->setCursor(Qt::PointingHandCursor);
     impl_->pop->setFocusPolicy(Qt::NoFocus);
@@ -395,7 +504,7 @@ PdfWindow::PdfWindow(QWidget* parent)
     headerLayout->addWidget(impl_->title, 1);
     headerLayout->addWidget(impl_->pageLabel);
     headerLayout->addWidget(impl_->pop);
-    root->addWidget(header);
+    root->addWidget(impl_->header);
 
     impl_->stack = new QStackedWidget(this);
     auto* messagePage = new QWidget(impl_->stack);
@@ -403,21 +512,21 @@ PdfWindow::PdfWindow(QWidget* parent)
     impl_->message = new QLabel(messagePage);
     impl_->message->setAlignment(Qt::AlignCenter);
     impl_->message->setWordWrap(true);
-    impl_->message->setStyleSheet(QStringLiteral("color: #aeaeb2; font-size: 15px; background: transparent;"));
+    impl_->message->setText(QStringLiteral(
+        "No document is open.\nPick a PDF from the library to read it here."));
     messageLayout->addWidget(impl_->message);
     impl_->stack->addWidget(messagePage);
 
     impl_->scroll = new QScrollArea(impl_->stack);
+    impl_->scroll->setObjectName(QStringLiteral("pdfScroll"));
     impl_->scroll->setFrameShape(QFrame::NoFrame);
     impl_->scroll->setWidgetResizable(true);
-    impl_->scroll->setStyleSheet(QStringLiteral(
-        "QScrollArea { background: #000000; border: none; }"
-        "QScrollArea > QWidget > QWidget { background: #000000; }"));
     impl_->host = new QWidget(impl_->scroll);
-    impl_->host->setStyleSheet(QStringLiteral("background: #000000;"));
+    impl_->host->setObjectName(QStringLiteral("pdfHost"));
+    impl_->host->setAttribute(Qt::WA_StyledBackground, true);
     impl_->pagesLayout = new QVBoxLayout(impl_->host);
-    impl_->pagesLayout->setContentsMargins(24, 16, 24, 24);
-    impl_->pagesLayout->setSpacing(16);
+    impl_->pagesLayout->setContentsMargins(24, 20, 24, 28);
+    impl_->pagesLayout->setSpacing(20);
     impl_->pagesLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     impl_->host->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
     impl_->scroll->setWidget(impl_->host);
@@ -428,33 +537,61 @@ PdfWindow::PdfWindow(QWidget* parent)
     impl_->stack->addWidget(impl_->scroll);
     root->addWidget(impl_->stack, 1);
 
-    auto* footer = new QWidget(this);
-    auto* footerLayout = new QHBoxLayout(footer);
-    footerLayout->setContentsMargins(12, 8, 12, 10);
-    footerLayout->setSpacing(8);
-    auto* zoomOut = new QPushButton(QStringLiteral("−"), footer);
-    impl_->zoomLabel = new QLabel(QStringLiteral("Fit"), footer);
+    // Footer: page navigation, zoom and fit modes on one line, hint on the right.
+    impl_->footer = new QWidget(this);
+    impl_->footer->setObjectName(QStringLiteral("pdfFooter"));
+    impl_->footer->setAttribute(Qt::WA_StyledBackground, true);
+    auto* footerLayout = new QHBoxLayout(impl_->footer);
+    footerLayout->setContentsMargins(10, 6, 12, 8);
+    footerLayout->setSpacing(6);
+    impl_->previous = new QPushButton(impl_->footer);
+    impl_->next = new QPushButton(impl_->footer);
+    impl_->pageField = new QLineEdit(impl_->footer);
+    impl_->pageField->setObjectName(QStringLiteral("pdfPageField"));
+    impl_->pageField->setAlignment(Qt::AlignCenter);
+    impl_->pageField->setFixedWidth(46);
+    impl_->pageField->setMaxLength(5);
+    impl_->pageField->setValidator(new QIntValidator(1, 99999, impl_->pageField));
+    impl_->pageField->setToolTip(QStringLiteral("Type a page number and press Enter"));
+    impl_->pageField->setAccessibleName(QStringLiteral("Current page"));
+    impl_->pageTotal = new QLabel(impl_->footer);
+    auto* zoomOut = new QPushButton(impl_->footer);
+    impl_->zoomOut = zoomOut;
+    impl_->zoomLabel = new QLabel(QStringLiteral("Fit width"), impl_->footer);
     impl_->zoomLabel->setAlignment(Qt::AlignCenter);
-    impl_->zoomLabel->setMinimumWidth(52);
-    impl_->zoomLabel->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
-    auto* zoomIn = new QPushButton(QStringLiteral("+"), footer);
-    auto* fit = new QPushButton(QStringLiteral("Fit width"), footer);
-    impl_->previous = new QPushButton(QStringLiteral("Previous"), footer);
-    impl_->next = new QPushButton(QStringLiteral("Next"), footer);
-    for (auto* button : {zoomOut, zoomIn, fit, impl_->previous, impl_->next}) {
+    impl_->zoomLabel->setMinimumWidth(64);
+    auto* zoomIn = new QPushButton(impl_->footer);
+    impl_->zoomIn = zoomIn;
+    auto* fit = new QPushButton(impl_->footer);
+    impl_->fitWidth = fit;
+    impl_->fitPage = new QPushButton(impl_->footer);
+    auto* rotate = new QPushButton(impl_->footer);
+    impl_->rotate = rotate;
+    auto* hint = new QLabel(QStringLiteral("Ctrl + wheel zooms · drag to pan"), impl_->footer);
+    hint->setObjectName(QStringLiteral("pdfHint"));
+    hint->setVisible(false);
+    for (auto* button : {zoomOut, zoomIn, fit, impl_->fitPage, impl_->previous,
+             impl_->next, rotate}) {
         button->setCursor(Qt::PointingHandCursor);
         button->setFocusPolicy(Qt::NoFocus);
     }
     zoomOut->setToolTip(QStringLiteral("Zoom out"));
     zoomIn->setToolTip(QStringLiteral("Zoom in"));
-    fit->setToolTip(QStringLiteral("Fit width. Ctrl and the mouse wheel also zoom."));
-    zoomOut->setProperty("quiet", true);
-    zoomIn->setProperty("quiet", true);
-    fit->setProperty("quiet", true);
-    impl_->previous->setProperty("quiet", true);
-    impl_->next->setProperty("quiet", true);
+    fit->setToolTip(QStringLiteral("Fit the page width to the window"));
+    impl_->fitPage->setToolTip(QStringLiteral("Fit the whole page in the window"));
+    rotate->setToolTip(QStringLiteral("Rotate the page 90 degrees"));
+    impl_->previous->setToolTip(QStringLiteral("Previous page"));
+    impl_->next->setToolTip(QStringLiteral("Next page"));
+    impl_->previous->setAccessibleName(QStringLiteral("Previous page"));
+    impl_->next->setAccessibleName(QStringLiteral("Next page"));
+    for (auto* button : {zoomOut, zoomIn, fit, impl_->fitPage, impl_->previous,
+             impl_->next, rotate}) {
+        button->setProperty("quiet", true);
+    }
+    fit->setCheckable(true);
+    impl_->fitPage->setCheckable(true);
+    fit->setChecked(true);
 
-    // The viewer is a dark surface, so these glyphs are light in both themes.
     struct ViewerControl {
         QPushButton* button;
         const char* icon;
@@ -464,32 +601,52 @@ PdfWindow::PdfWindow(QWidget* parent)
     for (const auto& control : {
              ViewerControl{back, "arrow-left", "Back to the library", false},
              ViewerControl{impl_->pop, "external-link", "Open in a window you can move and resize", false},
+             ViewerControl{impl_->previous, "chevron-left", "Previous page", true},
+             ViewerControl{impl_->next, "chevron-right", "Next page", true},
              ViewerControl{zoomOut, "minus", "Zoom out", true},
              ViewerControl{zoomIn, "plus", "Zoom in", true},
-             ViewerControl{fit, "scan", "Fit width. Ctrl and the mouse wheel also zoom.", true},
-             ViewerControl{impl_->previous, "chevron-left", "Previous page", true},
-             ViewerControl{impl_->next, "chevron-right", "Next page", true}}) {
+             ViewerControl{fit, "scan", "Fit the page width to the window", true},
+             ViewerControl{impl_->fitPage, "maximize", "Fit the whole page in the window", true},
+             ViewerControl{rotate, "rotate-ccw", "Rotate the page 90 degrees", true}}) {
         auto* button = control.button;
         button->setToolTip(QString::fromLatin1(control.tooltip));
         button->setAccessibleName(QString::fromLatin1(control.tooltip));
         button->setIconSize(QSize(16, 16));
-        button->setIcon(icons::lucideSolid(QString::fromLatin1(control.icon),
-            QColor(0xd1, 0xd1, 0xd6)));
+        button->setIcon(icons::lucideSolid(QString::fromLatin1(control.icon), pdfSecondary()));
+        impl_->iconButtons.push_back({button, QString::fromLatin1(control.icon)});
         if (control.glyphOnly) {
             button->setText(QString());
             button->setStyleSheet(QStringLiteral(
-                "QPushButton { padding: 0px; min-width: 32px; min-height: 28px; }"));
+                "QPushButton { padding: 0px; min-width: 30px; min-height: 28px; }"));
         }
     }
+
+    auto* divider = new QWidget(impl_->footer);
+    divider->setObjectName(QStringLiteral("pdfDivider"));
+    divider->setFixedWidth(1);
+    divider->setFixedHeight(18);
+
+    footerLayout->addWidget(impl_->previous);
+    footerLayout->addWidget(impl_->pageField);
+    footerLayout->addWidget(impl_->pageTotal);
+    footerLayout->addWidget(impl_->next);
+    footerLayout->addSpacing(4);
+    footerLayout->addWidget(divider);
+    footerLayout->addSpacing(4);
     footerLayout->addWidget(zoomOut);
     footerLayout->addWidget(impl_->zoomLabel);
     footerLayout->addWidget(zoomIn);
     footerLayout->addWidget(fit);
+    footerLayout->addWidget(impl_->fitPage);
+    footerLayout->addWidget(rotate);
     footerLayout->addStretch(1);
-    footerLayout->addWidget(impl_->previous);
-    footerLayout->addWidget(impl_->next);
-    root->addWidget(footer);
+    footerLayout->addWidget(hint);
+    root->addWidget(impl_->footer);
+    restyle();
 
+    // Nothing to navigate or zoom until a document opens: the transport and the
+    // page field start disabled instead of looking broken.
+    setControlsEnabled(false);
     impl_->loadWatcher = new QFutureWatcher<LoadResult>(this);
     impl_->renderWatcher = new QFutureWatcher<RenderResult>(this);
     connect(impl_->loadWatcher, &QFutureWatcherBase::finished, this, [this] { applyLoad(); });
@@ -510,7 +667,23 @@ PdfWindow::PdfWindow(QWidget* parent)
     connect(impl_->next, &QPushButton::clicked, this, &PdfWindow::nextRequested);
     connect(zoomOut, &QPushButton::clicked, this, [this] { zoomBy(0.8); });
     connect(zoomIn, &QPushButton::clicked, this, [this] { zoomBy(1.25); });
-    connect(fit, &QPushButton::clicked, this, [this] { setZoom(1.0); });
+    connect(fit, &QPushButton::clicked, this, [this] { setFitMode(PdfFit::Width); });
+    connect(impl_->fitPage, &QPushButton::clicked, this, [this] { setFitMode(PdfFit::Page); });
+    connect(rotate, &QPushButton::clicked, this, [this] {
+        const auto anchor = scrollAnchor();
+        impl_->rotation = (impl_->rotation + 90) % 360;
+        for (auto* page : impl_->pages) {
+            page->rotation = impl_->rotation;
+            page->update();
+        }
+        relayout();
+        restoreScrollAnchor(anchor.first, anchor.second);
+        pump();
+    });
+    connect(impl_->pageField, &QLineEdit::returnPressed, this, [this] {
+        goToPage(impl_->pageField->text().toInt() - 1);
+        setFocus();
+    });
     setNeighbors(false, false);
 }
 
@@ -526,12 +699,25 @@ void PdfWindow::openDocument(
     const QString& title) {
     id_ = id;
     const QString shown = title.isEmpty() ? QStringLiteral("PDF") : title;
-    impl_->title->setText(shown);
+    impl_->titleText = shown;
+    impl_->title->setText(impl_->title->fontMetrics().elidedText(
+        shown, Qt::ElideMiddle, std::max(0, impl_->title->width() - 4)));
+    impl_->title->setToolTip(shown);
     impl_->captionTitle->setText(shown);
     setWindowTitle(shown);
     impl_->pageLabel->clear();
+    impl_->pageTotal->clear();
+    impl_->pageField->clear();
+    impl_->rotation = 0;
+    impl_->fit = PdfFit::Width;
     impl_->zoom = 1.0;
-    impl_->zoomLabel->setText(QStringLiteral("Fit"));
+    if (impl_->fitWidth != nullptr && impl_->fitPage != nullptr) {
+        const QSignalBlocker blockWidth(impl_->fitWidth);
+        const QSignalBlocker blockPage(impl_->fitPage);
+        impl_->fitWidth->setChecked(true);
+        impl_->fitPage->setChecked(false);
+    }
+    impl_->zoomLabel->setText(QStringLiteral("Fit width"));
     impl_->devicePixelRatio = devicePixelRatioF();
     ++impl_->generation;
     impl_->rendering = false;
@@ -547,6 +733,7 @@ void PdfWindow::openDocument(
     impl_->sizes.clear();
     impl_->message->setText(QStringLiteral("Opening…"));
     impl_->stack->setCurrentIndex(0);
+    setControlsEnabled(false);
     if (vault == nullptr) {
         impl_->message->setText(QStringLiteral("The vault is locked."));
         return;
@@ -608,6 +795,26 @@ void PdfWindow::openDocument(
     }));
 }
 
+void PdfWindow::setControlsEnabled(const bool enabled) {
+    for (auto* button : {impl_->previous, impl_->next, impl_->zoomOut, impl_->zoomIn,
+             impl_->fitWidth, impl_->fitPage, impl_->rotate}) {
+        if (button != nullptr) {
+            button->setEnabled(enabled);
+        }
+    }
+    // The page group only means something with a document: hide it rather than
+    // leave an empty field and a stray zoom label on an idle reader.
+    if (impl_->pageField != nullptr) {
+        impl_->pageField->setVisible(enabled);
+    }
+    if (impl_->pageTotal != nullptr) {
+        impl_->pageTotal->setVisible(enabled);
+    }
+    if (impl_->zoomLabel != nullptr) {
+        impl_->zoomLabel->setVisible(enabled);
+    }
+}
+
 void PdfWindow::setNeighbors(const bool previous, const bool next) {
     impl_->previous->setEnabled(previous);
     impl_->next->setEnabled(next);
@@ -646,6 +853,10 @@ void PdfWindow::applyLoad() {
         impl_->pages.push_back(page);
     }
     impl_->stack->setCurrentWidget(impl_->scroll);
+    setControlsEnabled(true);
+    for (auto* page : impl_->pages) {
+        page->rotation = impl_->rotation;
+    }
     relayout();
     updatePageLabel();
     QTimer::singleShot(0, this, [this] { pump(); });
@@ -701,17 +912,21 @@ void PdfWindow::askPassword(const bool rejected) {
 }
 
 void PdfWindow::relayout() {
-    const int width = pageWidth();
-    if (width < 80 || impl_->pages.size() != impl_->sizes.size()) {
+    if (impl_ == nullptr || impl_->scroll == nullptr || impl_->pagesLayout == nullptr
+        || impl_->pages.size() != impl_->sizes.size()) {
         return;
     }
+    const int width = pageWidth();
     for (std::size_t i = 0U; i < impl_->pages.size(); ++i) {
         const auto& size = impl_->sizes[i];
         const double aspect = size.height() > 1.0 ? size.width() / size.height() : 0.77;
-        const int height = std::max(40, static_cast<int>(static_cast<double>(width) / aspect));
-        impl_->pages[i]->setFixedSize(width, height);
+        const bool sideways = impl_->rotation == 90 || impl_->rotation == 270;
+        const double shown = sideways ? 1.0 / aspect : aspect;
+        const int height = std::max(40, static_cast<int>(static_cast<double>(width) / shown));
+        impl_->pages[i]->rotation = impl_->rotation;
+        impl_->pages[i]->setFixedSize(width + 2 * kPageMargin, height + 2 * kPageMargin);
     }
-    impl_->host->setMinimumWidth(width + 48);
+    impl_->host->setMinimumWidth(width + 2 * kPageMargin + 48);
     int contentHeight = impl_->pagesLayout->contentsMargins().top()
         + impl_->pagesLayout->contentsMargins().bottom();
     if (!impl_->pages.empty()) {
@@ -721,32 +936,139 @@ void PdfWindow::relayout() {
         contentHeight += page->height();
     }
     impl_->host->setMinimumHeight(contentHeight);
-    impl_->zoomLabel->setText(std::abs(impl_->zoom - 1.0) < 0.02
-        ? QStringLiteral("Fit")
-        : QStringLiteral("%1%").arg(static_cast<int>(impl_->zoom * 100.0)));
+    // Page positions are read by the anchor helpers, so settle the layout now.
+    impl_->pagesLayout->activate();
+
+    if (impl_->fit == PdfFit::Custom) {
+        double points = 595.0;
+        if (!impl_->sizes.empty()) {
+            const auto index = std::min<std::size_t>(
+                static_cast<std::size_t>(scrollAnchor().first), impl_->sizes.size() - 1U);
+            const auto& size = impl_->sizes[index];
+            points = (impl_->rotation == 90 || impl_->rotation == 270)
+                ? std::max(1.0, size.height()) : std::max(1.0, size.width());
+        }
+        impl_->zoomLabel->setText(QStringLiteral("%1%").arg(qRound(100.0 * width / points)));
+    } else {
+        impl_->zoomLabel->setText(impl_->fit == PdfFit::Page
+            ? QStringLiteral("Fit page") : QStringLiteral("Fit width"));
+    }
 }
 
 int PdfWindow::pageWidth() const {
-    const int viewport = impl_->scroll->viewport()->width();
-    const int fitted = std::max(120, viewport - 48);
-    return std::clamp(static_cast<int>(static_cast<double>(fitted) * impl_->zoom), 120, 2400);
+    if (impl_ == nullptr || impl_->scroll == nullptr) {
+        return 120;
+    }
+    const int viewportW = impl_->scroll->viewport()->width();
+    const int viewportH = impl_->scroll->viewport()->height();
+    const int usableW = std::max(120, viewportW - 48 - 2 * kPageMargin);
+    if (impl_->fit == PdfFit::Page && !impl_->sizes.empty()) {
+        const auto index = std::min<std::size_t>(
+            static_cast<std::size_t>(scrollAnchor().first), impl_->sizes.size() - 1U);
+        const auto& size = impl_->sizes[index];
+        double aspect = size.height() > 1.0 ? size.width() / size.height() : 0.77;
+        if (impl_->rotation == 90 || impl_->rotation == 270) {
+            aspect = 1.0 / aspect;
+        }
+        // The tallest width that still leaves the whole page on screen.
+        const int usableH = std::max(120, viewportH - 40 - 2 * kPageMargin);
+        return std::clamp(std::min(usableW, static_cast<int>(usableH * aspect)), 120, 2400);
+    }
+    return std::clamp(static_cast<int>(static_cast<double>(usableW) * impl_->zoom), 120, 2400);
+}
+
+std::pair<int, double> PdfWindow::scrollAnchor() const {
+    if (impl_ == nullptr || impl_->scroll == nullptr || impl_->pages.empty()) {
+        return {0, 0.0};
+    }
+    const int top = impl_->scroll->verticalScrollBar()->value();
+    int page = 0;
+    for (int i = 0; i < static_cast<int>(impl_->pages.size()); ++i) {
+        if (impl_->pages[static_cast<std::size_t>(i)]->y() <= top) {
+            page = i;
+        } else {
+            break;
+        }
+    }
+    auto* current = impl_->pages[static_cast<std::size_t>(page)];
+    const double fraction = current->height() > 0
+        ? std::clamp(static_cast<double>(top - current->y()) / current->height(), 0.0, 1.0)
+        : 0.0;
+    return {page, fraction};
+}
+
+void PdfWindow::restoreScrollAnchor(const int page, const double fraction) {
+    if (impl_->pages.empty()) {
+        return;
+    }
+    const int index = std::clamp(page, 0, static_cast<int>(impl_->pages.size()) - 1);
+    auto* target = impl_->pages[static_cast<std::size_t>(index)];
+    impl_->scroll->verticalScrollBar()->setValue(
+        target->y() + static_cast<int>(fraction * target->height()));
+    updatePageLabel();
 }
 
 void PdfWindow::zoomBy(const double factor) {
-    setZoom(std::clamp(impl_->zoom * factor, 0.5, 4.0));
+    // Zoom is expressed against the fit-width base, whichever mode is active, so
+    // zooming out of Fit page continues from the size actually on screen.
+    const int viewportW = impl_->scroll->viewport()->width();
+    const int usableW = std::max(1, viewportW - 48 - 2 * kPageMargin);
+    const double current = static_cast<double>(pageWidth()) / usableW;
+    setZoom(std::clamp(current * factor, 0.5, 4.0));
 }
 
 void PdfWindow::setZoom(const double zoom) {
+    const auto anchor = scrollAnchor();
     impl_->zoom = zoom;
+    impl_->fit = PdfFit::Custom;
+    if (impl_->fitWidth != nullptr && impl_->fitPage != nullptr) {
+        const QSignalBlocker blockWidth(impl_->fitWidth);
+        const QSignalBlocker blockPage(impl_->fitPage);
+        impl_->fitWidth->setChecked(false);
+        impl_->fitPage->setChecked(false);
+    }
     for (auto* page : impl_->pages) {
         page->renderedWidth = 0;
     }
     relayout();
+    restoreScrollAnchor(anchor.first, anchor.second);
+    pump();
+}
+
+void PdfWindow::setFitMode(const PdfFit mode) {
+    const auto anchor = scrollAnchor();
+    impl_->fit = mode;
+    impl_->zoom = 1.0;
+    if (impl_->fitWidth != nullptr && impl_->fitPage != nullptr) {
+        const QSignalBlocker blockWidth(impl_->fitWidth);
+        const QSignalBlocker blockPage(impl_->fitPage);
+        impl_->fitWidth->setChecked(mode == PdfFit::Width);
+        impl_->fitPage->setChecked(mode == PdfFit::Page);
+    }
+    for (auto* page : impl_->pages) {
+        page->renderedWidth = 0;
+    }
+    relayout();
+    restoreScrollAnchor(anchor.first, anchor.second);
+    pump();
+}
+
+void PdfWindow::goToPage(int index) {
+    if (impl_->pages.empty()) {
+        return;
+    }
+    index = std::clamp(index, 0, static_cast<int>(impl_->pages.size()) - 1);
+    auto* page = impl_->pages[static_cast<std::size_t>(index)];
+    impl_->scroll->verticalScrollBar()->setValue(
+        std::max(0, page->y() - impl_->pagesLayout->spacing()));
+    updatePageLabel();
     pump();
 }
 
 void PdfWindow::updatePageLabel() {
     if (impl_->pages.empty()) {
+        impl_->pageLabel->clear();
+        impl_->pageTotal->clear();
         return;
     }
     const int mark = impl_->scroll->verticalScrollBar()->value()
@@ -757,9 +1079,116 @@ void PdfWindow::updatePageLabel() {
             current = i;
         }
     }
-    impl_->pageLabel->setText(QStringLiteral("%1 / %2")
-        .arg(current + 1)
-        .arg(impl_->pages.size()));
+    impl_->pageLabel->setText(QStringLiteral("%1 page%2")
+        .arg(impl_->pages.size())
+        .arg(impl_->pages.size() == 1U ? QString() : QStringLiteral("s")));
+    impl_->pageTotal->setText(QStringLiteral("/ %1").arg(impl_->pages.size()));
+    // The field is the first focusable widget in the footer, so it can hold focus
+    // the moment the reader opens; only a user edit may suppress the sync.
+    if (!impl_->pageField->hasFocus() || !impl_->pageField->isModified()) {
+        const QSignalBlocker block(impl_->pageField);
+        impl_->pageField->setText(QString::number(current + 1));
+        impl_->pageField->setModified(false);
+    }
+}
+
+// One place that paints every surface from the palette. Called once when the
+// window is built and again on every palette change, so the reader follows the
+// Light/Dark toggle without being reopened.
+void PdfWindow::restyle() {
+    // Called from the constructor and on every palette change; a resize or a
+    // palette event can arrive while the footer is still being built, so every
+    // surface is checked rather than assumed.
+    if (impl_ == nullptr || impl_->header == nullptr || impl_->footer == nullptr
+        || impl_->scroll == nullptr || impl_->host == nullptr || impl_->title == nullptr
+        || impl_->pageLabel == nullptr || impl_->pageTotal == nullptr
+        || impl_->zoomLabel == nullptr || impl_->message == nullptr
+        || impl_->pageField == nullptr || impl_->restyling) {
+        return;
+    }
+    impl_->restyling = true;
+    const QColor backdrop = pdfBackdrop();
+    const QColor chrome = pdfChrome();
+    const QColor ink = pdfInk();
+    const QColor secondary = pdfSecondary();
+    const QColor hairline = pdfHairline();
+    setStyleSheet(QStringLiteral("QWidget#pdfWindow { background: %1; }").arg(backdrop.name()));
+    if (impl_->caption != nullptr) {
+        impl_->caption->setStyleSheet(QStringLiteral(
+            "QWidget#pdfCaption { background: %1; border: none; }").arg(chrome.name()));
+        impl_->captionTitle->setStyleSheet(QStringLiteral(
+            "color: %1; background: transparent;").arg(secondary.name()));
+    }
+    impl_->header->setStyleSheet(QStringLiteral(
+        "QWidget#pdfHeader { background: %1; border-bottom: 1px solid %2; }")
+        .arg(chrome.name(), hairline.name()));
+    impl_->footer->setStyleSheet(QStringLiteral(
+        "QWidget#pdfFooter { background: %1; border-top: 1px solid %2; }")
+        .arg(chrome.name(), hairline.name()));
+    impl_->scroll->setStyleSheet(QStringLiteral(
+        "QScrollArea#pdfScroll { background: %1; border: none; }"
+        "QScrollArea#pdfScroll > QWidget > QWidget { background: %1; }").arg(backdrop.name()));
+    impl_->host->setStyleSheet(QStringLiteral("QWidget#pdfHost { background: %1; }")
+        .arg(backdrop.name()));
+    impl_->title->setStyleSheet(QStringLiteral(
+        "color: %1; font-size: 15px; font-weight: 600; background: transparent;")
+        .arg(ink.name()));
+    impl_->pageLabel->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
+        .arg(secondary.name()));
+    impl_->pageTotal->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
+        .arg(secondary.name()));
+    impl_->zoomLabel->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
+        .arg(ink.name()));
+    impl_->message->setStyleSheet(QStringLiteral(
+        "color: %1; font-size: 15px; background: transparent;").arg(secondary.name()));
+    impl_->pageField->setStyleSheet(QStringLiteral(
+        "QLineEdit#pdfPageField { color: %1; background: %2; border: 1px solid %3;"
+        " border-radius: 7px; padding: 3px 4px; min-height: 20px; }"
+        "QLineEdit#pdfPageField:focus { border-color: %4; }")
+        .arg(ink.name(), backdrop.name(), hairline.name(),
+            QApplication::palette().color(QPalette::Highlight).name()));
+    if (auto* divider = impl_->footer->findChild<QWidget*>(QStringLiteral("pdfDivider"))) {
+        divider->setStyleSheet(QStringLiteral("background: %1;").arg(hairline.name()));
+    }
+    if (auto* hint = impl_->footer->findChild<QLabel*>(QStringLiteral("pdfHint"))) {
+        hint->setStyleSheet(QStringLiteral("color: %1; background: transparent;")
+            .arg(secondary.name()));
+    }
+    for (auto& entry : impl_->iconButtons) {
+        if (entry.first != nullptr && !entry.second.isEmpty()) {
+            entry.first->setIcon(icons::lucideSolid(entry.second, secondary));
+        }
+    }
+    for (auto* page : impl_->pages) {
+        page->update();
+    }
+    impl_->appliedPalette = palette();
+    impl_->restyling = false;
+}
+
+void PdfWindow::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (impl_ == nullptr || impl_->scroll == nullptr || impl_->footer == nullptr
+        || impl_->title == nullptr || impl_->pagesLayout == nullptr) {
+        return;
+    }
+    // The title elides against the width the layout actually gave it, and the
+    // keyboard hint only shows where there is room for it.
+    if (impl_->title != nullptr) {
+        const int available = std::max(0, impl_->title->width() - 4);
+        impl_->title->setText(impl_->title->fontMetrics().elidedText(
+            impl_->titleText, Qt::ElideMiddle, available));
+        impl_->title->setToolTip(impl_->titleText);
+    }
+    if (auto* hint = impl_->footer->findChild<QLabel*>(QStringLiteral("pdfHint"))) {
+        hint->setVisible(width() >= 820);
+    }
+    // Both fit modes depend on the viewport, so a resize always re-derives the
+    // page width; page positions change, so keep the reader where they were.
+    const auto anchor = scrollAnchor();
+    relayout();
+    restoreScrollAnchor(anchor.first, anchor.second);
+    pump();
 }
 
 void PdfWindow::pump() {
@@ -902,6 +1331,11 @@ void PdfWindow::showEvent(QShowEvent* event) {
 }
 
 void PdfWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::PaletteChange && impl_ != nullptr
+        && impl_->header != nullptr && !impl_->restyling
+        && palette() != impl_->appliedPalette) {
+        restyle();
+    }
     if (event->type() == QEvent::WindowStateChange && impl_->captionMax != nullptr) {
         impl_->captionMax->setGlyph(isMaximized() ? CaptionGlyph::Restore : CaptionGlyph::Maximize);
     }
@@ -983,6 +1417,26 @@ void PdfWindow::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_0) {
+        setZoom(1.0);
+        return;
+    }
+    if (event->key() == Qt::Key_Home) {
+        goToPage(0);
+        return;
+    }
+    if (event->key() == Qt::Key_End) {
+        goToPage(static_cast<int>(impl_->pages.size()) - 1);
+        return;
+    }
+    if (event->key() == Qt::Key_F && event->modifiers() == Qt::NoModifier) {
+        setFitMode(PdfFit::Page);
+        return;
+    }
+    if (event->key() == Qt::Key_0 && event->modifiers().testFlag(Qt::ControlModifier)) {
+        setFitMode(PdfFit::Width);
+        return;
+    }
+    if (event->key() == Qt::Key_1 && event->modifiers().testFlag(Qt::ControlModifier)) {
         setZoom(1.0);
         return;
     }

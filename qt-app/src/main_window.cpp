@@ -14,6 +14,7 @@
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/record_document.hpp"
 #include "videovault/app/record_window.hpp"
+#include "videovault/app/music_library.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/plugin_tools.hpp"
@@ -2190,9 +2191,19 @@ void MainWindow::buildInterface() {
             music |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
             tools |= manifest.protocol=="megavault-actions-v1" && pluginHost_->enabled(manifest.id);
         }
-        if (pluginMusicButton_) pluginMusicButton_->setVisible(music);
+        // The Music entry belongs to the vault's own library and stays visible
+        // whatever the provider state is; only the provider button inside the
+        // page follows the extension.
+        if (pluginMusicButton_) pluginMusicButton_->setVisible(true);
+        if (musicLibrary_) musicLibrary_->setProviderAvailable(music);
         if (extensionToolsButton_) extensionToolsButton_->setVisible(tools);
-        if (!music && pluginMusic_ && contentStack_->currentWidget() == pluginMusic_) contentStack_->setCurrentWidget(pages_);
+        if (!music && pluginMusic_ && contentStack_->currentWidget() == pluginMusic_) {
+            if (musicLibrary_ != nullptr && contentStack_->indexOf(musicLibrary_) >= 0) {
+                fadeStack(contentStack_, musicLibrary_);
+            } else {
+                contentStack_->setCurrentWidget(pages_);
+            }
+        }
         if (!tools && extensionTools_ && contentStack_->currentWidget() == extensionTools_) contentStack_->setCurrentWidget(pages_);
     });
     connect(pluginHost_, &PluginHost::openRequested, this, [this](const QString& id) {
@@ -2498,11 +2509,28 @@ QWidget* MainWindow::buildUnlockedPage() {
 
     auto* titleRow = new QHBoxLayout();
     titleRow->setSpacing(8);
+    // The app mark sits with the page title: the window used to open on a bare
+    // "Library" word with no identity, and the icon was only visible in the
+    // taskbar. QLabel keeps it consistent with the caption bar's flat strip.
+    auto* appMark = new QLabel(toolbar);
+    appMark->setObjectName(QStringLiteral("appMark"));
+    const QIcon appIcon(QStringLiteral(":/icons/app.png"));
+    if (!appIcon.isNull()) {
+        appMark->setPixmap(appIcon.pixmap(22, 22));
+    }
+    appMark->setFixedSize(22, 22);
+    appMark->setScaledContents(true);
+    appMark->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    appMark->setToolTip(QStringLiteral("Mega Vault Protect"));
+    appMark->setAccessibleName(QStringLiteral("Mega Vault Protect"));
+    titleRow->addWidget(appMark);
     auto* libraryTitle = new QLabel(QStringLiteral("Library"), toolbar);
     QFont libraryFont(QStringLiteral("Segoe UI"));
     libraryFont.setPointSize(16);
     libraryTitle->setFont(libraryFont);
-    libraryTitle->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
+    // Palette role, not a white literal: a hardcoded white title disappeared
+    // against the light theme's pale command bar.
+    libraryTitle->setForegroundRole(QPalette::WindowText);
     titleRow->addWidget(libraryTitle);
     titleRow->addStretch(1);
     titleRow->addWidget(updateButton_);
@@ -2529,11 +2557,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     pluginMusicButton_->setObjectName(QStringLiteral("musicSection"));
     pluginMusicButton_->setStyleSheet(syncButton->styleSheet());
     pluginMusicButton_->setCursor(Qt::PointingHandCursor);
-    pluginMusicButton_->setToolTip(QStringLiteral("Music from your enabled plugin providers"));
+    pluginMusicButton_->setToolTip(QStringLiteral("Your music library"));
     bool musicEnabled = false;
     for (const auto& manifest : pluginHost_->manifests()) musicEnabled |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
-    pluginMusicButton_->setVisible(musicEnabled);
-    connect(pluginMusicButton_, &QPushButton::clicked, this, [this] { openPluginMusic(); });
+    // The music page lists the vault's own audio, so it is always worth an entry;
+    // provider search stays reachable from the page and from Settings.
+    Q_UNUSED(musicEnabled);
+    pluginMusicButton_->setVisible(true);
+    connect(pluginMusicButton_, &QPushButton::clicked, this, [this] { openMusicLibrary(); });
     titleRow->addWidget(pluginMusicButton_);
     extensionToolsButton_ = new QPushButton(QStringLiteral("Tools"), toolbar);
     extensionToolsButton_->setObjectName(QStringLiteral("toolsSection"));
@@ -4189,7 +4220,15 @@ void MainWindow::openPluginMusic(const QString& query) {
     if (!pluginMusic_) {
         pluginMusic_ = new MusicPluginPage(pluginHost_, contentStack_);
         contentStack_->addWidget(pluginMusic_);
-        connect(pluginMusic_, &MusicPluginPage::closed, this, [this] { contentStack_->setCurrentWidget(pages_); });
+        connect(pluginMusic_, &MusicPluginPage::closed, this, [this] {
+            // Opened from the music library? Go back there rather than jumping
+            // straight to the gallery: the provider is one tab of the page.
+            if (musicLibrary_ != nullptr && contentStack_->indexOf(musicLibrary_) >= 0) {
+                fadeStack(contentStack_, musicLibrary_);
+                return;
+            }
+            contentStack_->setCurrentWidget(pages_);
+        });
         connect(pluginMusic_, &MusicPluginPage::imported, this, [this] { refreshGallery(); });
     connect(pluginMusic_, &MusicPluginPage::catalogueFailed, this,
         [this](const QString& term, const QString& message) {
@@ -4209,6 +4248,34 @@ void MainWindow::openPluginMusic(const QString& query) {
     if (!query.isEmpty()) {
         pluginMusic_->searchFor(query);
     }
+}
+
+void MainWindow::openMusicLibrary() {
+    if (!vault_ || !vault_->is_unlocked() || contentStack_ == nullptr) {
+        return;
+    }
+    if (!closeText()) {
+        return;
+    }
+    closePdf();
+    if (musicLibrary_ == nullptr) {
+        musicLibrary_ = new MusicLibraryPage(contentStack_);
+        contentStack_->addWidget(musicLibrary_);
+        connect(musicLibrary_, &MusicLibraryPage::closed, this, [this] {
+            fadeStack(contentStack_, pages_);
+            QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
+        });
+        connect(musicLibrary_, &MusicLibraryPage::providerRequested, this,
+            [this] { openPluginMusic(); });
+    }
+    bool provider = false;
+    for (const auto& manifest : pluginHost_->manifests()) {
+        provider |= manifest.protocol == "monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+    }
+    musicLibrary_->setProviderAvailable(provider);
+    musicLibrary_->setVault(vault_);
+    fadeStack(contentStack_, musicLibrary_);
+    musicLibrary_->setFocus();
 }
 
 void MainWindow::ensurePluginPage() {

@@ -16,6 +16,8 @@
 #include <QSlider>
 #include <QTimer>
 
+class QVariantAnimation;
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -405,6 +407,9 @@ private:
     void updateCenterButton();
     void enterImageMode();
     void zoomImage(double factor, const QPointF& cursor_pos);
+    void animateImageZoom(double target, const QPointF& anchor);
+    [[nodiscard]] double fittedImageZoom();
+    void rotateImage();
     void resetImageFit();
     void clampImageOffset();
     void setImageZoom100();
@@ -478,6 +483,7 @@ private:
     QLabel* zoomLabel_{nullptr};
     QPushButton* zoomInButton_{nullptr};
     QPushButton* fitButton_{nullptr};
+    QPushButton* rotateButton_{nullptr};
 
     // Audio device (UI thread only).
     AudioSink* audioSink_{nullptr};
@@ -539,6 +545,11 @@ private:
     QPoint panStartPos_;
     QPoint panAnchor_;
     QPointF panStartOffset_;
+    // Photo viewer: an animated zoom keeps the point under the cursor still,
+    // the way Telegram's media viewer does, instead of snapping.
+    QVariantAnimation* imageZoomAnim_{nullptr};
+    QPointF imageZoomAnchor_;
+    QPointF imageZoomImagePoint_;
     double imageZoom_{0.0};
     int stillEpoch_{0};
     QPointF imageOffset_;

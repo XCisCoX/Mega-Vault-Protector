@@ -73,6 +73,7 @@ class TagFilterButton;
 class SettingsDialog;
 class PluginHost;
 class MusicPluginPage;
+class MusicLibraryPage;
 class PluginTrackDownloader;
 class ExtensionToolsPage;
 
@@ -189,6 +190,8 @@ private:
     void finishChangePassword();
     void openSettings();
     void openPluginMusic(const QString& query = QString());
+    // The library's own music page: audio items, not a provider search.
+    void openMusicLibrary();
     void offerPluginSearchRow();
     // The provider shown as a folder of the library: one mixed root list of
     // album folders and song rows, an album opening as a folder of its tracks,
@@ -233,6 +236,7 @@ private:
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};
+    MusicLibraryPage* musicLibrary_{nullptr};
     PluginTrackDownloader* pluginDownloads_{nullptr};
     QPushButton* pluginMusicButton_{nullptr};
     ExtensionToolsPage* extensionTools_{nullptr};

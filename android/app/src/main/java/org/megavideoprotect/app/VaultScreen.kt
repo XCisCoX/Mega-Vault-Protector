@@ -1591,8 +1591,18 @@ fun VaultScreen(
             val itemCount = if (PluginLibrary.folderOpen) PluginLibrary.target?.visibleRows(PluginLibrary.session?.rows.orEmpty())?.size ?: 0
                 else childFolders.size + filtered.size + discoverProviders.size
             SyncStatusPill(onOpen = onOpenSync)
+            // Selection wins over the folder total, exactly like the desktop
+            // footer: four selected files report their own combined size, and a
+            // folder selection says its contents are not counted (no recursive
+            // scan while the user is just selecting).
+            val selectedFiles = filtered.filter { it.id in selectedIds }
+            val footerLabel = if (selectedFiles.isNotEmpty()) {
+                "${selectedFiles.size} selected · ${FileKinds.compactSize(selectedFiles.sumOf { it.size })}"
+            } else {
+                "$itemCount items"
+            }
             Text(
-                "$itemCount items",
+                footerLabel,
                 color = Mvp.barText.copy(alpha = 0.86f),
                 fontSize = 12.sp,
                 modifier = Modifier.padding(start = 10.dp),

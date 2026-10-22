@@ -29,6 +29,9 @@ extern "C" {
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
+#include <QEasingCurve>
+#include <QTransform>
+#include <QVariantAnimation>
 #include <QScreen>
 #include <QSettings>
 #include <QShowEvent>
@@ -670,23 +673,42 @@ PlayerWindow::PlayerWindow(
     }
     zoomLabel_->setStyleSheet(QStringLiteral(
         "color: rgba(255,255,255,205); font-size: 12px; min-width: 46px;"));
-    connect(zoomOutButton_, &QPushButton::clicked, this, [this] {
-        zoomImage(0.8, QPointF(surface_->width() / 2.0, surface_->height() / 2.0));
+    const QPointF centre = QPointF(surface_->width() / 2.0, surface_->height() / 2.0);
+    connect(zoomOutButton_, &QPushButton::clicked, this, [this, centre] {
+        animateImageZoom((imageZoom_ <= 0.0 ? fittedImageZoom() : imageZoom_) * 0.8, centre);
     });
-    connect(zoomInButton_, &QPushButton::clicked, this, [this] {
-        zoomImage(1.25, QPointF(surface_->width() / 2.0, surface_->height() / 2.0));
+    connect(zoomInButton_, &QPushButton::clicked, this, [this, centre] {
+        animateImageZoom((imageZoom_ <= 0.0 ? fittedImageZoom() : imageZoom_) * 1.25, centre);
     });
     connect(fitButton_, &QPushButton::clicked, this, [this] { resetImageFit(); });
+    rotateButton_ = new QPushButton(controlsOverlay_);
+    rotateButton_->setCursor(Qt::PointingHandCursor);
+    rotateButton_->setFocusPolicy(Qt::NoFocus);
+    rotateButton_->setToolTip(QStringLiteral("Rotate 90° (R)"));
+    rotateButton_->setAccessibleName(QStringLiteral("Rotate the photo"));
+    rotateButton_->setStyleSheet(zoomOutButton_->styleSheet());
+    const QIcon rotateGlyph =
+        icons::lucideSolid(QStringLiteral("rotate-ccw"), QColor(0xE6, 0xE6, 0xEC));
+    if (!rotateGlyph.isNull()) {
+        const QIcon& icon = rotateGlyph;
+        rotateButton_->setIcon(icon);
+        rotateButton_->setIconSize(QSize(15, 15));
+    } else {
+        rotateButton_->setText(QStringLiteral("⟲"));
+    }
+    connect(rotateButton_, &QPushButton::clicked, this, [this] { rotateImage(); });
     imageRow->addWidget(zoomOutButton_);
     imageRow->addWidget(zoomLabel_);
     imageRow->addWidget(zoomInButton_);
     imageRow->addWidget(fitButton_);
+    imageRow->addWidget(rotateButton_);
     imageRow->addStretch(1);
     controlsLayout->addLayout(imageRow);
     zoomOutButton_->hide();
     zoomLabel_->hide();
     zoomInButton_->hide();
     fitButton_->hide();
+    rotateButton_->hide();
 
     // Position the chrome strips and the center button over the surface.
     layoutChrome();
@@ -757,10 +779,29 @@ PlayerWindow::PlayerWindow(
     uiHideTimer_.setSingleShot(true);
     uiHideTimer_.setInterval(2500);
     connect(&uiHideTimer_, &QTimer::timeout, this, [this] {
-        // Hide the chrome while the video plays and the mouse stays still.
-        if (playing_.load()) {
+        // Hide the chrome while the video plays and the mouse stays still, and
+        // also while a photo is on screen: a picture meant to be looked at must
+        // not carry a permanent control strip across it.
+        if (playing_.load() || imageMode_) {
             hideChrome();
         }
+    });
+
+    // Animated zoom for buttons and double-click. Wheel zoom stays immediate so
+    // continuous scrolling keeps working.
+    imageZoomAnim_ = new QVariantAnimation(this);
+    imageZoomAnim_->setDuration(170);
+    imageZoomAnim_->setEasingCurve(QEasingCurve::OutCubic);
+    connect(imageZoomAnim_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        if (!imageMode_ || surface_ == nullptr) {
+            return;
+        }
+        const double zoom = value.toDouble();
+        imageZoom_ = zoom;
+        imageOffset_ = imageZoomAnchor_ - imageZoomImagePoint_ * zoom;
+        clampImageOffset();
+        surface_->setView(imageZoom_, imageOffset_);
+        updateZoomLabel();
     });
 
     decoder_.set_stream_cache_bytes(
@@ -1182,6 +1223,12 @@ bool PlayerWindow::handleKey(QKeyEvent* event) {
         case Qt::Key_Minus:
             zoomImage(0.8, QPointF(surface_->width() / 2.0, surface_->height() / 2.0));
             return true;
+        case Qt::Key_R:
+            if (imageMode_) {
+                rotateImage();
+                return true;
+            }
+            break;
         case Qt::Key_0:
             resetImageFit();
             return true;
@@ -1252,18 +1299,23 @@ bool PlayerWindow::eventFilter(QObject* watched, QEvent* event) {
             && handleKey(static_cast<QKeyEvent*>(event))) {
             return true; // consumed by the player
         }
-        if (event->type() == QEvent::MouseMove && !imageMode_) {
-            // Any mouse movement over the player brings the chrome back and
-            // postpones the auto-hide. Pictures keep the controls on screen.
+        if (event->type() == QEvent::MouseMove) {
+            // Any mouse movement brings the chrome back and postpones the
+            // auto-hide, in video and photo mode alike.
             showChrome();
             uiHideTimer_.start();
         }
         if (imageMode_ && event->type() == QEvent::MouseButtonDblClick) {
+            const QPointF anchor = surface_->mapFromGlobal(
+                static_cast<QMouseEvent*>(event)->globalPos());
             if (imageZoom_ <= 0.0) {
-                zoomImage(2.0, QPointF(surface_->width() / 2.0, surface_->height() / 2.0));
+                // Fit -> actual size, zooming toward the clicked point.
+                animateImageZoom(1.0, anchor);
             } else {
                 resetImageFit();
             }
+            showChrome();
+            uiHideTimer_.start();
             return true;
         }
         if (imageMode_ && event->type() == QEvent::Wheel) {
@@ -1823,10 +1875,20 @@ void PlayerWindow::layoutChrome() {
     const int w = surface_->width();
     const int h = surface_->height();
     topOverlay_->setGeometry(0, 0, w, 56);
-    const int controlsHeight = imageMode_ ? 64 : 96;
-    const int cardWidth = std::min(std::max(320, w - 32), 820);
+    // The photo controls are a small centred pill; the video controls stay a
+    // wide card because they carry a timeline, volume and navigation.
+    const int controlsHeight = imageMode_ ? 52 : 96;
+    // A fixed height keeps the photo pill compact: its buttons would otherwise
+    // stretch the card's own layout to a taller box than the geometry gives it.
+    controlsOverlay_->setFixedHeight(controlsHeight);
+    const int pillWidth = std::min(std::max(300, controlsOverlay_->sizeHint().width()),
+        std::max(240, w - 32));
+    const int cardWidth = imageMode_ ? pillWidth : std::min(std::max(320, w - 32), 820);
     const int cardX = std::max(0, (w - cardWidth) / 2);
-    const int cardY = std::max(8, h - controlsHeight - 16);
+    // The card's own layout can end up a little taller than the requested
+    // height, so keep a real margin under it instead of letting the rounded
+    // bottom meet the window edge.
+    const int cardY = std::max(8, h - controlsHeight - (imageMode_ ? 34 : 16));
     controlsOverlay_->setGeometry(cardX, cardY, std::min(cardWidth, w), controlsHeight);
     centerPlayButton_->move((w - centerPlayButton_->width()) / 2,
         (h - centerPlayButton_->height()) / 2);
@@ -1863,16 +1925,27 @@ void PlayerWindow::enterImageMode() {
     if (shuffleButton_ != nullptr) {
         shuffleButton_->hide();
     }
+    // Everything else in the control card belongs to video: hide it all rather
+    // than leave stray fullscreen/pop-out glyphs floating in the photo pill.
+    const QList<QWidget*> photoControls{zoomOutButton_, zoomLabel_, zoomInButton_,
+        fitButton_, rotateButton_};
+    for (auto* child : controlsOverlay_->findChildren<QWidget*>(QString(),
+             Qt::FindDirectChildrenOnly)) {
+        child->setVisible(photoControls.contains(child));
+    }
     zoomOutButton_->show();
     zoomLabel_->show();
     zoomInButton_->show();
     fitButton_->show();
-    uiHideTimer_.stop();
+    rotateButton_->show();
     updateCenterButton();
     showChrome();
     layoutChrome();
     resetImageFit();
     surface_->setCursor(Qt::OpenHandCursor);
+    // Chrome fades out of the way after a couple of idle seconds, exactly like
+    // the video player; any mouse move brings it back.
+    uiHideTimer_.start();
 }
 
 // Zooms by `factor`, keeping the image point under `cursor_pos` fixed. From
@@ -1904,6 +1977,69 @@ void PlayerWindow::zoomImage(const double factor, const QPointF& cursor_pos) {
     clampImageOffset();
     surface_->setView(imageZoom_, imageOffset_);
     updateZoomLabel();
+}
+
+double PlayerWindow::fittedImageZoom() {
+    QImage frame;
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        frame = latestFrame_;
+    }
+    if (frame.isNull() || surface_ == nullptr || frame.width() <= 0 || frame.height() <= 0) {
+        return 1.0;
+    }
+    return std::min(static_cast<double>(surface_->width()) / frame.width(),
+                    static_cast<double>(surface_->height()) / frame.height());
+}
+
+void PlayerWindow::animateImageZoom(const double target, const QPointF& anchor) {
+    QImage frame;
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        frame = latestFrame_;
+    }
+    if (frame.isNull() || surface_ == nullptr || imageZoomAnim_ == nullptr) {
+        return;
+    }
+    const double from = imageZoom_ <= 0.0 ? fittedImageZoom() : imageZoom_;
+    const QPointF fromOffset = imageZoom_ <= 0.0
+        ? QPointF((surface_->width() - frame.width() * from) / 2.0,
+                  (surface_->height() - frame.height() * from) / 2.0)
+        : imageOffset_;
+    const double to = std::clamp(target, 0.02, 64.0);
+    // The image coordinate under the anchor stays under it for every frame.
+    imageZoomAnchor_ = anchor;
+    imageZoomImagePoint_ = (anchor - fromOffset) / std::max(1e-6, from);
+    if (std::abs(to - from) < 0.0005) {
+        imageZoom_ = to;
+        imageOffset_ = anchor - imageZoomImagePoint_ * to;
+        clampImageOffset();
+        surface_->setView(imageZoom_, imageOffset_);
+        updateZoomLabel();
+        return;
+    }
+    imageZoomAnim_->stop();
+    imageZoomAnim_->setStartValue(from);
+    imageZoomAnim_->setEndValue(to);
+    imageZoomAnim_->start();
+}
+
+void PlayerWindow::rotateImage() {
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        if (latestFrame_.isNull()) {
+            return;
+        }
+        // Quarter turns are lossless; the viewer keeps no second copy to undo
+        // them, so four presses return the picture to its original state.
+        latestFrame_ = latestFrame_.transformed(QTransform().rotate(90));
+        if (surface_ != nullptr) {
+            surface_->setFrame(latestFrame_);
+        }
+    }
+    resetImageFit();
+    showChrome();
+    uiHideTimer_.start();
 }
 
 void PlayerWindow::clampImageOffset() {

@@ -20,6 +20,17 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.VectorConverter
+import kotlinx.coroutines.launch
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -28,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,10 +83,11 @@ fun isPdfName(name: String): Boolean =
     name.substringAfterLast('.', "").lowercase() == "pdf"
 
 /**
- * Full-screen viewer for an image inside the vault. The frame comes from the
- * core's decoder over the encrypted package (nothing is written to disk) at
- * screen resolution, capped so a huge photo cannot exhaust the heap. Pinch to
- * zoom, drag to pan, double-tap to toggle zoom, Back to return to the gallery.
+ * Full-screen photo viewer, modelled on Telegram's media viewer: the picture
+ * sits on a black stage (a photo viewer is a dark room in every theme), the
+ * chrome follows the app palette and hides on a tap, pinch zooms around the
+ * fingers, a double-tap zooms on the tapped point, and panning stops at the
+ * image edges instead of drifting into empty space.
  */
 @Composable
 fun ImageViewerScreen(
@@ -83,10 +96,18 @@ fun ImageViewerScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var bitmap by remember(videoId) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(videoId) { mutableStateOf(false) }
-    var scale by remember(videoId) { mutableStateOf(1f) }
-    var offset by remember(videoId) { mutableStateOf(Offset.Zero) }
+    var rotation by remember(videoId) { mutableStateOf(0f) }
+    var chrome by remember { mutableStateOf(true) }
+    // The fitted picture size and the viewport, shared with the zoom pill so its
+    // buttons clamp panning exactly like the gestures do.
+    var stageImage by remember { mutableStateOf(Size.Zero) }
+    var stageBox by remember { mutableStateOf(Size.Zero) }
+    val scale = remember(videoId) { Animatable(1f) }
+    val offset = remember(videoId) { Animatable(Offset.Zero, Offset.VectorConverter) }
+    val appear = remember(videoId) { Animatable(0f) }
 
     LaunchedEffect(videoId) {
         bitmap = null
@@ -104,141 +125,225 @@ fun ImageViewerScreen(
         }
         bitmap = decoded
         failed = decoded == null
+        if (decoded != null) appear.animateTo(1f, tween(240))
     }
 
-    Column(Modifier.fillMaxSize().background(Mvp.window).safeDrawingPadding()) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Mvp.headerBg)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Box(
-                Modifier.size(40.dp).clickable(onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    painterResource(R.drawable.ic_lucide_arrow_left),
-                    contentDescription = "Back",
-                    tint = Mvp.title,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-            Text(
-                name,
-                color = Mvp.title,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f),
-            )
-            if (scale > 1f) {
-                MvpButton("Fit", onClick = {
-                    scale = 1f
-                    offset = Offset.Zero
-                })
-            } else {
-                Text("${(scale * 100).toInt()}%", color = Mvp.description, fontSize = 12.sp)
-            }
-        }
+    fun clamped(candidate: Offset, current: Float): Offset {
+        if (current <= 1.001f) return Offset.Zero
+        if (stageImage == Size.Zero || stageBox == Size.Zero) return Offset.Zero
+        val maxX = ((stageImage.width * current - stageBox.width) / 2f).coerceAtLeast(0f)
+        val maxY = ((stageImage.height * current - stageBox.height) / 2f).coerceAtLeast(0f)
+        return Offset(
+            candidate.x.coerceIn(-maxX, maxX),
+            candidate.y.coerceIn(-maxY, maxY),
+        )
+    }
 
-        BoxWithConstraints(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(Mvp.card),
-            contentAlignment = Alignment.Center,
-        ) {
-            val maxW = constraints.maxWidth.toFloat()
-            val maxH = constraints.maxHeight.toFloat()
-            val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-                val next = (scale * zoomChange).coerceIn(1f, 6f)
-                val maxX = (maxW * (next - 1f) / 2f).coerceAtLeast(0f)
-                val maxY = (maxH * (next - 1f) / 2f).coerceAtLeast(0f)
-                scale = next
-                offset = if (next <= 1f) {
-                    Offset.Zero
+    Box(Modifier.fillMaxSize().background(Color.Black).safeDrawingPadding()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val boxWidth = constraints.maxWidth.toFloat()
+            val boxHeight = constraints.maxHeight.toFloat()
+            val image = bitmap
+            // The size a Fit image occupies, so panning stops at the picture's
+            // own edges rather than the letterbox around it.
+            val fitted = if (image != null && image.width > 0 && image.height > 0) {
+                val aspect = image.width.toFloat() / image.height.toFloat()
+                if (boxWidth / boxHeight > aspect) {
+                    Size(boxHeight * aspect, boxHeight)
                 } else {
-                    Offset(
-                        (offset.x + panChange.x).coerceIn(-maxX, maxX),
-                        (offset.y + panChange.y).coerceIn(-maxY, maxY),
-                    )
+                    Size(boxWidth, boxWidth / aspect)
                 }
+            } else {
+                Size.Zero
             }
+            SideEffect {
+                stageImage = fitted
+                stageBox = Size(boxWidth, boxHeight)
+            }
+
             Box(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(videoId) {
                         detectTapGestures(
-                            onDoubleTap = {
-                                if (scale > 1f) {
-                                    scale = 1f
-                                    offset = Offset.Zero
+                            onTap = { chrome = !chrome },
+                            onDoubleTap = { point ->
+                                val target = if (scale.value > 1.01f) 1f else 2.5f
+                                val from = scale.value
+                                val next = if (target == 1f) {
+                                    Offset.Zero
                                 } else {
-                                    scale = 2.5f
+                                    clamped(point - (point - offset.value) * (target / from), target)
+                                }
+                                scope.launch {
+                                    launch { scale.animateTo(target, tween(220)) }
+                                    offset.animateTo(next, tween(220))
                                 }
                             },
                         )
                     }
-                    .transformable(transformState),
+                    .pointerInput(videoId, fitted) {
+                        detectTransformGestures { centroid, pan, zoom, _ ->
+                            val from = scale.value
+                            val next = (from * zoom).coerceIn(1f, 6f)
+                            // Zoom around the centroid: the point between the
+                            // fingers stays under them.
+                            val moved = centroid - (centroid - offset.value) * (next / from) + pan
+                            scope.launch {
+                                scale.snapTo(next)
+                                offset.snapTo(clamped(moved, next))
+                            }
+                        }
+                    },
             ) {
-            val image = bitmap
-            val appear = remember(videoId) { Animatable(0f) }
-            LaunchedEffect(image) {
-                if (image != null) appear.animateTo(1f, tween(280))
-            }
-            when {
-                image != null -> Image(
-                    bitmap = image.asImageBitmap(),
-                    contentDescription = name,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offset.x,
-                            translationY = offset.y,
-                            alpha = appear.value,
-                        ),
-                    contentScale = ContentScale.Fit,
-                )
-                failed -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "Could not decode this image",
-                        color = Mvp.errorText,
-                        fontSize = 14.sp,
-                        textAlign = TextAlign.Center,
+                when {
+                    image != null -> Image(
+                        bitmap = image.asImageBitmap(),
+                        contentDescription = name,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale.value,
+                                scaleY = scale.value,
+                                translationX = offset.value.x,
+                                translationY = offset.value.y,
+                                rotationZ = rotation,
+                                alpha = appear.value,
+                            ),
+                        contentScale = ContentScale.Fit,
                     )
-                }
-                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = Mvp.accent, strokeWidth = 3.dp)
+                    failed -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            "Decrypting…",
-                            color = Mvp.description,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 10.dp),
+                            "Could not decode this image",
+                            color = Mvp.errorText,
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center,
                         )
+                    }
+                    else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Mvp.accent, strokeWidth = 3.dp)
+                            Text(
+                                "Decrypting…",
+                                color = Mvp.description,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 10.dp),
+                            )
+                        }
                     }
                 }
             }
+        }
+
+        // Chrome: a scrimmed top bar and a small zoom pill, both fading out of the
+        // way on a tap so the picture is the whole screen.
+        AnimatedVisibility(
+            visible = chrome,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(160)),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Mvp.headerBg.copy(alpha = 0.92f))
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(
+                    Modifier.size(40.dp).clickable(onClick = onBack),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_lucide_arrow_left),
+                        contentDescription = "Back",
+                        tint = Mvp.title,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+                Text(
+                    name,
+                    color = Mvp.title,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                bitmap?.let {
+                    Text(
+                        "${it.width} × ${it.height}",
+                        color = Mvp.description,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
             }
         }
 
-        Text(
-            if (failed) {
-                "The vault stores the file but the picture could not be decoded."
-            } else {
-                "Pinch to zoom · drag to pan · double-tap to toggle"
-            },
-            color = Mvp.statusText,
-            fontSize = 11.sp,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-        )
+        AnimatedVisibility(
+            visible = chrome,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(160)),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp),
+        ) {
+            Row(
+                Modifier
+                    .background(Mvp.tileBg.copy(alpha = 0.94f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                ControlChip("−") {
+                    val next = (scale.value * 0.8f).coerceIn(1f, 6f)
+                    scope.launch {
+                        scale.animateTo(next, tween(160))
+                        offset.animateTo(clamped(offset.value, next), tween(160))
+                    }
+                }
+                Text(
+                    "${(scale.value * 100).toInt()}%",
+                    color = Mvp.tileText,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+                ControlChip("+") {
+                    val next = (scale.value * 1.25f).coerceIn(1f, 6f)
+                    scope.launch {
+                        scale.animateTo(next, tween(160))
+                        offset.animateTo(clamped(offset.value, next), tween(160))
+                    }
+                }
+                ControlChip("Fit") {
+                    scope.launch {
+                        scale.animateTo(1f, tween(180))
+                        offset.animateTo(Offset.Zero, tween(180))
+                    }
+                }
+                ControlChip("⟲") {
+                    rotation = (rotation + 90f) % 360f
+                    scope.launch {
+                        scale.snapTo(1f)
+                        offset.snapTo(Offset.Zero)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One rounded action inside the photo pill. */
+@Composable
+private fun ControlChip(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = Mvp.tileText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

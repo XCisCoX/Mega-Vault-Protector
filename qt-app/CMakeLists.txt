@@ -30,6 +30,7 @@ option(MVP_MINGW_APP_FALLBACK
 
 set(MVP_APP_WINRT_SOURCES
     src/music_window.cpp
+    src/music_library.cpp
     src/pdf_window.cpp
 )
 set(MVP_APP_FALLBACK_SOURCES "")
@@ -79,6 +80,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
+    include/videovault/app/music_library.hpp
     include/videovault/app/pdf_window.hpp
     include/videovault/app/in_window_sheet.hpp
     include/videovault/app/record_document.hpp

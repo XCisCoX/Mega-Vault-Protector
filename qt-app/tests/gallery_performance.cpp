@@ -4,6 +4,7 @@
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/app/tag_filter_button.hpp"
+#include "videovault/app/music_library.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/record_window.hpp"
@@ -935,23 +936,54 @@ struct GalleryPerformanceTestAccess {
             enable->setChecked(true);
             window.settingsPage_->reject(); QApplication::processEvents();
             auto* music = window.findChild<QPushButton*>("musicSection");
-            if (!music || !music->isVisible()) { std::fprintf(stderr,"FAIL: enabled plugin Music navigation absent\n"); return 42; }
+            if (!music || !music->isVisible()) { std::fprintf(stderr,"FAIL: Music library entry absent\n"); return 42; }
             music->click(); QApplication::processEvents();
-            if (window.contentStack_->currentWidget()->objectName() != "musicPluginPage") return 43;
+            // The Music entry is the vault's own library; provider search is a
+            // button inside it, and only while the provider is enabled.
+            if (window.contentStack_->currentWidget()->objectName() != "musicLibraryPage") {
+                std::fprintf(stderr, "FAIL: Music opens %s, not the library page\n",
+                    qPrintable(window.contentStack_->currentWidget()->objectName()));
+                return 43;
+            }
+            auto* provider = window.findChild<QPushButton*>("musicProviderButton");
+            if (provider == nullptr || !provider->isVisible()) {
+                std::fprintf(stderr, "FAIL: enabled provider is not offered from the library\n");
+                return 43;
+            }
+            provider->click(); QApplication::processEvents();
+            if (window.contentStack_->currentWidget()->objectName() != "musicPluginPage") return 44;
             window.findChild<QPushButton*>("musicBack")->click(); QApplication::processEvents();
-            if(window.contentStack_->currentWidget()!=window.pages_)return 44;
+            if (window.contentStack_->currentWidget()->objectName() != "musicLibraryPage") return 45;
             window.openSettings(); QApplication::processEvents();
             enable=window.settingsPage_->findChild<QCheckBox*>("pluginEnable_org.megavault.monochrome"); enable->setChecked(false);
-            if(music->isVisible())return 45;
+            window.settingsPage_->reject(); QApplication::processEvents();
+            // The library entry stays (it lists local audio); only the provider
+            // button disappears.
+            if (!music->isVisible()) { std::fprintf(stderr, "FAIL: music entry hidden after disabling provider\n"); return 51; }
+            provider = window.musicLibrary_->findChild<QPushButton*>("musicProviderButton");
+            if (provider != nullptr && provider->isVisible()) {
+                std::fprintf(stderr, "FAIL: provider button survived disabling the provider\n");
+                return 46;
+            }
+            window.musicLibrary_->closed();
+            QApplication::processEvents();
+            if (window.contentStack_->currentWidget() != window.pages_) {
+                std::fprintf(stderr, "FAIL: library closed to %s\n",
+                    qPrintable(window.contentStack_->currentWidget()->objectName()));
+                return 52;
+            }
+            window.openSettings(); QApplication::processEvents();
             auto* toolEnable=window.settingsPage_->findChild<QCheckBox*>("pluginEnable_org.megavault.text-tools");
-            if(!toolEnable)return 46;toolEnable->setChecked(true);
+            if(!toolEnable)return 47;toolEnable->setChecked(true);
             window.settingsPage_->reject();QApplication::processEvents();
             auto* tools=window.findChild<QPushButton*>("toolsSection");
-            if(!tools||!tools->isVisible()||music->isVisible()){std::fprintf(stderr,"FAIL: independent Tools navigation absent\n");return 47;}
+            // Music is the local library and stays reachable; Tools appears only
+            // while its own extension is enabled.
+            if(!tools||!tools->isVisible()||!music->isVisible()){std::fprintf(stderr,"FAIL: independent Tools navigation absent\n");return 48;}
             tools->click();QApplication::processEvents();
-            if(window.contentStack_->currentWidget()->objectName()!="extensionToolsPage")return 48;
+            if(window.contentStack_->currentWidget()->objectName()!="extensionToolsPage")return 49;
             window.findChild<QPushButton*>("extensionBack")->click();QApplication::processEvents();
-            if(window.contentStack_->currentWidget()!=window.pages_)return 49;
+            if(window.contentStack_->currentWidget()!=window.pages_)return 50;
             window.lockVault(); QApplication::processEvents();
             std::puts("PASS actual settings -> independent Music/Tools navigation -> inline pages -> back -> lock"); return 0;
         }
