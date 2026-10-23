@@ -11,6 +11,7 @@
 #include <QUuid>
 #include "videovault/app/sync_state.hpp"
 #include "videovault/core/vault.hpp"
+#include "videovault/core/version.hpp"
 #include <QtConcurrent/QtConcurrentRun>
 #include <QApplication>
 #include <QCheckBox>
@@ -234,6 +235,51 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     };
     auto* updates = section(QStringLiteral("updates"), QStringLiteral("About & updates"),
         QStringLiteral("Version, update channel, and checking for a new release."));
+    {
+        // Product details first: who made this build and where the source lives.
+        auto* aboutCard = card(updates);
+        auto* aboutTitle = textLabel(QStringLiteral("Mega Vault Protect"), this);
+        QFont aboutFont = aboutTitle->font();
+        aboutFont.setPointSize(aboutFont.pointSize() + 2);
+        aboutFont.setBold(true);
+        aboutTitle->setFont(aboutFont);
+        aboutTitle->setObjectName(QStringLiteral("aboutProductName"));
+        aboutCard->addWidget(aboutTitle);
+        // The version CMake stamped into the core, unless main() set an explicit
+        // application version (the updater does that when it knows better).
+        const std::string_view stamped = videovault::core::version();
+        const QString reported = QCoreApplication::applicationVersion();
+        const QString version = reported.isEmpty()
+            ? QString::fromLatin1(stamped.data(), static_cast<int>(stamped.size()))
+            : reported;
+        auto* aboutVersion = textLabel(
+            QStringLiteral("Version %1").arg(version), this, true);
+        aboutVersion->setObjectName(QStringLiteral("aboutVersion"));
+        aboutVersion->setAccessibleName(QStringLiteral("Application version"));
+        aboutCard->addWidget(aboutVersion);
+        auto* aboutCompany = textLabel(
+            QStringLiteral("Creator %1")
+                .arg( QStringLiteral("CISCO_X")), this, true);
+        aboutCompany->setObjectName(QStringLiteral("aboutCompany"));
+        aboutCompany->setAccessibleName(QStringLiteral("Company and producer"));
+        aboutCard->addWidget(aboutCompany);
+        auto* aboutLink = new QLabel(this);
+        aboutLink->setObjectName(QStringLiteral("aboutGitHub"));
+        aboutLink->setTextFormat(Qt::RichText);
+        aboutLink->setWordWrap(true);
+        aboutLink->setOpenExternalLinks(true);
+        aboutLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        aboutLink->setText(QStringLiteral(
+            "<a href=\"https://github.com/XCisCoX/Mega-Vault-Protector\">"
+            "github.com/XCisCoX/Mega-Vault-Protector</a>"));
+        aboutLink->setToolTip(QStringLiteral("Open the project on GitHub"));
+        aboutLink->setAccessibleName(QStringLiteral("Project address on GitHub"));
+        aboutCard->addWidget(aboutLink);
+        aboutCard->addWidget(textLabel(
+            QStringLiteral("Encrypted local-first vault. Licensed under AGPL-3.0; bundled "
+                           "Telegram player assets keep their GPL-3.0-or-later notices."),
+            this, true));
+    }
     auto* updateCard = card(updates);
     auto toggle = [this, updateCard](const QString& title, const QString& detail, const QString& key, bool fallback, const QString& name) {
         auto* button = new PillSwitch(this);

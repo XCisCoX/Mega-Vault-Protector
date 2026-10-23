@@ -172,6 +172,17 @@ if(WIN32)
     # Embeds the application icon into MegaVaultProtect.exe (Explorer,
     # taskbar, and the Alt-Tab icon all come from this resource).
     target_sources(VideoVaultApp PRIVATE resources/app.rc)
+    # Version metadata (Properties -> Details, and the file's Product version):
+    # company, producer, copyright and the stamped 2.1.x version.
+    set(MVP_COMPANY_NAME "CISCO_X")
+    set(MVP_COPYRIGHT "Copyright (C) 2026 CISCO_X")
+    if(MVP_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+        set(MVP_VERSION_FILEVERSION "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+    else()
+        set(MVP_VERSION_FILEVERSION "2,1,0,0")
+    endif()
+    configure_file(resources/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
+    target_sources(VideoVaultApp PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 endif()
 
 target_include_directories(VideoVaultApp PRIVATE

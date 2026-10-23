@@ -2717,14 +2717,27 @@ void PlayerWindow::tick() {
     // QAudioOutput parks in IdleState (and stops pulling) after an empty read;
     // wake it while there may be fresh samples.
     if (audioOutput_ != nullptr && playing_.load() && audioPrimed
+        && !audioDeviceFailed_.load()
         && (audioOutput_->state() == QAudio::IdleState
             || audioOutput_->state() == QAudio::StoppedState)) {
-        audioOutput_->start(audioSink_);
+        // A machine with no output device (CI, a headless box) fails the start
+        // immediately. Retrying every tick floods the log and starves the event
+        // loop, so give up after a few attempts and let the worker fall back to
+        // its wall clock.
+        if (++audioRestartAttempts_ > 5) {
+            audioDeviceFailed_.store(true);
+        } else {
+            audioOutput_->start(audioSink_);
+        }
         audioDeviceBufferMs_.store(std::clamp(
             audioOutput_->bufferSize() * 1000
                 / std::max(1, std::max(1, audioSampleRate_.load())
                     * std::max(1, audioChannels_.load()) * 2),
             0, 250));
+        if (audioOutput_->state() == QAudio::StoppedState
+            && audioOutput_->error() != QAudio::NoError) {
+            audioDeviceFailed_.store(true);
+        }
     }
 
     // Paint the latest frame from the worker.

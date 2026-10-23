@@ -524,6 +524,7 @@ private:
     std::atomic<bool> audioDeviceFailed_{false};
     std::atomic<std::int64_t> audioBaseMs_{-1};
     std::atomic<int> audioDeviceBufferMs_{60};
+    int audioRestartAttempts_{0};
 
     // Decode worker communication.
     std::thread worker_;

@@ -862,19 +862,23 @@ int main() {
     // A real RGB photo, not a 1x1 test pattern, opened in the actual window.
     // This is the path that stayed black: the player must show an opaque frame.
     {
+        std::printf("Photo block: writing the PNG...\n");
         const auto photo_path = temp.path() / L"photo.png";
         if (!writeRgbPng(photo_path, 320, 240)) {
             return fail("Writing a 320x240 PNG must succeed.");
         }
+        std::printf("Photo block: creating the vault...\n");
         const auto photo_root = temp.path() / L"photo-vault";
         auto photo_vault = Vault::create(photo_root, "photo password", testParameters());
         if (!photo_vault) {
             return fail("Creating a vault for the photo PNG must succeed.");
         }
+        std::printf("Photo block: importing...\n");
         const auto photo_id = photo_vault.value().import_file(photo_path);
         if (!photo_id) {
             return fail("Importing a 320x240 PNG must succeed.");
         }
+        std::printf("Photo block: thumbnail...\n");
         auto photo_opened = std::make_shared<Vault>(std::move(photo_vault.value()));
         const auto thumb = photo_opened->thumbnail(photo_id.value());
         if (!thumb || thumb.value().bytes.empty()) {
