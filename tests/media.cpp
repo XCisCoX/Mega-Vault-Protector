@@ -120,7 +120,7 @@ bool writeMjpegMkv(
     codec->width = kWidth;
     codec->height = kHeight;
     codec->time_base = AVRational{1, kFps};
-    codec->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec->pix_fmt = AV_PIX_FMT_YUVJ420P;
     codec->color_range = AVCOL_RANGE_JPEG;
     if (avcodec_open2(codec, encoder, nullptr) < 0) {
         avcodec_free_context(&codec);
@@ -129,7 +129,7 @@ bool writeMjpegMkv(
 
     SwsContext* scaler = sws_getContext(
         kWidth, kHeight, AV_PIX_FMT_RGB24,
-        kWidth, kHeight, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
+        kWidth, kHeight, AV_PIX_FMT_YUVJ420P, SWS_BILINEAR,
         nullptr, nullptr, nullptr);
     if (scaler == nullptr) {
         avcodec_free_context(&codec);
@@ -137,7 +137,7 @@ bool writeMjpegMkv(
     }
 
     AVFrame* yuv = av_frame_alloc();
-    yuv->format = AV_PIX_FMT_YUV420P;
+    yuv->format = AV_PIX_FMT_YUVJ420P;
     yuv->width = kWidth;
     yuv->height = kHeight;
     av_frame_get_buffer(yuv, 0);
@@ -163,7 +163,7 @@ bool writeMjpegMkv(
     AVCodecParameters* parameters = stream->codecpar;
     parameters->codec_type = AVMEDIA_TYPE_VIDEO;
     parameters->codec_id = AV_CODEC_ID_MJPEG;
-    parameters->format = AV_PIX_FMT_YUV420P;
+    parameters->format = AV_PIX_FMT_YUVJ420P;
     parameters->width = kWidth;
     parameters->height = kHeight;
     if (avio_open(&format->pb, path.string().c_str(), AVIO_FLAG_WRITE) < 0) {

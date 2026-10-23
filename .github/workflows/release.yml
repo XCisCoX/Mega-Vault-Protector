@@ -274,9 +274,12 @@ jobs:
           sudo apt-get install -y -qq \
             qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-            libsqlcipher-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
+            tcl-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
             libxcb-cursor0 libxcb-xinerama0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - name: Build SQLCipher 4 (vault-compatible encryption)
+        run: bash scripts/build-linux-sqlcipher.sh "$RUNNER_TEMP/sqlcipher4"
 
       - name: Configure (Release)
         run: cmake --preset linux-release -DMVP_VERSION="${{ needs.version.outputs.number }}"

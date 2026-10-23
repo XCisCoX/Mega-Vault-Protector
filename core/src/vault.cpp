@@ -456,15 +456,21 @@ bool any_vault_file_exists(const Paths& paths) noexcept {
 
 void remove_creation_artifacts(const Paths& paths) noexcept {
     std::error_code ignored;
+    const auto suffixed = [](std::filesystem::path path, const char* suffix) {
+        // Append in the path's native encoding. Converting a UTF-8 Linux vault
+        // path to wstring can throw even under a UTF-8 process locale.
+        path += suffix;
+        return path;
+    };
     for (const auto& path : {
              paths.temporary_database,
-             std::filesystem::path(paths.temporary_database.wstring() + L"-journal"),
+             suffixed(paths.temporary_database, "-journal"),
              paths.ready,
-             std::filesystem::path(paths.ready.wstring() + L".write.tmp"),
+             suffixed(paths.ready, ".write.tmp"),
              paths.metadata,
-             std::filesystem::path(paths.metadata.wstring() + L".write.tmp"),
+             suffixed(paths.metadata, ".write.tmp"),
              paths.database,
-             std::filesystem::path(paths.database.wstring() + L"-journal")}) {
+             suffixed(paths.database, "-journal")}) {
         std::filesystem::remove(path, ignored);
         ignored.clear();
     }

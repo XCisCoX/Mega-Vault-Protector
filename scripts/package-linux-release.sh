@@ -16,6 +16,10 @@ stage="$(mktemp -d)"
 root="$stage/MegaVaultProtect"
 mkdir -p "$root/lib" "$root/plugins" "$root/gstreamer-1.0"
 
+if [[ -n "${MVP_SQLCIPHER_LICENSE:-}" ]]; then
+  mkdir -p "$root/licenses"
+  cp "$MVP_SQLCIPHER_LICENSE" "$root/licenses/SQLCipher-LICENSE.txt"
+fi
 cp -L "$bin" "$root/MegaVaultProtect"
 chmod +x "$root/MegaVaultProtect"
 
