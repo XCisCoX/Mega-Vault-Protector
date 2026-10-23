@@ -567,6 +567,10 @@ bool writeRgbPng(const std::filesystem::path& path, const int width, const int h
 } // namespace
 
 int main() {
+    // Unbuffered progress output: if a photo-stage check crashes, the last
+    // completed step must still reach CTest instead of vanishing with the
+    // buffer.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     TemporaryDirectory temp;
     using namespace videovault::core;
 
@@ -876,8 +880,12 @@ int main() {
         if (!thumb || thumb.value().bytes.empty()) {
             return fail("A 320x240 PNG must get a thumbnail at import.");
         }
+        std::printf("Photo block: constructing the player...\n");
+        std::fflush(stdout);
         videovault::app::PlayerWindow photo_player(
             photo_opened, photo_id.value(), QStringLiteral("photo.png"));
+        std::printf("Photo block: player constructed, waiting for the picture...\n");
+        std::fflush(stdout);
         spin(std::chrono::milliseconds(800));
         auto* surface = photo_player.findChild<videovault::app::VideoSurface*>();
         if (surface == nullptr) {
@@ -898,6 +906,8 @@ int main() {
         std::printf("PNG player open checks succeeded (%dx%d).\n",
             surface->frame().width(), surface->frame().height());
 
+        std::printf("Photo block: initial-still construction...\n");
+        std::fflush(stdout);
         auto initialStill = makeStillPlayer<videovault::app::PlayerWindow>(photo_opened, photo_id.value());
         if (!initialStill) {
             return fail("The constructor must support initial still-image mode without a video launch.");
@@ -917,6 +927,8 @@ int main() {
 
         // Occupy every global-pool slot. Photo opening must have its own
         // bounded executor, independent of imports and gallery work.
+        std::printf("Photo block: global-pool starvation check...\n");
+        std::fflush(stdout);
         auto* global = QThreadPool::globalInstance();
         const int oldLimit = global->maxThreadCount();
         global->setMaxThreadCount(1);
