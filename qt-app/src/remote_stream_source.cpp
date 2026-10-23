@@ -360,7 +360,10 @@ void RemoteStreamSource::accept_bytes(const char* data, qint64 size) {
             // Keep only the playhead window. Import-prefetch bytes behind/ahead
             // of it go directly to the tap, not into an unbounded sparse cache.
             const auto begin = std::max(offset, position_);
-            const auto stop = std::min(stream_offset_, position_ + limits_.buffer_bytes);
+            // Qt's qint64 is `long long` while int64_t is `long` on Linux, so the
+            // template arguments must be pinned to one type explicitly.
+            const auto stop = std::min<std::int64_t>(
+                stream_offset_, position_ + static_cast<std::int64_t>(limits_.buffer_bytes));
             if (stop > begin && !covers_locked(begin)) {
                 const auto room = limits_.buffer_bytes - buffered_total_;
                 const auto count = std::min<std::int64_t>(stop - begin, room);
