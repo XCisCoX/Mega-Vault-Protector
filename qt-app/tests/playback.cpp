@@ -155,7 +155,7 @@ bool writeFixture(const std::filesystem::path& path) {
     codec->width = kWidth;
     codec->height = kHeight;
     codec->time_base = AVRational{1, kFps};
-    codec->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec->pix_fmt = AV_PIX_FMT_YUVJ420P;
     codec->color_range = AVCOL_RANGE_JPEG;
     if (avcodec_open2(codec, encoder, nullptr) < 0) {
         return false;
@@ -163,10 +163,10 @@ bool writeFixture(const std::filesystem::path& path) {
 
     SwsContext* scaler = sws_getContext(
         kWidth, kHeight, AV_PIX_FMT_RGB24,
-        kWidth, kHeight, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
+        kWidth, kHeight, AV_PIX_FMT_YUVJ420P, SWS_BILINEAR,
         nullptr, nullptr, nullptr);
     AVFrame* yuv = av_frame_alloc();
-    yuv->format = AV_PIX_FMT_YUV420P;
+    yuv->format = AV_PIX_FMT_YUVJ420P;
     yuv->width = kWidth;
     yuv->height = kHeight;
     av_frame_get_buffer(yuv, 0);
@@ -185,7 +185,7 @@ bool writeFixture(const std::filesystem::path& path) {
     AVCodecParameters* vpar = video_stream->codecpar;
     vpar->codec_type = AVMEDIA_TYPE_VIDEO;
     vpar->codec_id = AV_CODEC_ID_MJPEG;
-    vpar->format = AV_PIX_FMT_YUV420P;
+    vpar->format = AV_PIX_FMT_YUVJ420P;
     vpar->width = kWidth;
     vpar->height = kHeight;
 
