@@ -3,7 +3,7 @@ name: Release
 # Publishes one GitHub Release with three downloads: Windows x64, Linux x64,
 # and Android arm64. The version is chosen here. Actions -> Release ->
 # Run workflow takes the next unused tag after the highest vX.Y.Z
-# (v2.0.3 becomes v2.0.4). A pushed v* tag builds that exact tag instead.
+# (v2.1.0 becomes v2.1.1). A pushed v* tag builds that exact tag instead.
 on:
   workflow_dispatch:
   push:
@@ -233,6 +233,9 @@ jobs:
           $staging = "$env:RUNNER_TEMP\package"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           Copy-Item $exe $staging
+          # Preserve the GPL notices for the bundled Telegram player assets.
+          New-Item -ItemType Directory -Force -Path "$staging\licenses" | Out-Null
+          Copy-Item -Recurse "$exeDir\licenses\telegram-player" "$staging\licenses"
           # Ship EVERY runtime DLL the linker resolved (staged next to the exe
           # by the POST_BUILD TARGET_RUNTIME_DLLS copy): Qt, argon2, libsodium,
           # sqlcipher, libcrypto (OpenSSL), and FFmpeg. The previous hand-

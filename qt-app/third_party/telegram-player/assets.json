@@ -1,0 +1,475 @@
+{
+  "reference_version": "7.3.1",
+  "source_repository": "https://github.com/telegramdesktop/tdesktop",
+  "source_directory": "Telegram/Resources/icons/player",
+  "assets": [
+    {
+      "path": "panel_close.png",
+      "sha256": "0800198e20a93c30a259ef2e8e2dcfcf75278d02635584f7f39febd3f83e503b"
+    },
+    {
+      "path": "panel_close@2x.png",
+      "sha256": "8703aa477efda64be2fcbbf9e8fc5353b877277d75585710d64c902a559bf89e"
+    },
+    {
+      "path": "panel_close@3x.png",
+      "sha256": "f2f8388a71217080d4bae7f1a151697ee566fbe634efa1001b87b025d0395a73"
+    },
+    {
+      "path": "player_backward.png",
+      "sha256": "12056d172c07c590186cb1780799ce9ac84660a60ab4e4c44676c5bb1c5c2fec"
+    },
+    {
+      "path": "player_backward@2x.png",
+      "sha256": "9e795b390c639d5b51caceee693534bfce5d48b47db85f870dd438a102a33453"
+    },
+    {
+      "path": "player_backward@3x.png",
+      "sha256": "c7f50328f7bead31da29276e5d27424f2c497457d98c4d3ee1d0014f2905ac9e"
+    },
+    {
+      "path": "player_check.png",
+      "sha256": "f3ad0e8dc04a96ccaf8beee8fe891d4ffb7b78fe6216f481d4dcd2c05168cd28"
+    },
+    {
+      "path": "player_check@2x.png",
+      "sha256": "226f5336c64fdbec1d170436e2285e48f86a5d0f6134d023b5753aa635eee58f"
+    },
+    {
+      "path": "player_check@3x.png",
+      "sha256": "9f0d2f5ef36ca3fd578d240122c38d3e74c7aefbcab667cbf8ef1b6bda629013"
+    },
+    {
+      "path": "player_forward.png",
+      "sha256": "4e6d396b4b3af290afe12b185d9f064ab2cd6afd3aecf357149600ff3837dc87"
+    },
+    {
+      "path": "player_forward@2x.png",
+      "sha256": "98f243dff96290422655d7ef5ee54e6ffa8283c9ed54be4e30af208377c3850c"
+    },
+    {
+      "path": "player_forward@3x.png",
+      "sha256": "a38c644c0aa60faee6876a55a0208152add9d88bcd074d8b052ebff587d39ebb"
+    },
+    {
+      "path": "player_fullscreen.png",
+      "sha256": "e9105c287ecac8bc1f7cb1c22fdcac84af5c0960dd92469859fb5f2d552ed32e"
+    },
+    {
+      "path": "player_fullscreen@2x.png",
+      "sha256": "4deae02072907eaca7a60fcd45379b9ec3aa89edcc93551fe59bceb128fa82d0"
+    },
+    {
+      "path": "player_fullscreen@3x.png",
+      "sha256": "1f7dc98c91fe7b5bf3c3dd88fb4c5228ce281195c1e1fe390e7e04ad36261544"
+    },
+    {
+      "path": "player_mini_full.png",
+      "sha256": "9d765d175d50e42873b1b576754bb9c353067a910e8cefdd89ad9db83adb850f"
+    },
+    {
+      "path": "player_mini_full@2x.png",
+      "sha256": "9ac3293ff1542f63bedf76addc28c8863c06dad86cab108ff7ff0e7d524d7dc2"
+    },
+    {
+      "path": "player_mini_full@3x.png",
+      "sha256": "312740f95706367329c88e77575d50744d2801261ef854042313597aa1bf51b3"
+    },
+    {
+      "path": "player_mini_half.png",
+      "sha256": "8682750760dbc873c5f5411ab220e2275923373eee76bea36e102def637304e4"
+    },
+    {
+      "path": "player_mini_half@2x.png",
+      "sha256": "c029bbb6af35438f2e1f570ed15f98b832cce2aec1be15bb5c91944c0c77124b"
+    },
+    {
+      "path": "player_mini_half@3x.png",
+      "sha256": "ada494b21de24d2e911c0de5532f4e8c4a78c881a6c5e523f45a41f6911d1914"
+    },
+    {
+      "path": "player_mini_off.png",
+      "sha256": "cc2781d66990d7bb5778aa3d5d48072e65e97ccd420d0bc8cc1d42b81e48a608"
+    },
+    {
+      "path": "player_mini_off@2x.png",
+      "sha256": "a6e3b89eefee8c487d59e4af64ac88e68e4965fbddcd112f74f927e95c90757b"
+    },
+    {
+      "path": "player_mini_off@3x.png",
+      "sha256": "4b13d50b42ad87f51b433a1418aa96e59bd58b960785c2c88bccff6625ab3721"
+    },
+    {
+      "path": "player_minimize.png",
+      "sha256": "2cf0cf949edfc530df5b7dae1da8f9d432078077f1ef147e21c336af3171ddd3"
+    },
+    {
+      "path": "player_minimize@2x.png",
+      "sha256": "88286c7de35e8709a912427d39bfb6dcba529198b1990eb683921596a73e67cc"
+    },
+    {
+      "path": "player_minimize@3x.png",
+      "sha256": "d5b24238b9400b55ff421bb54d765f63f4e73ebeb2c9395d9be6e85ebccffbe5"
+    },
+    {
+      "path": "player_more.png",
+      "sha256": "8547debc796cee97a66d2d9eb36e79b90541eff67a0af92978156a60f649491d"
+    },
+    {
+      "path": "player_more@2x.png",
+      "sha256": "1872f7ed4c79e19fa31d806b7a366e853f9308ee7d04834f10efd7a29965cc4e"
+    },
+    {
+      "path": "player_more@3x.png",
+      "sha256": "8adf09fb2bfe74b2d385e7913a96bb15d9713742411cb30cbee93b9a5bba1918"
+    },
+    {
+      "path": "player_order.png",
+      "sha256": "f1661d37a6604b7958ff610c0fc69a07e9dc5809210e330d2ce82cfe6d2295ec"
+    },
+    {
+      "path": "player_order@2x.png",
+      "sha256": "ba83e737cd21dccf9e9b9b121aa105008007812a2443b62bffe835ecbdeff3f1"
+    },
+    {
+      "path": "player_order@3x.png",
+      "sha256": "b89e0eb6c406c3fc07c93225893addc8d8eb8643e08a1dfe8e7c9b071100ccb5"
+    },
+    {
+      "path": "player_pause.png",
+      "sha256": "4310c3f6db89584b44af62ab3b7b827995e1f9749e9c3c660cffb046554c39ca"
+    },
+    {
+      "path": "player_pause@2x.png",
+      "sha256": "bee5d96376f53547f85458e147ddf006672bf36c709fb4535cbb306b079f23de"
+    },
+    {
+      "path": "player_pause@3x.png",
+      "sha256": "c45e0952bdffcdd16a9bfb6609119e65ab498cdd614ad8f756cc207410b77177"
+    },
+    {
+      "path": "player_pause_big.png",
+      "sha256": "6f0e33dd02c00e8d4d6a3f27495f401ba9189861cbf2ae9b6aec8ec54ada364e"
+    },
+    {
+      "path": "player_pause_big@2x.png",
+      "sha256": "00220ab1d30aa029f91618505683a52475ba12b878b7c34b319bfe222085401d"
+    },
+    {
+      "path": "player_pause_big@3x.png",
+      "sha256": "6a516e459b61ea599287ce93deabe02db8683da716481dae262cee6f73085cd6"
+    },
+    {
+      "path": "player_pip.png",
+      "sha256": "d9bdcde2e1b3f05fbbc4f65f766dfcf5989dae49ab480d8512b18790b794aed1"
+    },
+    {
+      "path": "player_pip@2x.png",
+      "sha256": "2a55338368c7f47f74760a312dbaa00298edb96ea0591b5bce018ece95c78014"
+    },
+    {
+      "path": "player_pip@3x.png",
+      "sha256": "ab176ba5734b3842721bea23a7a4b7cb5d9c9a917da346a7e380058b305a0c5f"
+    },
+    {
+      "path": "player_pip_close.png",
+      "sha256": "fa3e698c4e729e258825bce3bc38785f39cea14837f9bf377978b3fcf44ab67f"
+    },
+    {
+      "path": "player_pip_close@2x.png",
+      "sha256": "4bfd6869039ceaa9f73ff3d2c74dd9d7cadc71223e15a03de899a87fec0e35ec"
+    },
+    {
+      "path": "player_pip_close@3x.png",
+      "sha256": "6a091191003a55c246fb6190606b779d9eb5c72650df774bfd0d821ec153f685"
+    },
+    {
+      "path": "player_pip_enlarge.png",
+      "sha256": "a404ddcbd3d2c3249efeeadabfbc5aeab6e96e68364344f12f1028b10cd4be30"
+    },
+    {
+      "path": "player_pip_enlarge@2x.png",
+      "sha256": "e97ae89c5161391f3e272a4ddfaf5808896d137496aa8ec2d7258f5e2b8b67d8"
+    },
+    {
+      "path": "player_pip_enlarge@3x.png",
+      "sha256": "84968640646ac75732a5d5a235250bfed01f2c1d4820cc03a4f9313997ab15ad"
+    },
+    {
+      "path": "player_pip_pause.png",
+      "sha256": "8d3d79bf6804cd9d8007a5b097ea1f82bf964e8f1e80f7c38559cd61907259c3"
+    },
+    {
+      "path": "player_pip_pause@2x.png",
+      "sha256": "503885ab1fb0ce0c5cd963fc5e78a676fe139e1aa1410140a56b302ba0a9aa6e"
+    },
+    {
+      "path": "player_pip_pause@3x.png",
+      "sha256": "45ce5c74bfaf4c0c1ba564a88980263c949f293a2483ea68ee5646bcde52b8a7"
+    },
+    {
+      "path": "player_pip_play.png",
+      "sha256": "82d40181fcde47d5bd97c1965187a534ec3e3e6ff49d8a694e1dad4f9970f7eb"
+    },
+    {
+      "path": "player_pip_play@2x.png",
+      "sha256": "f500082b582cc4cb73aefc415722f88fbd82ddc0079cd8fe968420a12692b27e"
+    },
+    {
+      "path": "player_pip_play@3x.png",
+      "sha256": "eff5de51fbc572a65c0fd75e2b35665679a96bd5a670d34d218ddb2b2fa0661a"
+    },
+    {
+      "path": "player_play.png",
+      "sha256": "943c5ca5787e78b6d19fb232592212e13b05c9ec3ba09f09b3fcfcda22b0de11"
+    },
+    {
+      "path": "player_play@2x.png",
+      "sha256": "612346d9cca1fc2c3fd774c5ef98a23c43d0763283cb6d127b8dcf0a414d2232"
+    },
+    {
+      "path": "player_play@3x.png",
+      "sha256": "89c4a15d6479bab6ad385d2209e7864c5884b6be3a5d2464581cbe130c614a6a"
+    },
+    {
+      "path": "player_play_big.png",
+      "sha256": "02ad0ff5477fd4999d6132e54bb42e0253b9e9076d8481ae28727117dc90e3ab"
+    },
+    {
+      "path": "player_play_big@2x.png",
+      "sha256": "0450e764fbaefe7c9822ca72247aba2db20e28ca5640edf3ca0a297674d044d2"
+    },
+    {
+      "path": "player_play_big@3x.png",
+      "sha256": "b8ebe0f2ac6b273c3c99954619eb8a4302e46f4aacaa923bcc1d2dc49c4d81e9"
+    },
+    {
+      "path": "player_repeat.png",
+      "sha256": "3b995ef2e0757524c514f7f60c6b18a5546f6640e5b742bc22727f21fc68e7b4"
+    },
+    {
+      "path": "player_repeat@2x.png",
+      "sha256": "c99f53371c21defaa4c6a025b1868b6f9fc5f63fd1f7e2428bded5032089f5c4"
+    },
+    {
+      "path": "player_repeat@3x.png",
+      "sha256": "1bd1843f25e108094cf34c3656094250ed360e9ec35cbcd5d957f13603bf68f5"
+    },
+    {
+      "path": "player_repeat_single.png",
+      "sha256": "851e593b7d7922458c76d70caf10b7705f739bbee27efd94f5fcca2b1dd329fc"
+    },
+    {
+      "path": "player_repeat_single@2x.png",
+      "sha256": "5ee0f084494b21d7fff07d80b56e9ee803f3aedc92b6e184c08531697bdc9085"
+    },
+    {
+      "path": "player_repeat_single@3x.png",
+      "sha256": "cc488dd59ef328e0e3db3d32b474593e7f73ffc1689e0365b1e197f8848db7e6"
+    },
+    {
+      "path": "player_settings.png",
+      "sha256": "e0a80fe4622705fefd1a0d849c77c09470815c38c794db80d8e9167afcf25413"
+    },
+    {
+      "path": "player_settings@2x.png",
+      "sha256": "b9d7f5e05340909c852a97ea1c720a63ac35f4b09c9e94a59655c0e3f376dc06"
+    },
+    {
+      "path": "player_settings@3x.png",
+      "sha256": "55a2363f98aa117bc04ef8b806331aa1c86306a0fb4302e570b0c5810c1ccc7c"
+    },
+    {
+      "path": "player_shuffle.png",
+      "sha256": "3c808fc76c9ed9528508610d514fbd4168376adc358d48b7f0b762ea8bd4f69d"
+    },
+    {
+      "path": "player_shuffle@2x.png",
+      "sha256": "0e98fbe1995eeaeb4ff6d612ad627f75379b86f87c1fe48e2b4b36b7cb614d50"
+    },
+    {
+      "path": "player_shuffle@3x.png",
+      "sha256": "ec1778ab03917f935f5a995b3ea4adc35d214adedf1dfdeed6789d8f4b6d8a73"
+    },
+    {
+      "path": "player_speed.png",
+      "sha256": "2a700c943833c540e937a364bf07d4a26eca7ca91e7a7f9a0278d9356107326e"
+    },
+    {
+      "path": "player_speed@2x.png",
+      "sha256": "54656cc051aa1d491c952edc328f65ac79b9ce8fcf03cbfb1a7f2b6cefca5bc2"
+    },
+    {
+      "path": "player_speed@3x.png",
+      "sha256": "2651bfa819032d6c3b3bbb06549249cdf6bf25e1413394c90f376593a39e3e32"
+    },
+    {
+      "path": "player_volume_off.png",
+      "sha256": "4832d2ed3e125b81674f1ca8eeedd4ea9ad300014929406695248890375826b8"
+    },
+    {
+      "path": "player_volume_off@2x.png",
+      "sha256": "cbc2a7f39ca67a3a5f00f5abe917f60422af67d5ec9c38118316706a259fadc4"
+    },
+    {
+      "path": "player_volume_off@3x.png",
+      "sha256": "1d2208ac6772a0e7e9867a6ac265dbb540f739033e1be830c18a5b593ca3f249"
+    },
+    {
+      "path": "player_volume_on.png",
+      "sha256": "c94047cbb32a1c5bc259ac3bb520fdeca1c5f07a5fcbefe88063f2f31146492f"
+    },
+    {
+      "path": "player_volume_on@2x.png",
+      "sha256": "fee78fc1ab005885e1cef936d4f1b2bf24bc1210318cd2613e1690cc3c4e3279"
+    },
+    {
+      "path": "player_volume_on@3x.png",
+      "sha256": "b5daec53f2e1efe059ac4a10622d0d5df966d3cd13e6a000ff12987a9d580a4b"
+    },
+    {
+      "path": "player_volume_small.png",
+      "sha256": "25d3cd9f015927385038972bf1399e43eeaf51a5afd9d66cca7c9cd9b74aa064"
+    },
+    {
+      "path": "player_volume_small@2x.png",
+      "sha256": "81949033befe01a92607cdd7d4211a38dbf20976e6d9cd408d298850c9579775"
+    },
+    {
+      "path": "player_volume_small@3x.png",
+      "sha256": "17dec116b05768e227871473718944373c71e1bbd33f31cdc62b61a1ee6fc8d0"
+    },
+    {
+      "path": "playlist_cancel.png",
+      "sha256": "d2db1f936c16c32960217cfe4316125884f33a64b1227ac3d358f248ddba9521"
+    },
+    {
+      "path": "playlist_cancel@2x.png",
+      "sha256": "15cbe8888d0ba9cb74546422688c361155b94c9c662af26964026e0566e2e8ea"
+    },
+    {
+      "path": "playlist_cancel@3x.png",
+      "sha256": "0c6fb585714813acb9d9dee3f71a5db2f00d0b742f264bcf56b948526d43df00"
+    },
+    {
+      "path": "playlist_download.png",
+      "sha256": "f0e445fbd4078668b39878cd00ea67f9dc94fdba9f326679dabc398816030c52"
+    },
+    {
+      "path": "playlist_download@2x.png",
+      "sha256": "599c132e502e293e43db53f3cd2e996eb724685a35b60aa2d9fed74ebccf3e71"
+    },
+    {
+      "path": "playlist_download@3x.png",
+      "sha256": "36a46aa10e869c0ab6a83620df3e60fa5bd7befedb998e6ddf10b486980a7f8c"
+    },
+    {
+      "path": "playlist_pause.png",
+      "sha256": "8e120555678c3a1bf7006034f1e80f37fb0a6307d6a42d0f7ecbebabe04c350b"
+    },
+    {
+      "path": "playlist_pause@2x.png",
+      "sha256": "bd07b0dbea62e6cedfa4b4d94616555e54f8cee90459bfbdc4b5bca9896f1833"
+    },
+    {
+      "path": "playlist_pause@3x.png",
+      "sha256": "9de625359534eb2d9a225d370c16c4bd9bef20d034c8fcccc37e0b5d31848c12"
+    },
+    {
+      "path": "playlist_play.png",
+      "sha256": "81f589839ed4dac9039c4f7bd85d1bdeaaa1b43a8d4b9a95a212826764768bd5"
+    },
+    {
+      "path": "playlist_play@2x.png",
+      "sha256": "b50251c46d727a90b450e18b48928f9bf7627e3997808571c8ee7710bdbdfdbd"
+    },
+    {
+      "path": "playlist_play@3x.png",
+      "sha256": "e1c4b04408ff9f2b616cefea4794e20131d48c2c10b5612a5c60f323f26908ad"
+    },
+    {
+      "path": "playlist_shadow.png",
+      "sha256": "eb9119dc804ae5e46492285f273bc65904e3bf8f84a799e905569c5c0c7680cf"
+    },
+    {
+      "path": "playlist_shadow@2x.png",
+      "sha256": "79d895cdee0771951ea7f7c6eefd832eda25df677027b078a8f8897dd441fd55"
+    },
+    {
+      "path": "playlist_shadow@3x.png",
+      "sha256": "9fe6e4b5ff0cdf2684bb871c9cdaf18be415e375572000c556090df7318cfcd0"
+    },
+    {
+      "path": "speed/audiospeed_menu_0.5.png",
+      "sha256": "2491645546b38d6b3f52b4192631d98402a0c9e8d25a6ce67b7047ab6a7e44df"
+    },
+    {
+      "path": "speed/audiospeed_menu_0.5@2x.png",
+      "sha256": "5140244125c35d81f4553d6af0f804054c17ccb17e92d608cd0365afe9131f71"
+    },
+    {
+      "path": "speed/audiospeed_menu_0.5@3x.png",
+      "sha256": "c4ee9eb174eb7d77693f3cb56d8beef2d5856d389421bc6784089f497b85a208"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.0.png",
+      "sha256": "25ed68fca2efaac91f1e45c295788e2eec14fb586a09653050e6c7ade9f55554"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.0@2x.png",
+      "sha256": "837c7ac969b207186781f4a8f8f2d647a2bd553b9df34049292b6e8263e9f33d"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.0@3x.png",
+      "sha256": "81a3117673c666d206bda8516206957d6ef1f62852b82d67cadb92393fdec67a"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.2.png",
+      "sha256": "de750f64b680b5b6128d820768e4af3a5137999cd3a1754ca23d4821689cbf85"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.2@2x.png",
+      "sha256": "6c37d981081d1454880d33a63c74010dd63a371c004b48722a74e867fac3b745"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.2@3x.png",
+      "sha256": "da904f1e7869dc166b95bd3a170e95e994a09988fa876c9e3432e2bd85e3eec2"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.5.png",
+      "sha256": "50c0bd94f9a1f883517c87e15fef8bc4ce74454c7508d20b2687d26d75d53c3a"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.5@2x.png",
+      "sha256": "b7adb0a516e25b54d40e67b29019f0b75c278868bfb2dd57f3c815203fa5f86a"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.5@3x.png",
+      "sha256": "9952be46407337159c89ee001de22e2baed58d5f622995927109923eeca44f0c"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.7.png",
+      "sha256": "d58ac05d4987cdd4b60f71963a098d8f966ca001364dad64d51551ae7b3166ac"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.7@2x.png",
+      "sha256": "0e9137faf14a6e36b1d8b70d28c0113e729cc862e9f7058cc6890af0ef223bed"
+    },
+    {
+      "path": "speed/audiospeed_menu_1.7@3x.png",
+      "sha256": "3a478b51d00cea024309c8e89edd02b704a359adeec4e714f0da1db9c6b31c0f"
+    },
+    {
+      "path": "speed/audiospeed_menu_2.0.png",
+      "sha256": "305ab69cc376a8be6d9e2d75692df450da734e66f867f288a7b92219303d4594"
+    },
+    {
+      "path": "speed/audiospeed_menu_2.0@2x.png",
+      "sha256": "ef909d928223b364d1dd6469638d03f20a8f49b2a456f14ccd389add062a86df"
+    },
+    {
+      "path": "speed/audiospeed_menu_2.0@3x.png",
+      "sha256": "96d42e7082f93cdc35c2f6a7875e49f9bb39ed23759ea5a41faf2df7cae1063e"
+    }
+  ]
+}

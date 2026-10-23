@@ -2,7 +2,6 @@
 #include "videovault/app/soundcloud_transport.hpp"
 #include "videovault/app/soundcloud_hls_source.hpp"
 #include "videovault/app/music_resolver.hpp"
-#include "videovault/app/music_window.hpp"
 #include "videovault/app/plugin_audio.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/remote_stream_source.hpp"
@@ -268,8 +267,10 @@ void SoundCloudPage::playRow(QListWidgetItem* item) {
     resolveTrack(id);
 }
 void SoundCloudPage::playLocalCopy(qint64 id, const QString& title) {
-    if (!localPlayer_) { localPlayer_ = MusicWindow::shared(this); localPlayer_->setParent(this); if (auto* column = qobject_cast<QVBoxLayout*>(layout())) column->addWidget(localPlayer_); }
-    localPlayer_->playQueue(vault_,std::vector<MusicTrack>{{id,title}},0); nowPlaying_->setText(title + tr(" (offline)")); status_->setText(tr("Playing the encrypted vault copy.")); refreshImportButton();
+    emit localPlaybackRequested(id, title);
+    nowPlaying_->setText(title + tr(" (offline)"));
+    status_->setText(tr("Playing the encrypted vault copy in the library player."));
+    refreshImportButton();
 }
 void SoundCloudPage::resolveTrack(const QString& id) {
     playCancel_ = std::make_shared<std::atomic<bool>>(false); status_->setText(tr("Checking SoundCloud playback permissions…"));
@@ -312,8 +313,6 @@ void SoundCloudPage::stopPlayback() {
         delete open;
     }
     if (stream_) { stream_->deleteLater(); stream_ = nullptr; } hls_.reset();
-    // The bar is process-wide: closing it stops playback without destroying it.
-    if (localPlayer_) { localPlayer_->close(); localPlayer_ = nullptr; }
     playingId_.clear(); importedId_.clear(); playing_ = {}; playingHls_ = false;
     seek_->setRange(0,0); seek_->setEnabled(true); clock_->setText("0:00 / 0:00"); nowPlaying_->clear(); refreshImportButton();
 }

@@ -94,7 +94,7 @@ add_library(VideoVaultCore STATIC
 add_library(VideoVault::Core ALIAS VideoVaultCore)
 
 if(NOT MVP_VERSION)
-    set(MVP_VERSION "2.0.3")
+    set(MVP_VERSION "2.1.0")
 endif()
 target_compile_definitions(VideoVaultCore PRIVATE MVP_VERSION_STRING="${MVP_VERSION}")
 

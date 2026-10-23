@@ -96,6 +96,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/peer_browser.hpp
     resources/resources.qrc
     resources/icons.qrc
+    resources/telegram_player.qrc
 )
 
 add_library(MegaVaultNetwork STATIC src/proxy_settings.cpp)
@@ -231,6 +232,11 @@ if(MSVC)
 endif()
 
 mvp_copy_runtime_dlls(VideoVaultApp)
+# Keep the source attribution and complete license next to local/release builds.
+add_custom_command(TARGET VideoVaultApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/telegram-player"
+        "$<TARGET_FILE_DIR:VideoVaultApp>/licenses/telegram-player")
 
 option(MVP_BUILD_LEGACY_CLOUD "Build deprecated remote vault-password service (NOT sync v2 E2EE)" OFF)
 if(NOT ANDROID AND MVP_BUILD_LEGACY_CLOUD)
@@ -272,6 +278,69 @@ endif()
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
     enable_testing()
+    add_executable(VideoVaultTelegramIconTests tests/telegram_player_icons.cpp resources/telegram_player.qrc)
+    target_include_directories(VideoVaultTelegramIconTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultTelegramIconTests PRIVATE Qt5::Widgets)
+    target_compile_features(VideoVaultTelegramIconTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultTelegramIconTests PROPERTIES AUTORCC ON FOLDER "Tests")
+    add_test(NAME telegram_player_icons COMMAND VideoVaultTelegramIconTests)
+    set_tests_properties(telegram_player_icons PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultTelegramIconTests)
+
+    add_executable(VideoVaultTelegramPhotoChromeTests tests/telegram_photo_chrome.cpp)
+    target_include_directories(VideoVaultTelegramPhotoChromeTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultTelegramPhotoChromeTests PRIVATE Qt5::Core)
+    target_compile_features(VideoVaultTelegramPhotoChromeTests PRIVATE cxx_std_20)
+    add_test(NAME telegram_photo_chrome COMMAND VideoVaultTelegramPhotoChromeTests)
+    set_tests_properties(telegram_photo_chrome PROPERTIES TIMEOUT 30)
+
+    add_executable(VideoVaultVideoPacingTests tests/video_pacing.cpp)
+    target_include_directories(VideoVaultVideoPacingTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(VideoVaultVideoPacingTests PRIVATE cxx_std_20)
+    add_test(NAME video_av_timing COMMAND VideoVaultVideoPacingTests)
+    set_tests_properties(video_av_timing PROPERTIES TIMEOUT 30)
+
+    add_executable(VideoVaultTelegramVideoChromeTests tests/telegram_video_chrome.cpp)
+    target_include_directories(VideoVaultTelegramVideoChromeTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultTelegramVideoChromeTests PRIVATE Qt5::Widgets)
+    target_compile_features(VideoVaultTelegramVideoChromeTests PRIVATE cxx_std_20)
+    add_test(NAME telegram_video_chrome COMMAND VideoVaultTelegramVideoChromeTests)
+    set_tests_properties(telegram_video_chrome PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultTelegramVideoChromeTests)
+
+    foreach(_chrome_kind Music Video)
+        if(_chrome_kind STREQUAL "Music")
+            set(_chrome_test tests/telegram_music_ui.cpp)
+            set(_chrome_name telegram_music_ui)
+        else()
+            set(_chrome_test tests/telegram_video_window.cpp)
+            set(_chrome_name telegram_video_window)
+        endif()
+        set(_chrome_target VideoVaultTelegram${_chrome_kind}UiTests)
+        add_executable(${_chrome_target} ${_chrome_test}
+            src/music_window.cpp src/player_window.cpp src/media_decoder.cpp src/local_audio_pipeline.cpp
+            src/icons.cpp src/theme.cpp resources/icons.qrc resources/telegram_player.qrc
+            include/videovault/app/music_window.hpp include/videovault/app/player_window.hpp)
+        target_include_directories(${_chrome_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(${_chrome_target} PRIVATE VideoVault::Core Qt5::Widgets
+            Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
+        if(WIN32)
+            target_include_directories(${_chrome_target} PRIVATE "${MVP_VCPKG_PREFIX}/include" "${_mvp_cppwinrt}")
+            target_link_libraries(${_chrome_target} PRIVATE windowsapp)
+        elseif(ANDROID)
+            target_include_directories(${_chrome_target} PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+        endif()
+        target_compile_features(${_chrome_target} PRIVATE cxx_std_20)
+        set_target_properties(${_chrome_target} PROPERTIES AUTOMOC ON AUTORCC ON FOLDER "Tests")
+        add_test(NAME ${_chrome_name} COMMAND ${_chrome_target})
+        set_tests_properties(${_chrome_name} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+        mvp_copy_runtime_dlls(${_chrome_target})
+    endforeach()
+
+    add_executable(VideoVaultPlaylistModelTests tests/playlist_model.cpp)
+    target_include_directories(VideoVaultPlaylistModelTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(VideoVaultPlaylistModelTests PRIVATE cxx_std_20)
+    add_test(NAME music_playlist_model COMMAND VideoVaultPlaylistModelTests)
     # QCoreApplication-only tests. Compile the real MusicWindow translation unit
     # too, but never instantiate widgets or open an audio device in this test.
     add_executable(VideoVaultLocalAudioTests
@@ -292,6 +361,22 @@ if(MVP_BUILD_TESTS)
     add_test(NAME local_audio_pipeline COMMAND VideoVaultLocalAudioTests)
     set_tests_properties(local_audio_pipeline PROPERTIES TIMEOUT 90)
     mvp_copy_runtime_dlls(VideoVaultLocalAudioTests)
+    # Real Ogg/Opus generated in RAM, decoded through the encrypted music path.
+    add_executable(VideoVaultOpusAudioTests tests/opus_audio.cpp
+        src/local_audio_pipeline.cpp src/media_decoder.cpp)
+    target_include_directories(VideoVaultOpusAudioTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultOpusAudioTests PRIVATE VideoVault::Core Qt5::Core Qt5::Gui ${MVP_FFMPEG_LIBS})
+    if(WIN32)
+        target_include_directories(VideoVaultOpusAudioTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+    elseif(ANDROID)
+        target_include_directories(VideoVaultOpusAudioTests PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    endif()
+    target_compile_features(VideoVaultOpusAudioTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultOpusAudioTests PROPERTIES FOLDER "Tests")
+    add_test(NAME opus_audio COMMAND VideoVaultOpusAudioTests)
+    set_tests_properties(opus_audio PROPERTIES TIMEOUT 180)
+    mvp_copy_runtime_dlls(VideoVaultOpusAudioTests)
+
     add_executable(VideoVaultProxyTests tests/proxy_settings.cpp src/app_update.cpp)
     target_link_libraries(VideoVaultProxyTests PRIVATE MegaVaultNetwork MegaVaultSync MegaVaultPlugins)
     if(WIN32 OR MINGW)
@@ -340,6 +425,18 @@ if(MVP_BUILD_TESTS)
     target_include_directories(VideoVaultGalleryPerformanceTests PRIVATE ${_gallery_includes})
     target_compile_features(VideoVaultGalleryPerformanceTests PRIVATE cxx_std_20)
     set_target_properties(VideoVaultGalleryPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON)
+
+    add_executable(VideoVaultVideoNavigationTests tests/telegram_video_navigation.cpp ${_gallery_sources})
+    target_link_libraries(VideoVaultVideoNavigationTests PRIVATE ${_gallery_links})
+    target_include_directories(VideoVaultVideoNavigationTests PRIVATE ${_gallery_includes})
+    target_compile_features(VideoVaultVideoNavigationTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultVideoNavigationTests PROPERTIES AUTOMOC ON AUTORCC ON FOLDER "Tests")
+    if(WIN32 OR MINGW)
+        target_link_libraries(VideoVaultVideoNavigationTests PRIVATE crypt32 secur32 winhttp dwmapi)
+    endif()
+    add_test(NAME video_window_navigation COMMAND VideoVaultVideoNavigationTests)
+    set_tests_properties(video_window_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+    mvp_copy_runtime_dlls(VideoVaultVideoNavigationTests)
     add_test(NAME library_commands COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(library_commands PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_LIBRARY_COMMANDS_TEST=1" TIMEOUT 30)
@@ -396,6 +493,8 @@ if(MVP_BUILD_TESTS)
     add_test(NAME progressive_stream COMMAND VideoVaultProgressiveStreamTests)
     set_tests_properties(progressive_stream PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 180)
     mvp_copy_runtime_dlls(VideoVaultProgressiveStreamTests)
+    add_test(NAME music_footer COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(music_footer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_MUSIC_FOOTER_TEST=1" TIMEOUT 60)
     add_test(NAME plugin_navigation COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(plugin_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_PLUGIN_NAVIGATION_TEST=1" TIMEOUT 60)
     add_test(NAME plugin_folder COMMAND VideoVaultGalleryPerformanceTests)
@@ -473,6 +572,7 @@ if(MVP_BUILD_TESTS)
         src/player_window.cpp
         src/icons.cpp
         resources/icons.qrc
+        resources/telegram_player.qrc
         include/videovault/app/media_decoder.hpp
         include/videovault/app/player_window.hpp
     )

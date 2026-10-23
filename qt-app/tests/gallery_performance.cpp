@@ -5,6 +5,13 @@
 #include "videovault/app/theme.hpp"
 #include "videovault/app/tag_filter_button.hpp"
 #include "videovault/app/music_library.hpp"
+#include "videovault/app/music_window.hpp"
+#include <QByteArray>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QPointer>
+#include <cstdint>
+#include <vector>
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/record_window.hpp"
@@ -1055,6 +1062,75 @@ struct GalleryPerformanceTestAccess {
         if (!created) return 2;
         MainWindow window;
         window.vault_ = std::make_shared<core::Vault>(std::move(created.value()));
+        if (qEnvironmentVariableIsSet("MVP_MUSIC_FOOTER_TEST")) {
+            // One second of actual silent, stereo 48 kHz PCM in a WAV container.
+            // Pausing before processing events prevents opening audible output.
+            QByteArray wav(44 + 48000 * 4, '\0');
+            const auto word = [&](int at, std::uint32_t value, int bytes) {
+                for (int i = 0; i < bytes; ++i) wav[at + i] = char(value >> (8 * i));
+            };
+            wav.replace(0, 4, "RIFF"); word(4, wav.size() - 8, 4);
+            wav.replace(8, 8, "WAVEfmt "); word(16, 16, 4);
+            word(20, 1, 2); word(22, 2, 2); word(24, 48000, 4);
+            word(28, 192000, 4); word(32, 4, 2); word(34, 16, 2);
+            wav.replace(36, 4, "data"); word(40, wav.size() - 44, 4);
+            const auto* bytes = reinterpret_cast<const unsigned char*>(wav.constData());
+            auto imported = window.vault_->import_bytes(
+                std::vector<unsigned char>(bytes, bytes + wav.size()), "Navigation.wav");
+            if (!imported) return 80;
+            window.pages_->setCurrentIndex(2);
+            window.show();
+            QApplication::processEvents();
+            window.beginMusic(imported.value());
+            QPointer<MusicWindow> bar = window.musicWindow_;
+            if (!bar) return 81;
+            bar->pauseForVideo();
+            QApplication::processEvents();
+            if (bar->queueSize() != 1 || !bar->isVisible()
+                || bar->parentWidget() != window.centralWidget()
+                || window.contentStack_->isAncestorOf(bar)) return 82;
+            for (int visit = 0; visit < 3; ++visit) {
+                window.openMusicLibrary();
+                QApplication::processEvents();
+                if (window.musicWindow_ != bar || MusicWindow::instance() != bar
+                    || !bar->isVisible() || bar->queueSize() != 1 || bar->isPlaying()
+                    || bar->parentWidget() != window.centralWidget()) return 83;
+                window.musicLibrary_->closed();
+                QApplication::processEvents();
+                if (window.contentStack_->currentWidget() != window.pages_
+                    || !bar->isVisible() || bar->queueSize() != 1) return 84;
+            }
+            // Resuming the silent fixture is also preserved by navigation;
+            // changing pages must not pause a track that was actually playing.
+            QKeyEvent resume(QEvent::KeyPress, Qt::Key_MediaPlay, Qt::NoModifier);
+            QApplication::sendEvent(bar, &resume);
+            if (!bar->isPlaying()) return 89;
+            window.openMusicLibrary();
+            QApplication::processEvents();
+            window.musicLibrary_->closed();
+            QApplication::processEvents();
+            if (window.musicWindow_ != bar || !bar->isVisible() || !bar->isPlaying()) return 90;
+            bar->pauseForVideo();
+            auto* label = bar->findChild<QLabel*>("musicSongLabel");
+            if (!label || label->width() <= 0) return 85;
+            QMouseEvent click(QEvent::MouseButtonPress, QPointF(label->geometry().center()),
+                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &click);
+            QApplication::processEvents();
+            QWidget* floating = nullptr;
+            for (auto* widget : QApplication::topLevelWidgets()) {
+                if (widget->objectName() == "musicFloatingPlayer") floating = widget;
+            }
+            if (!floating || !floating->isVisible()) return 86;
+            if (bar->findChild<QWidget*>("musicExpandedQueue") != nullptr) return 87;
+            window.interactiveLock_ = false;
+            window.lockVault();
+            QApplication::processEvents();
+            if (window.vault_ || !bar || bar->isVisible() || bar->queueSize() != 0
+                || floating->isVisible()) return 88;
+            std::printf("PASS persistent footer, one queue across Music/library, floating popup click and hard lock\n");
+            return 0;
+        }
         if (qEnvironmentVariableIsSet("MVP_PLUGIN_NAVIGATION_TEST")) {
             window.pages_->setCurrentIndex(2); window.show(); QApplication::processEvents();
             window.openSettings(); QApplication::processEvents();
@@ -1065,31 +1141,29 @@ struct GalleryPerformanceTestAccess {
             auto* music = window.findChild<QPushButton*>("musicSection");
             if (!music || !music->isVisible()) { std::fprintf(stderr,"FAIL: Music library entry absent\n"); return 42; }
             music->click(); QApplication::processEvents();
-            // The Music entry is the vault's own library; provider search is a
-            // button inside it, and only while the provider is enabled.
+            // Provider discovery stays in Extensions. Music is a local library
+            // even when providers are enabled, with no Monochrome shortcut.
             if (window.contentStack_->currentWidget()->objectName() != "musicLibraryPage") {
                 std::fprintf(stderr, "FAIL: Music opens %s, not the library page\n",
                     qPrintable(window.contentStack_->currentWidget()->objectName()));
                 return 43;
             }
-            auto* provider = window.findChild<QPushButton*>("musicProviderButton");
-            if (provider == nullptr || !provider->isVisible()) {
-                std::fprintf(stderr, "FAIL: enabled provider is not offered from the library\n");
+            if (window.musicLibrary_->findChild<QPushButton*>("musicProviderButton") != nullptr) {
+                std::fprintf(stderr, "FAIL: provider shortcut is still in Music\n");
                 return 43;
             }
-            provider->click(); QApplication::processEvents();
+            // Provider pages remain reachable through the host/extension entry.
+            window.openPluginMusic(); QApplication::processEvents();
             if (window.contentStack_->currentWidget()->objectName() != "musicPluginPage") return 44;
             window.findChild<QPushButton*>("musicBack")->click(); QApplication::processEvents();
             if (window.contentStack_->currentWidget()->objectName() != "musicLibraryPage") return 45;
             window.openSettings(); QApplication::processEvents();
             enable=window.settingsPage_->findChild<QCheckBox*>("pluginEnable_org.megavault.monochrome"); enable->setChecked(false);
             window.settingsPage_->reject(); QApplication::processEvents();
-            // The library entry stays (it lists local audio); only the provider
-            // button disappears.
+            // The local Music entry is independent of extension availability.
             if (!music->isVisible()) { std::fprintf(stderr, "FAIL: music entry hidden after disabling provider\n"); return 51; }
-            provider = window.musicLibrary_->findChild<QPushButton*>("musicProviderButton");
-            if (provider != nullptr && provider->isVisible()) {
-                std::fprintf(stderr, "FAIL: provider button survived disabling the provider\n");
+            if (window.musicLibrary_->findChild<QPushButton*>("musicProviderButton") != nullptr) {
+                std::fprintf(stderr, "FAIL: provider button survived in Music\n");
                 return 46;
             }
             window.musicLibrary_->closed();

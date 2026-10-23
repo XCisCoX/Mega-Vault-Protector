@@ -139,7 +139,7 @@ bool winHttpGet(const QUrl &url, const qint64 limit,
     WinHttpSetOption(request.handle, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy,
                      sizeof(redirectPolicy));
     const QString headerText =
-        QStringLiteral("User-Agent: MegaVaultProtect/2.0.3 (music plugin)") + QChar(13) +
+        QStringLiteral("User-Agent: MegaVaultProtect/2.1.0 (music plugin)") + QChar(13) +
         QChar(10) + QStringLiteral("Accept: application/json, audio/*") + QChar(13) + QChar(10);
     WinHttpAddRequestHeaders(request.handle, reinterpret_cast<LPCWSTR>(headerText.utf16()),
                              static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD);
@@ -1051,7 +1051,7 @@ void MusicPluginPage::request(QUrl url, qint64 limit, std::function<void(QByteAr
 #endif
             configureNetworkProxy(network_);
             QNetworkRequest req(url);
-            req.setRawHeader("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)");
+            req.setRawHeader("User-Agent", "MegaVaultProtect/2.1.0 (music plugin)");
             req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
             req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
             req.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);

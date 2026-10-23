@@ -39,9 +39,9 @@ android {
     // is not installed and cannot be downloaded on this network.
     ndkVersion = "30.0.14904198"
 
-    val mvpVersion = (System.getenv("MVP_VERSION") ?: "").ifBlank { "2.0.3" }
+    val mvpVersion = (System.getenv("MVP_VERSION") ?: "").ifBlank { "2.1.0" }
     val mvpMatch = Regex("""(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?""").find(mvpVersion)
-        ?: error("MVP_VERSION must look like 2.0.4 or 2.0.4-beta.1, got '$mvpVersion'")
+        ?: error("MVP_VERSION must look like 2.1.1 or 2.1.1-beta.1, got '$mvpVersion'")
     val mvpMajor = mvpMatch.groupValues[1].toInt()
     val mvpMinor = mvpMatch.groupValues[2].toInt()
     val mvpPatch = mvpMatch.groupValues[3].toInt()

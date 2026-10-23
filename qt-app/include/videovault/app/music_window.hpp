@@ -20,8 +20,6 @@ class QCloseEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
-class QListWidget;
-class QPushButton;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -67,9 +65,9 @@ public:
     explicit MusicWindow(QWidget* parent = nullptr);
     ~MusicWindow() override;
 
-    // One player per process. Every page that offers playback borrows this bar
-    // and re-parents it into its own layout, so starting a second track never
-    // creates a second audio device, a second queue or a second tray icon.
+    // One player per process, owned by the main shell. Pages borrow this bar
+    // without re-parenting it, so navigation cannot hide it or create a second
+    // audio device, queue or tray icon.
     static MusicWindow* shared(QWidget* owner);
     [[nodiscard]] static MusicWindow* instance();
 
@@ -84,8 +82,6 @@ public:
     // Tracks currently in the queue, for a queue view or a test.
     [[nodiscard]] std::size_t queueSize() const { return tracks_.size(); }
     [[nodiscard]] bool isPlaying() const { return !tracks_.empty() && !paused_.load() && !ended_.load() && errorText_.isEmpty(); }
-    void setExpanded(bool expanded);
-    [[nodiscard]] bool isExpanded() const { return expanded_; }
     // Leave the bar up and the position where it is. A video should not
     // tear the player down.
     void pauseForVideo();
@@ -98,6 +94,7 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void enterEvent(QEvent* event) override;
@@ -149,10 +146,6 @@ private:
     QString formatTime(std::int64_t ms) const;
     void seekBy(std::int64_t deltaMs);
     void requestCovers();
-    void syncExpandedQueue();
-    void syncExpandedSong();
-    void removeQueueRow(int row);
-    void moveQueueRow(int row, int delta);
     void setPaused(bool paused);
     void stopPlayback();
     void prepareNextTrack();
@@ -226,19 +219,6 @@ private:
     GlyphButton* repeatButton_{nullptr};
     GlyphButton* speedButton_{nullptr};
     GlyphButton* closeButton_{nullptr};
-    QPushButton* expandButton_{nullptr};
-    QWidget* expandedPanel_{nullptr};
-    QWidget* expandedOptions_{nullptr};
-    QLabel* expandedCover_{nullptr};
-    QLabel* expandedTitle_{nullptr};
-    QLabel* expandedDetail_{nullptr};
-    QLabel* queueSummary_{nullptr};
-    QListWidget* queueList_{nullptr};
-    QPushButton* queueJump_{nullptr};
-    QPushButton* queueRemove_{nullptr};
-    QPushButton* queueUp_{nullptr};
-    QPushButton* queueDown_{nullptr};
-    bool expanded_{false};
     QLabel* nameLabel_{nullptr};
     QLabel* timeLabel_{nullptr};
     ProgressLine* progress_{nullptr};
@@ -248,6 +228,7 @@ private:
     VolumePopup* volumeMenu_{nullptr};
     QTimer* clock_{nullptr};
     QTimer* hideTimer_{nullptr};
+    QTimer* playlistShowTimer_{nullptr};
     bool popupPlaced_{false};
     struct SystemMediaSession;
     std::unique_ptr<SystemMediaSession> systemMedia_;

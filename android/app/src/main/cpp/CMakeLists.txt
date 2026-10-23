@@ -31,7 +31,7 @@ target_include_directories(mvpcore PRIVATE
 )
 
 if(NOT MVP_VERSION)
-    set(MVP_VERSION "2.0.3")
+    set(MVP_VERSION "2.1.0")
 endif()
 target_compile_definitions(mvpcore PRIVATE
     SQLITE_HAS_CODEC

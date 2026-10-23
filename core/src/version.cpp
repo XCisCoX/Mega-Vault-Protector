@@ -3,7 +3,7 @@
 namespace videovault::core {
 
 #ifndef MVP_VERSION_STRING
-#define MVP_VERSION_STRING "2.0.3"
+#define MVP_VERSION_STRING "2.1.0"
 #endif
 
 std::string_view version() noexcept {

@@ -32,7 +32,7 @@ class PluginHttp(private val manifest: PluginManifest) : Closeable {
             // ProxyTransport uses normal hostname verification, not a process-global override.
             c.instanceFollowRedirects = false; c.useCaches = false
             c.connectTimeout = 15000; c.readTimeout = 20000
-            c.setRequestProperty("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)")
+            c.setRequestProperty("User-Agent", "MegaVaultProtect/2.1.0 (music plugin)")
             c.setRequestProperty("Accept-Encoding", "identity")
             c.setRequestProperty("Cache-Control", "no-store")
             c.requestMethod = method

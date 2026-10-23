@@ -18,6 +18,9 @@ mkdir -p "$root/lib" "$root/plugins" "$root/gstreamer-1.0"
 
 cp -L "$bin" "$root/MegaVaultProtect"
 chmod +x "$root/MegaVaultProtect"
+# The desktop build stages original license texts beside its executable.
+mkdir -p "$root/licenses"
+cp -a "$(dirname "$bin")/licenses/telegram-player" "$root/licenses/"
 
 is_system_lib() {
   case "$1" in

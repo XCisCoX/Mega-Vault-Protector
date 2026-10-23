@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: 'Version stamped into the APK, such as 2.0.4 or 2.0.4-beta.1. Empty keeps 2.0.3.'
+        description: 'Version stamped into the APK, such as 2.1.1 or 2.1.1-beta.1. Empty keeps 2.1.0.'
         required: false
         type: string
         default: ''

@@ -36,6 +36,8 @@ public:
 signals:
     void closed();
     void imported();
+    // The application owns local playback and its persistent footer.
+    void localPlaybackRequested(qint64 videoId, const QString& title);
 private:
     using Cancel = std::shared_ptr<std::atomic<bool>>;
     void reloadKeyState();
@@ -69,7 +71,6 @@ private:
     QListWidget* results_;
     QSlider* seek_;
     PluginAudioPlayer* player_;
-    MusicWindow* localPlayer_{nullptr};
     std::unique_ptr<MusicResolver> resolver_;
     RemoteStreamSource* stream_{nullptr};
     std::unique_ptr<SoundCloudHlsSource> hls_;

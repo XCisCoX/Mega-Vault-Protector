@@ -2300,11 +2300,8 @@ void MainWindow::buildInterface() {
             music |= pluginProtocolIsMusic(manifest.protocol) && pluginHost_->enabled(manifest.id);
             tools |= manifest.protocol=="megavault-actions-v1" && pluginHost_->enabled(manifest.id);
         }
-        // The Music entry belongs to the vault's own library and stays visible
-        // whatever the provider state is; only the provider button inside the
-        // page follows the extension.
+        // Music is part of the vault library; provider pages stay in Extensions.
         if (pluginMusicButton_) pluginMusicButton_->setVisible(true);
-        if (musicLibrary_) musicLibrary_->setProviderAvailable(music);
         if (extensionToolsButton_) extensionToolsButton_->setVisible(tools);
         if (!music && pluginMusic_ && contentStack_->currentWidget() == pluginMusic_) {
             if (musicLibrary_ != nullptr && contentStack_->indexOf(musicLibrary_) >= 0) {
@@ -4380,6 +4377,13 @@ void MainWindow::openSoundCloud(const QString& query) {
             contentStack_->setCurrentWidget(pages_);
         });
         connect(soundCloud_, &SoundCloudPage::imported, this, [this] { refreshGallery(); });
+        connect(soundCloud_, &SoundCloudPage::localPlaybackRequested, this,
+            [this](qint64 id, const QString& title) {
+                if (!vault_ || !vault_->is_unlocked() || id <= 0) return;
+                auto* bar = ensureMusicPlayer();
+                bar->playQueue(vault_, std::vector<MusicTrack>{{id, title}}, 0);
+                bar->show();
+            });
     }
     soundCloud_->setVault(vault_);
     contentStack_->setCurrentWidget(soundCloud_);
@@ -4401,25 +4405,8 @@ void MainWindow::openMusicLibrary() {
             fadeStack(contentStack_, pages_);
             QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
         });
-        connect(musicLibrary_, &MusicLibraryPage::providerRequested, this, [this] {
-            // A declarative provider keeps the first slot; when it is the only
-            // enabled provider SoundCloud takes the entry point instead of
-            // leaving the button dead.
-            bool monochrome = false, soundcloud = false;
-            for (const auto& manifest : pluginHost_->manifests()) {
-                if (!pluginHost_->enabled(manifest.id)) continue;
-                monochrome |= manifest.protocol == "monochrome-tracks-v1";
-                soundcloud |= manifest.protocol == "soundcloud-tracks-v1";
-            }
-            if (monochrome) openPluginMusic();
-            else if (soundcloud) openSoundCloud();
-        });
     }
-    bool provider = false;
-    for (const auto& manifest : pluginHost_->manifests()) {
-        provider |= pluginProtocolIsMusic(manifest.protocol) && pluginHost_->enabled(manifest.id);
-    }
-    musicLibrary_->setProviderAvailable(provider);
+    musicLibrary_->setPlayer(ensureMusicPlayer());
     musicLibrary_->setVault(vault_);
     fadeStack(contentStack_, musicLibrary_);
     musicLibrary_->setFocus();
@@ -8217,7 +8204,11 @@ void MainWindow::embedPlayer() {
         contentStack_->addWidget(playerWindow_);
     }
     fadeStack(contentStack_, playerWindow_);
+    // Play at the size the app already has: opening a file must not maximize,
+    // fullscreen or otherwise change the window state behind the user's back.
     playerWindow_->show();
+    playerWindow_->repaintFrame();
+    update();
     playerWindow_->setFocus();
 }
 
@@ -8225,9 +8216,22 @@ void MainWindow::popPlayer() {
     if (playerWindow_ == nullptr || contentStack_ == nullptr) {
         return;
     }
-    contentStack_->removeWidget(playerWindow_);
-    fadeStack(contentStack_, pages_);
-    playerWindow_->detach();
+    if (contentStack_->indexOf(playerWindow_) >= 0) {
+        // Hide first: removing a visible child leaves its last painted frame in
+        // the stack's backing store, so the old picture stays on screen beside
+        // the new window.
+        playerWindow_->hide();
+        contentStack_->removeWidget(playerWindow_);
+        fadeStack(contentStack_, pages_);
+        if (QWidget* current = contentStack_->currentWidget()) current->update();
+        contentStack_->update();
+    }
+    // Blank the embedded surface before it becomes a top-level window: whatever
+    // the old viewport still holds must not look like a second video. A photo
+    // has no worker republishing frames, so it keeps its pixels.
+    if (!playerWindow_->isPhotoViewer()) playerWindow_->clearSurface();
+    if (playerWindow_->isPhotoViewer()) playerWindow_->detach();
+    else playerWindow_->presentViewer(this);
 }
 
 void MainWindow::embedPdf() {
@@ -8412,12 +8416,8 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
     if (playerWindow_ != nullptr) {
         playerWindow_->playVideo(vault_, video_id);
         applyClip(playerWindow_);
-        if (playerWindow_->isDetached()) {
-            playerWindow_->raise();
-            playerWindow_->activateWindow();
-        } else {
-            embedPlayer();
-        }
+        if (playerWindow_->isDetached()) playerWindow_->presentViewer(this);
+        else embedPlayer();
         return;
     }
     auto* window = new PlayerWindow(vault_, video_id, title, contentStack_);
@@ -8518,6 +8518,28 @@ void MainWindow::beginPdf(
     pdfWindow_->setFocus();
 }
 
+MusicWindow* MainWindow::ensureMusicPlayer() {
+    if (musicWindow_ != nullptr) {
+        return musicWindow_;
+    }
+    auto* const bar = MusicWindow::shared(centralWidget());
+    const bool wasVisible = bar->isVisible();
+    if (bar->parentWidget() != centralWidget()) {
+        bar->setParent(centralWidget());
+    }
+    if (auto* column = qobject_cast<QVBoxLayout*>(centralWidget()->layout())) {
+        column->addWidget(bar);
+    }
+    musicWindow_ = bar;
+    connect(bar, &QObject::destroyed, this, [this, bar] {
+        if (musicWindow_ == bar) musicWindow_ = nullptr;
+    });
+    // Opening Music is navigation, not a play/stop command. An existing queue
+    // stays visible; a newly created footer stays hidden until Play is chosen.
+    bar->setVisible(wasVisible || bar->queueSize() > 0);
+    return bar;
+}
+
 void MainWindow::beginMusic(const std::int64_t video_id) {
     if (!vault_ || !vault_->is_unlocked() || video_id <= 0) {
         return;
@@ -8560,18 +8582,8 @@ void MainWindow::beginMusic(const std::int64_t video_id) {
     if (queue.empty()) {
         queue.push_back(MusicTrack{video_id, QStringLiteral("Audio")});
     }
-    // One shared bar: whichever page asks first creates it, later callers take it
-    // over. `arriving` is captured before it is shown so the slide-in only runs
-    // when the bar was actually hidden.
-    auto* const window = MusicWindow::shared(centralWidget());
+    auto* const window = ensureMusicPlayer();
     const bool arriving = !window->isVisible();
-    if (window->parentWidget() != centralWidget()) {
-        window->setParent(centralWidget());
-    }
-    if (auto* layout = qobject_cast<QVBoxLayout*>(centralWidget()->layout())) {
-        layout->addWidget(window);
-    }
-    musicWindow_ = window;
     window->playQueue(vault_, queue, start);
     window->show();
     if (arriving) {

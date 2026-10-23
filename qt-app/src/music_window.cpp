@@ -1,3 +1,7 @@
+// UI adaptations from Telegram Desktop media/player (widget, panel, dropdown,
+// button, volume controller and media_player.style), copyright Telegram Desktop
+// contributors, GPL-3.0-or-later. See ../third_party/telegram-player/LEGAL,
+// LICENSE and NOTICE for upstream attribution. Vault playback remains native.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -9,9 +13,13 @@
 #include "videovault/app/music_queue_edit.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/theme.hpp"
+#include "videovault/app/telegram_music_controls.hpp"
+#include "videovault/app/telegram_player_icons.hpp"
+#include <QWheelEvent>
 #include "videovault/core/vault.hpp"
 
 #include <QApplication>
+#include <QAbstractButton>
 #include <QAudioFormat>
 #include <QBuffer>
 #include <QAudioOutput>
@@ -30,15 +38,12 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
-#include <QSignalBlocker>
 #include <QComboBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QLinearGradient>
 #include <QPainterPath>
 #include <QPointer>
-#include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScreen>
@@ -83,8 +88,8 @@ namespace videovault::app {
 
 namespace {
 
-constexpr int kBarHeight = 48;
-constexpr int kControlHeight = 32;
+// Telegram media_player.style: 35px chrome + 1px line, 30px buttons.
+constexpr int kBarHeight = telegram_music::barHeight;
 QColor playerAccent() { return QApplication::palette().color(QPalette::Highlight); }
 // The player is chrome, not video: unlike the video overlay it follows the live
 // Light/Dark palette. These used to be dark literals (a black bar, white labels,
@@ -129,6 +134,23 @@ public:
     }
 
 protected:
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() != Qt::LeftButton) { e->ignore(); return; }
+        setSliderDown(true);
+        jump(e->pos().x());
+        e->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (isSliderDown()) { jump(e->pos().x()); e->accept(); }
+        else QSlider::mouseMoveEvent(e);
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (e->button() != Qt::LeftButton || !isSliderDown()) { e->ignore(); return; }
+        jump(e->pos().x());
+        setSliderDown(false);
+        e->accept();
+    }
+    void jump(int x) { setValue(QStyle::sliderValueFromPosition(minimum(), maximum(), x, std::max(1, width()))); }
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
@@ -155,55 +177,6 @@ QString speedLabel(const int milli) {
     return QString::number(shown) + QLatin1Char('X');
 }
 
-void paintSpeaker(QPainter& painter, const QRect& box, const int waves) {
-    const QRectF r(box);
-    const qreal cy = r.center().y();
-    const qreal left = r.left() + 2.0;
-    const QColor ink = painter.brush().color().alpha() > 0
-        ? painter.brush().color()
-        : painter.pen().color();
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(ink);
-    QPainterPath body;
-    body.moveTo(left, cy - 3.0);
-    body.lineTo(left + 4.0, cy - 3.0);
-    body.lineTo(left + 9.0, cy - 7.0);
-    body.lineTo(left + 9.0, cy + 7.0);
-    body.lineTo(left + 4.0, cy + 3.0);
-    body.lineTo(left, cy + 3.0);
-    body.closeSubpath();
-    painter.drawPath(body);
-    QPen pen(ink, 1.7, Qt::SolidLine, Qt::RoundCap);
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(pen);
-    if (waves >= 1) {
-        painter.drawArc(QRectF(left + 10.0, cy - 3.5, 6.5, 7.0), -70 * 16, 140 * 16);
-    }
-    if (waves >= 2) {
-        painter.drawArc(QRectF(left + 10.0, cy - 6.5, 10.5, 13.0), -60 * 16, 120 * 16);
-    }
-    if (waves <= 0) {
-        painter.drawLine(QPointF(left + 12.0, cy - 3.5), QPointF(left + 17.0, cy + 3.5));
-        painter.drawLine(QPointF(left + 17.0, cy - 3.5), QPointF(left + 12.0, cy + 3.5));
-    }
-}
-
-void paintArrowHead(QPainter& painter, const QPointF& tip, const QPointF& direction) {
-    const double len = std::hypot(direction.x(), direction.y());
-    if (len < 0.1) {
-        return;
-    }
-    const QPointF u = direction / len;
-    const QPointF n(-u.y(), u.x());
-    QPolygonF head;
-    head << tip << (tip - u * 5.0 + n * 3.0) << (tip - u * 5.0 - n * 3.0);
-    const QColor ink = painter.pen().color();
-    painter.save();
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(ink);
-    painter.drawPolygon(head);
-    painter.restore();
-}
 
 } // namespace
 
@@ -380,10 +353,23 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setAutoFillBackground(false);
         setAttribute(Qt::WA_NoSystemBackground, true);
+        morph_.setDuration(200); // mediaPlayerPlayIcon.duration
+        connect(&morph_, &QVariantAnimation::valueChanged, this, [this] { update(); });
+        ripple_.setDuration(300);
+        connect(&ripple_, &QVariantAnimation::valueChanged, this, [this] { update(); });
+        connect(this, &QAbstractButton::pressed, this, [this] {
+            ripple_.stop(); ripple_.setStartValue(0.); ripple_.setEndValue(1.); ripple_.start();
+        });
     }
 
     void setGlyph(const Glyph glyph) {
+        if (glyph_ == glyph) return;
+        const bool animate = (glyph_ == Glyph::Play || glyph_ == Glyph::Pause)
+            && (glyph == Glyph::Play || glyph == Glyph::Pause);
+        if (animate) fromShape_ = currentShape();
+        morph_.stop();
         glyph_ = glyph;
+        if (animate) { morph_.setStartValue(0.); morph_.setEndValue(1.); morph_.start(); }
         update();
     }
     void setActive(const bool active) {
@@ -392,6 +378,8 @@ public:
     }
     void setLabel(const QString& label) {
         label_ = label;
+        setText(label);
+        setAccessibleName(tr("Playback speed %1").arg(label));
         update();
     }
 
@@ -416,21 +404,37 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        if (isEnabled() && (underMouse() || hasFocus())) {
-            painter.setPen(hasFocus() ? QPen(playerAccent(), 1.5) : QPen(Qt::NoPen));
-            painter.setBrush(playerHover());
-            painter.drawEllipse(rect().center(), 13, 13);
+        if (isEnabled() && (ripple_.state() == QAbstractAnimation::Running || hasFocus())) {
+            const auto progress = ripple_.currentValue().toReal();
+            auto color = playerAccent();
+            color.setAlpha(hasFocus() ? 20 : int(32 * (1. - progress)));
+            painter.setPen(hasFocus() ? QPen(playerAccent(), 1.) : QPen(Qt::NoPen));
+            painter.setBrush(color);
+            const auto radius = hasFocus() ? 12. : 12. * progress;
+            painter.drawEllipse(QPointF(width()/2., 17.), radius, radius);
         }
         painter.setPen(Qt::NoPen);
         painter.setBrush(ink());
-        const QRect box(rect().center().x() - 12, rect().center().y() - 12, 24, 24);
+        // style_media_player iconPosition differs by control, not centered in
+        // a generic 32px toolbar: transport (0,5), volume (5,6), close (4,6).
+        QPoint pos(0, 5);
+        if (glyph_ == Glyph::VolumeOff || glyph_ == Glyph::VolumeLow || glyph_ == Glyph::VolumeFull) pos = QPoint(5, 6);
+        else if (glyph_ == Glyph::Close && label_.isEmpty()) pos = QPoint(4, 6);
+        else if (glyph_ == Glyph::Repeat || glyph_ == Glyph::RepeatOne) pos = QPoint(2, 5);
+        else if (glyph_ == Glyph::Reverse || glyph_ == Glyph::Shuffle) pos = QPoint(2, 6);
+        if (height() != telegram_music::controlHeight)
+            pos = QPoint((width()-24)/2, (height()-24)/2); // floating-card controls
+        const QRect box(pos, QSize(24, 24));
         if (!label_.isEmpty()) {
+            const QRect inner = rect().adjusted(0, 6, 0, 0);
+            telegram::paint(painter, QRectF(inner.center().x()-12, inner.center().y()-12, 24, 24),
+                QStringLiteral("player_speed"), ink());
             painter.setPen(ink());
             QFont font(QStringLiteral("Segoe UI"));
             font.setPixelSize(11);
             font.setBold(true);
             painter.setFont(font);
-            painter.drawText(rect(), Qt::AlignCenter, label_);
+            painter.drawText(inner, Qt::AlignCenter, label_);
             return;
         }
         paintGlyph(painter, box);
@@ -451,226 +455,43 @@ private:
     }
 
     void paintGlyph(QPainter& painter, const QRect& box) const {
-        const QRectF r(box);
+        // Real Telegram artwork, not approximate hand-painted arrows/speakers.
+        const char* asset = nullptr;
         switch (glyph_) {
-        case Glyph::Play: {
-            QPolygonF triangle;
-            triangle << QPointF(r.left() + 8, r.top() + 5)
-                     << QPointF(r.left() + 8, r.bottom() - 5)
-                     << QPointF(r.right() - 5, r.center().y());
-            painter.drawPolygon(triangle);
-            break;
-        }
-        case Glyph::Pause:
-            painter.drawRoundedRect(QRectF(r.left() + 6, r.top() + 5, 4, 14), 1.2, 1.2);
-            painter.drawRoundedRect(QRectF(r.left() + 14, r.top() + 5, 4, 14), 1.2, 1.2);
-            break;
-        case Glyph::Previous:
-            painter.drawRoundedRect(QRectF(r.left() + 5, r.top() + 5, 2.4, 14), 0.8, 0.8);
-            {
-                QPolygonF triangle;
-                triangle << QPointF(r.right() - 5, r.top() + 5)
-                         << QPointF(r.right() - 5, r.bottom() - 5)
-                         << QPointF(r.left() + 9, r.center().y());
-                painter.drawPolygon(triangle);
-            }
-            break;
-        case Glyph::Next:
-            painter.drawRoundedRect(QRectF(r.right() - 7.4, r.top() + 5, 2.4, 14), 0.8, 0.8);
-            {
-                QPolygonF triangle;
-                triangle << QPointF(r.left() + 5, r.top() + 5)
-                         << QPointF(r.left() + 5, r.bottom() - 5)
-                         << QPointF(r.right() - 9, r.center().y());
-                painter.drawPolygon(triangle);
-            }
-            break;
-        case Glyph::VolumeOff:
-        case Glyph::VolumeLow:
-        case Glyph::VolumeFull: {
-            painter.setPen(QPen(ink(), 1.4));
-            painter.setBrush(ink());
-            const int waves = glyph_ == Glyph::VolumeFull ? 2 : glyph_ == Glyph::VolumeLow ? 1 : 0;
-            paintSpeaker(painter, box, waves);
-            break;
-        }
-        case Glyph::Repeat:
-        case Glyph::RepeatOne:
-            paintRepeat(painter, box, glyph_ == Glyph::RepeatOne);
-            break;
-        case Glyph::Reverse:
-            paintOpposed(painter, box, false);
-            break;
-        case Glyph::Shuffle:
-            paintOpposed(painter, box, true);
-            break;
-        case Glyph::Close: {
-            painter.setPen(QPen(ink(), 1.7, Qt::SolidLine, Qt::RoundCap));
-            painter.drawLine(QPointF(r.center().x() - 5, r.center().y() - 5),
-                QPointF(r.center().x() + 5, r.center().y() + 5));
-            painter.drawLine(QPointF(r.center().x() + 5, r.center().y() - 5),
-                QPointF(r.center().x() - 5, r.center().y() + 5));
-            break;
+        case Glyph::Previous: asset = "player_backward"; break;
+        case Glyph::Next: asset = "player_forward"; break;
+        case Glyph::VolumeOff: asset = "player_mini_off"; break;
+        case Glyph::VolumeLow: asset = "player_mini_half"; break;
+        case Glyph::VolumeFull: asset = "player_mini_full"; break;
+        case Glyph::Repeat: asset = "player_repeat"; break;
+        case Glyph::RepeatOne: asset = "player_repeat_single"; break;
+        case Glyph::Reverse: asset = "player_order"; break;
+        case Glyph::Shuffle: asset = "player_shuffle"; break;
+        case Glyph::Close: asset = "panel_close"; break;
+        case Glyph::Play: case Glyph::Pause: {
+            painter.save();
+            painter.translate(box.topLeft());
+            telegram_music::paintShape(painter, currentShape(), ink());
+            painter.restore();
+            return;
         }
         }
+        if (asset) telegram::paint(painter, box, QString::fromLatin1(asset), ink());
     }
 
-    void paintRepeat(QPainter& painter, const QRect& box, const bool one) const {
-        painter.save();
-        const QRectF r(box.adjusted(4, 5, -4, -5));
-        const QPen pen(ink(), 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        painter.setPen(pen);
-        painter.setBrush(Qt::NoBrush);
-        const qreal x0 = r.left();
-        const qreal x1 = r.right();
-        const qreal y0 = r.top() + 1.0;
-        const qreal y1 = r.bottom() - 1.0;
-        painter.drawLine(QPointF(x0 + 1.0, y0 + 4.0), QPointF(x0 + 1.0, y0));
-        painter.drawLine(QPointF(x0 + 1.0, y0), QPointF(x1 - 6.0, y0));
-        paintArrowHead(painter, QPointF(x1 - 1.0, y0), QPointF(1, 0));
-        painter.setPen(pen);
-        painter.drawLine(QPointF(x1 - 1.0, y1 - 4.0), QPointF(x1 - 1.0, y1));
-        painter.drawLine(QPointF(x1 - 1.0, y1), QPointF(x0 + 6.0, y1));
-        paintArrowHead(painter, QPointF(x0 + 1.0, y1), QPointF(-1, 0));
-        if (one) {
-            painter.setPen(ink());
-            QFont font(QStringLiteral("Segoe UI"));
-            font.setPixelSize(9);
-            font.setBold(true);
-            painter.setFont(font);
-            painter.drawText(box, Qt::AlignCenter, QStringLiteral("1"));
-        }
-        painter.restore();
+    telegram_music::Shape currentShape() const {
+        const auto to = glyph_ == Glyph::Pause
+            ? telegram_music::pauseShape() : telegram_music::playShape();
+        return morph_.state() == QAbstractAnimation::Running
+            ? telegram_music::interpolate(fromShape_, to, morph_.currentValue().toReal()) : to;
     }
-
-    void paintOpposed(QPainter& painter, const QRect& box, const bool crossed) const {
-        painter.save();
-        const QPen pen(ink(), 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        painter.setPen(pen);
-        const QRectF r(box.adjusted(4, 4, -4, -4));
-        if (!crossed) {
-            const qreal downX = r.left() + 3.0;
-            const qreal upX = r.right() - 3.0;
-            painter.drawLine(QPointF(downX, r.top() + 1.0), QPointF(downX, r.bottom() - 6.0));
-            paintArrowHead(painter, QPointF(downX, r.bottom() - 1.0), QPointF(0, 1));
-            painter.setPen(pen);
-            painter.drawLine(QPointF(upX, r.bottom() - 1.0), QPointF(upX, r.top() + 6.0));
-            paintArrowHead(painter, QPointF(upX, r.top() + 1.0), QPointF(0, -1));
-        } else {
-            const auto split = [](const QPointF& from, const QPointF& to, const qreal t) {
-                return from + (to - from) * t;
-            };
-            const QPointF lowStart(r.left(), r.bottom() - 2.0);
-            const QPointF lowBend(r.left() + 5.0, r.bottom() - 2.0);
-            const QPointF lowEnd(r.right() - 5.0, r.top() + 2.0);
-            painter.drawLine(lowStart, lowBend);
-            painter.drawLine(lowBend + QPointF(1.2, -1.0), split(lowBend, lowEnd, 0.36));
-            painter.drawLine(split(lowBend, lowEnd, 0.64), lowEnd);
-            painter.drawLine(lowEnd, QPointF(r.right() - 4.0, r.top() + 2.0));
-            paintArrowHead(painter, QPointF(r.right() - 1.0, r.top() + 2.0), QPointF(1, -0.15));
-            painter.setPen(pen);
-            const QPointF highStart(r.left(), r.top() + 2.0);
-            const QPointF highBend(r.left() + 5.0, r.top() + 2.0);
-            const QPointF highEnd(r.right() - 5.0, r.bottom() - 2.0);
-            painter.drawLine(highStart, highBend);
-            painter.drawLine(highBend + QPointF(1.2, 1.0), split(highBend, highEnd, 0.36));
-            painter.drawLine(split(highBend, highEnd, 0.64), highEnd);
-            painter.drawLine(highEnd, QPointF(r.right() - 4.0, r.bottom() - 2.0));
-            paintArrowHead(painter, QPointF(r.right() - 1.0, r.bottom() - 2.0), QPointF(1, 0.15));
-        }
-        painter.restore();
-    }
+    QVariantAnimation ripple_{this};
+    QVariantAnimation morph_{this};
+    telegram_music::Shape fromShape_ = telegram_music::playShape();
 
     Glyph glyph_;
     bool active_{false};
     QString label_;
-};
-
-class ProgressLine final : public QWidget {
-public:
-    explicit ProgressLine(QWidget* parent) : QWidget(parent) {
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::NoFocus);
-        setAutoFillBackground(false);
-        setMouseTracking(true);
-    }
-
-    int value() const { return value_; }
-    bool dragging() const { return dragging_; }
-
-    void setValue(const int value) {
-        const int next = std::clamp(value, 0, 1000);
-        if (next == value_) {
-            return;
-        }
-        value_ = next;
-        update();
-    }
-
-    std::function<void(int)> moved;
-    std::function<void(int)> released;
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setPen(Qt::NoPen);
-        const int thick = (underMouse() || dragging_) ? 4 : 2;
-        const int y = height() - thick;
-        const int played = isEnabled() ? width() * value_ / 1000 : 0;
-        painter.setBrush(playerAccent());
-        painter.drawRect(0, y, played, thick);
-        painter.setBrush(playerGroove());
-        painter.drawRect(played, y, width() - played, thick);
-    }
-    void mousePressEvent(QMouseEvent* event) override {
-        if (!isEnabled() || event->button() != Qt::LeftButton) {
-            return;
-        }
-        dragging_ = true;
-        grabMouse();
-        apply(event->pos().x());
-        if (released) {
-            released(value_);
-        }
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if (dragging_) {
-            apply(event->pos().x());
-        }
-        update();
-    }
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        if (!dragging_) {
-            return;
-        }
-        releaseMouse();
-        apply(event->pos().x());
-        dragging_ = false;
-        if (released) {
-            released(value_);
-        }
-        update();
-    }
-    void leaveEvent(QEvent* event) override {
-        QWidget::leaveEvent(event);
-        update();
-    }
-    void enterEvent(QEvent* event) override {
-        QWidget::enterEvent(event);
-        update();
-    }
-
-private:
-    void apply(const int x) {
-        const int next = width() <= 0 ? 0 : std::clamp(x, 0, width()) * 1000 / width();
-        setValue(next);
-        if (moved) {
-            moved(value_);
-        }
-    }
-
-    int value_{0};
-    bool dragging_{false};
 };
 
 class PlayerPopup : public QWidget {
@@ -687,7 +508,7 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setPen(QPen(playerHairline()));
         painter.setBrush(playerCard());
-        painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 12, 12);
+        painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 8, 8);
     }
 };
 
@@ -696,12 +517,14 @@ public:
     explicit MenuRow(const QString& label, QWidget* parent)
         : QAbstractButton(parent), label_(label) {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::NoFocus);
+        setFocusPolicy(Qt::StrongFocus);
+        setAccessibleName(label);
         setAutoFillBackground(false);
         setAttribute(Qt::WA_NoSystemBackground, true);
         setFixedHeight(36);
     }
 
+    void setIcon(const QString& asset, bool check = true) { asset_ = asset; check_ = check; }
     void setMarked(const bool marked) {
         marked_ = marked;
         update();
@@ -711,23 +534,20 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        if (underMouse()) {
+        if (underMouse() || hasFocus()) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(playerHover());
-            painter.drawRoundedRect(rect().adjusted(4, 1, -4, -1), 8, 8);
+            painter.drawRect(rect());
         }
         painter.setPen(marked_ ? playerAccent() : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
-        painter.drawText(rect().adjusted(16, 0, -32, 0), Qt::AlignVCenter | Qt::AlignLeft, label_);
-        if (marked_) {
-            QPen pen(playerAccent(), 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-            painter.setPen(pen);
-            const QPointF origin(width() - 22, height() / 2.0);
-            painter.drawLine(origin + QPointF(-6, 0), origin + QPointF(-2, 4));
-            painter.drawLine(origin + QPointF(-2, 4), origin + QPointF(5, -4));
-        }
+        if (!asset_.isEmpty()) telegram::paint(painter, QRectF(13, (height()-24)/2., 24, 24),
+            asset_, marked_ ? playerAccent() : playerSecondaryInk());
+        painter.drawText(rect().adjusted(check_ ? 54 : 49, 0, -32, 0), Qt::AlignVCenter | Qt::AlignLeft, label_);
+        if (marked_ && check_) telegram::paint(painter, QRectF(width()-32, (height()-24)/2., 24, 24),
+            QStringLiteral("player_check"), playerAccent());
     }
     void enterEvent(QEvent* event) override {
         QAbstractButton::enterEvent(event);
@@ -741,6 +561,8 @@ protected:
 private:
     QString label_;
     bool marked_{false};
+    bool check_{true};
+    QString asset_;
 };
 
 class TrackRow final : public QAbstractButton {
@@ -751,13 +573,14 @@ public:
         setFocusPolicy(Qt::NoFocus);
         setAutoFillBackground(false);
         setAttribute(Qt::WA_NoSystemBackground, true);
-        setFixedHeight(58);
+        setFixedHeight(50); // overviewFileLayout: 7 + 36 + 6 + 1
     }
 
     void setCurrent(const bool current) {
         current_ = current;
         update();
     }
+    void setPlaying(bool playing) { playing_ = playing; update(); }
     void setCaption(const QString& title, const QString& detail) {
         title_ = title;
         detail_ = detail;
@@ -777,29 +600,40 @@ protected:
             painter.setBrush(playerHover());
             painter.drawRoundedRect(rect().adjusted(6, 2, -6, -2), 8, 8);
         }
-        const QRect icon(12, 9, 40, 40);
+        const QRect icon(17, 7, 36, 36);
         painter.setPen(Qt::NoPen);
         if (!art_.isNull()) {
             QPainterPath clip;
-            clip.addRoundedRect(QRectF(icon), 8, 8);
+            clip.addEllipse(QRectF(icon));
             painter.save();
             painter.setClipPath(clip);
             painter.drawPixmap(icon, art_);
             painter.restore();
         } else {
-            painter.drawPixmap(icon, paintNotePlate(icon.width()));
+            painter.setBrush(playerAccent());
+            painter.drawEllipse(icon);
         }
+        if (!art_.isNull()) {
+            painter.setBrush(QColor(0, 0, 0, 70));
+            painter.drawEllipse(icon);
+        }
+        const bool pause = current_ && playing_;
+        const QSizeF glyphSize = pause ? QSizeF(12, 14) : QSizeF(18, 16);
+        const QRectF glyphRect(QPointF(icon.x() + (icon.width()-glyphSize.width())/2.,
+            icon.y() + (icon.height()-glyphSize.height())/2.), glyphSize);
+        telegram::paint(painter, glyphRect, pause
+            ? QStringLiteral("playlist_pause") : QStringLiteral("playlist_play"), Qt::white);
         painter.setPen(current_ ? playerAccent() : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
-        const int textLeft = 64;
+        const int textLeft = 63; // 17 + 36 + 10
         const QString elided = QFontMetrics(font).elidedText(title_, Qt::ElideRight, width() - textLeft - 16);
-        painter.drawText(QRect(textLeft, 12, width() - textLeft - 16, 18), Qt::AlignLeft | Qt::AlignVCenter, elided);
+        painter.drawText(QRect(textLeft, 7, width() - textLeft - 17, 18), Qt::AlignLeft | Qt::AlignVCenter, elided);
         painter.setPen(playerSecondaryInk());
         font.setPixelSize(11);
         painter.setFont(font);
-        painter.drawText(QRect(textLeft, 32, width() - textLeft - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, detail_);
+        painter.drawText(QRect(textLeft, 25, width() - textLeft - 17, 16), Qt::AlignLeft | Qt::AlignVCenter, detail_);
     }
     void enterEvent(QEvent* event) override {
         QAbstractButton::enterEvent(event);
@@ -815,12 +649,13 @@ private:
     QString detail_;
     QPixmap art_;
     bool current_{false};
+    bool playing_{false};
 };
 
 class PlaylistPopup final : public PlayerPopup {
 public:
     explicit PlaylistPopup(QWidget* owner) : PlayerPopup(owner) {
-        setFixedWidth(344);
+        setFixedWidth(telegram_music::playlistWidth);
         scroll_ = new QScrollArea(this);
         scroll_->setFrameShape(QFrame::NoFrame);
         scroll_->setWidgetResizable(true);
@@ -877,8 +712,8 @@ public:
             rowWidgets_[static_cast<std::size_t>(i)]->setCaption(title, detail);
             rowWidgets_[static_cast<std::size_t>(i)]->setCurrent(i == index);
         }
-        const int list = std::min(static_cast<int>(tracks.size()) * 52, 280);
-        scroll_->setFixedHeight(std::max(52, list));
+        const int list = std::min(static_cast<int>(tracks.size()) * 50, telegram_music::playlistMaxHeight);
+        scroll_->setFixedHeight(std::max(50, list));
         setFixedHeight(scroll_->height() + 12);
         if (index >= 0 && index < static_cast<int>(rowWidgets_.size())) {
             scroll_->ensureWidgetVisible(rowWidgets_[static_cast<std::size_t>(index)], 0, 24);
@@ -893,6 +728,9 @@ public:
         }
     }
 
+    void setPlaying(bool playing) {
+        for (auto* row : rowWidgets_) row->setPlaying(playing);
+    }
     std::function<void(int)> picked;
     std::function<void(int index, QString* title, QString* detail)> labels;
 
@@ -911,8 +749,10 @@ public:
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(6, 6, 6, 6);
         layout->setSpacing(0);
-        reverse_ = new MenuRow(QStringLiteral("Reverse order"), this);
-        shuffle_ = new MenuRow(QStringLiteral("Shuffle"), this);
+        reverse_ = new MenuRow(tr("Reverse order"), this);
+        shuffle_ = new MenuRow(tr("Shuffle"), this);
+        reverse_->setIcon(QStringLiteral("player_order"), false);
+        shuffle_->setIcon(QStringLiteral("player_shuffle"), false);
         layout->addWidget(reverse_);
         layout->addWidget(shuffle_);
         connect(reverse_, &QAbstractButton::clicked, this, [this] {
@@ -942,10 +782,10 @@ private:
 class SpeedPopup final : public PlayerPopup {
 public:
     explicit SpeedPopup(QWidget* owner) : PlayerPopup(owner) {
-        setFixedWidth(248);
+        setFixedWidth(204); // 50 + 122 + 12, plus popup margins
         auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(10, 8, 10, 8);
-        layout->setSpacing(2);
+        layout->setContentsMargins(5, 10, 5, 10);
+        layout->setSpacing(0);
         readout_ = new QLabel(this);
         readout_->setForegroundRole(QPalette::WindowText);
         QFont font(QStringLiteral("Segoe UI"));
@@ -954,13 +794,35 @@ public:
         readout_->setFont(font);
         slider_ = new PlayerSlider(this);
         slider_->setRange(5, 25);
-        layout->addWidget(readout_);
-        layout->addWidget(slider_);
+        auto* sliderRow = new QHBoxLayout;
+        sliderRow->setContentsMargins(0, 8, 12, 8);
+        sliderRow->setSpacing(0);
+        readout_->setFixedWidth(50);
+        slider_->setFixedWidth(122);
+        sliderRow->addWidget(readout_);
+        sliderRow->addWidget(slider_);
+        layout->addLayout(sliderRow);
+        auto* separator = new QFrame(this);
+        separator->setFrameShape(QFrame::HLine);
+        separator->setForegroundRole(QPalette::Midlight);
+        layout->addWidget(separator);
+        debounce_ = new QTimer(this);
+        debounce_->setSingleShot(true);
+        debounce_->setInterval(1000); // media_player_dropdown.cpp kSpeedDebounceTimeout
+        const auto commit = [this] {
+            debounce_->stop();
+            if (!suppress_ && picked) picked(slider_->value() * 100);
+        };
+        connect(debounce_, &QTimer::timeout, this, commit);
+        connect(slider_, &QSlider::sliderReleased, this, commit);
         connect(slider_, &QSlider::valueChanged, this, [this](const int value) {
-            readout_->setText(speedLabel(value * 100));
-            if (!suppress_ && picked) {
-                picked(value * 100);
+            readout_->setText(QString::number(value / 10., 'f', 1) + QLatin1Char('x'));
+            for (const auto& row : rows_) {
+                const bool chosen = row.milli == value * 100;
+                row.widget->setMarked(chosen);
+                row.widget->setEnabled(!chosen);
             }
+            if (!suppress_) debounce_->start();
         });
         const struct {
             int milli;
@@ -974,13 +836,16 @@ public:
             {2000, "Super fast"},
         };
         for (const auto& point : points) {
-            auto* row = new MenuRow(QString::fromUtf8(point.label), this);
+            auto* row = new MenuRow(tr(point.label), this);
+            row->setIcon(QStringLiteral("speed/audiospeed_menu_%1").arg(point.milli / 1000., 0, 'f', 1));
             layout->addWidget(row);
             rows_.push_back({point.milli, row});
             connect(row, &QAbstractButton::clicked, this, [this, milli = point.milli] {
                 if (picked) {
                     picked(milli);
                 }
+                debounce_->stop();
+                hide();
             });
         }
     }
@@ -988,10 +853,12 @@ public:
     void sync(const int milli) {
         suppress_ = true;
         slider_->setValue(std::clamp(milli / 100, 5, 25));
-        readout_->setText(speedLabel(milli));
+        readout_->setText(QString::number(milli / 1000., 'f', 1) + QLatin1Char('x'));
         suppress_ = false;
         for (const auto& row : rows_) {
-            row.widget->setMarked(std::abs(row.milli - milli) < 40);
+            const bool chosen = std::abs(row.milli - milli) < 40;
+            row.widget->setMarked(chosen);
+            row.widget->setEnabled(!chosen);
         }
     }
 
@@ -1002,6 +869,7 @@ private:
         int milli;
         MenuRow* widget;
     };
+    QTimer* debounce_{nullptr};
     QLabel* readout_{nullptr};
     QSlider* slider_{nullptr};
     bool suppress_{false};
@@ -1011,7 +879,7 @@ private:
 class VolumePopup final : public PlayerPopup {
 public:
     explicit VolumePopup(QWidget* owner) : PlayerPopup(owner) {
-        setFixedSize(46, 132);
+        setFixedSize(47, 116); // 27x100 content + 10px side/bottom, 6px seek margin
         setMouseTracking(true);
     }
 
@@ -1023,11 +891,13 @@ public:
     std::function<void(int)> picked;
 
 protected:
-    void paintEvent(QPaintEvent* event) override {
-        PlayerPopup::paintEvent(event);
+    void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        const QRect track(width() / 2 - 2, 18, 4, height() - 36);
+        painter.setPen(QPen(playerHairline()));
+        painter.setBrush(playerCard());
+        painter.drawRoundedRect(QRectF(10, 6, 27, 100), 8, 8);
+        const QRect track(width() / 2 - 1, 14, 3, 84);
         painter.setPen(Qt::NoPen);
         painter.setBrush(playerGroove());
         painter.drawRoundedRect(track, 2, 2);
@@ -1038,7 +908,12 @@ protected:
         painter.setBrush(playerAccent());
         painter.drawEllipse(QPoint(track.center().x(), handleY), 6, 6);
     }
-    void mousePressEvent(QMouseEvent* event) override { apply(event->pos().y()); }
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) { apply(event->pos().y()); event->accept(); }
+    }
+    void wheelEvent(QWheelEvent* event) override {
+        if (event->angleDelta().y()) { applyPercent(percent_ + event->angleDelta().y() / 12); event->accept(); }
+    }
     void mouseMoveEvent(QMouseEvent* event) override {
         if (event->buttons() & Qt::LeftButton) {
             apply(event->pos().y());
@@ -1047,16 +922,17 @@ protected:
 
 private:
     void apply(const int y) {
-        const int top = 18;
-        const int height = this->height() - 36;
+        const int top = 14;
+        const int height = 84;
         const int percent = height <= 0
             ? 0
             : std::clamp(100 - (y - top) * 100 / height, 0, 100);
-        percent_ = percent;
+        applyPercent(percent);
+    }
+    void applyPercent(int percent) {
+        percent_ = std::clamp(percent, 0, 100);
         update();
-        if (picked) {
-            picked(percent_);
-        }
+        if (picked) picked(percent_);
     }
 
     int percent_{100};
@@ -1175,6 +1051,7 @@ class NowPlayingCard final : public QWidget {
 public:
     explicit NowPlayingCard(QWidget*)
         : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::NoDropShadowWindowHint) {
+        setObjectName(QStringLiteral("musicFloatingPlayer"));
         setAttribute(Qt::WA_TranslucentBackground);
         setFixedWidth(340);
         auto* root = new QHBoxLayout(this);
@@ -1251,14 +1128,6 @@ public:
             }
         });
         connect(timeline_, &QSlider::sliderPressed, this, [this] { timelineScrub_ = true; });
-        auto* clickTimeline = static_cast<ClickSlider*>(timeline_);
-        clickTimeline->began = [this] { timelineScrub_ = true; };
-        clickTimeline->jumped = [this](const int value) {
-            timelineScrub_ = false;
-            if (onSeek) {
-                onSeek(value);
-            }
-        };
         connect(timeline_, &QSlider::sliderReleased, this, [this] {
             timelineScrub_ = false;
             if (onSeek) {
@@ -1622,15 +1491,17 @@ void MusicWindow::clearSystemMedia() {
 namespace {
 // One slot for the process, shared by shared() and instance(): asking for the
 // instance must never construct a player that nothing asked for.
-MusicWindow*& musicWindowSlot() {
-    static MusicWindow* slot = nullptr;
+QPointer<MusicWindow>& musicWindowSlot() {
+    // QObject ownership tears the bar down with the main shell. A guarded slot
+    // cannot hand a later window a dangling instance after that destruction.
+    static QPointer<MusicWindow> slot;
     return slot;
 }
 } // namespace
 
 MusicWindow* MusicWindow::shared(QWidget* owner) {
-    // The bar lives as long as its owner window does: the first caller decides
-    // the parent, and later callers re-parent it into their own layout.
+    // The first caller determines the MainWindow owner. Pages only borrow the
+    // singleton footer; navigation must never reparent it.
     auto& slot = musicWindowSlot();
     if (slot == nullptr) {
         slot = new MusicWindow(owner != nullptr ? owner->window() : nullptr);
@@ -1662,6 +1533,14 @@ MusicWindow::MusicWindow(QWidget* parent)
     speedButton_ = new GlyphButton(Glyph::Close, this);
     speedButton_->setLabel(QStringLiteral("1X"));
     closeButton_ = new GlyphButton(Glyph::Close, this);
+    previousButton_->setObjectName(QStringLiteral("musicPrevious"));
+    playButton_->setObjectName(QStringLiteral("musicPlayPause"));
+    nextButton_->setObjectName(QStringLiteral("musicNext"));
+    volumeButton_->setObjectName(QStringLiteral("musicVolume"));
+    orderButton_->setObjectName(QStringLiteral("musicOrder"));
+    repeatButton_->setObjectName(QStringLiteral("musicRepeat"));
+    speedButton_->setObjectName(QStringLiteral("musicSpeed"));
+    closeButton_->setObjectName(QStringLiteral("musicClose"));
     playButton_->setActive(true);
     volumeButton_->setActive(true);
     previousButton_->setToolTip(QStringLiteral("Previous"));
@@ -1676,7 +1555,11 @@ MusicWindow::MusicWindow(QWidget* parent)
         button->setAccessibleName(button->toolTip());
 
     nameLabel_ = new QLabel(this);
+    nameLabel_->setObjectName(QStringLiteral("musicSongLabel"));
+    nameLabel_->setAccessibleName(tr("Current song. Click to open the floating player."));
+    nameLabel_->setTextFormat(Qt::RichText);
     timeLabel_ = new QLabel(QStringLiteral("0:00"), this);
+    timeLabel_->setObjectName(QStringLiteral("musicTime"));
     nameLabel_->setFont(textFont);
     timeLabel_->setFont(textFont);
     nameLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -1687,85 +1570,14 @@ MusicWindow::MusicWindow(QWidget* parent)
     timeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
     progress_ = new ProgressLine(this);
-    expandButton_ = new QPushButton(tr("Queue"), this);
-    expandButton_->setObjectName(QStringLiteral("musicExpandQueue"));
-    expandButton_->setCheckable(true);
-    expandButton_->setAccessibleName(tr("Expand now playing and queue"));
-    connect(expandButton_, &QPushButton::toggled, this, &MusicWindow::setExpanded);
-    expandedPanel_ = new QWidget(this);
-    expandedPanel_->setObjectName(QStringLiteral("musicNowPlayingPanel"));
-    auto* panelLayout = new QVBoxLayout(expandedPanel_);
-    panelLayout->setContentsMargins(12, 8, 12, 10);
-    panelLayout->setSpacing(6);
-    auto* songRow = new QHBoxLayout();
-    expandedCover_ = new QLabel(expandedPanel_);
-    expandedCover_->setFixedSize(64, 64);
-    expandedCover_->setAccessibleName(tr("Album cover"));
-    songRow->addWidget(expandedCover_);
-    auto* songText = new QVBoxLayout();
-    expandedTitle_ = new QLabel(expandedPanel_);
-    expandedTitle_->setObjectName(QStringLiteral("musicNowPlayingTitle"));
-    expandedTitle_->setTextFormat(Qt::PlainText);
-    expandedTitle_->setWordWrap(true);
-    expandedTitle_->setMaximumHeight(fontMetrics().height() * 2 + 4);
-    auto titleFont = font();
-    titleFont.setBold(true);
-    expandedTitle_->setFont(titleFont);
-    expandedDetail_ = new QLabel(expandedPanel_);
-    expandedDetail_->setTextFormat(Qt::PlainText);
-    expandedDetail_->setWordWrap(true);
-    expandedDetail_->setMaximumHeight(fontMetrics().height() * 2 + 4);
-    expandedDetail_->setForegroundRole(QPalette::PlaceholderText);
-    songText->addWidget(expandedTitle_);
-    songText->addWidget(expandedDetail_);
-    songRow->addLayout(songText, 1);
-    panelLayout->addLayout(songRow);
-    // On a narrow expanded bar these are the SAME transport buttons, moved to
-    // an inline row rather than silently hiding volume/order/repeat/speed.
-    expandedOptions_ = new QWidget(expandedPanel_);
-    expandedOptions_->setFixedHeight(kControlHeight);
-    panelLayout->addWidget(expandedOptions_);
-    expandedOptions_->hide();
-    queueSummary_ = new QLabel(expandedPanel_);
-    panelLayout->addWidget(queueSummary_);
-    queueList_ = new QListWidget(expandedPanel_);
-    queueList_->setObjectName(QStringLiteral("musicExpandedQueue"));
-    queueList_->setAccessibleName(tr("Playback queue. Activate a track to play it."));
-    queueList_->setIconSize(QSize(28, 28));
-    queueList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    queueList_->setTextElideMode(Qt::ElideRight);
-    panelLayout->addWidget(queueList_, 1);
-    auto* queueActions = new QHBoxLayout();
-    queueJump_ = new QPushButton(tr("Play"), expandedPanel_);
-    queueRemove_ = new QPushButton(tr("Remove"), expandedPanel_);
-    queueUp_ = new QPushButton(tr("Up"), expandedPanel_);
-    queueDown_ = new QPushButton(tr("Down"), expandedPanel_);
-    queueRemove_->setToolTip(tr("Remove from queue only; the vault file is kept"));
-    queueUp_->setAccessibleName(tr("Move selected track up"));
-    queueDown_->setAccessibleName(tr("Move selected track down"));
-    for (auto* action : {queueJump_, queueRemove_, queueUp_, queueDown_}) {
-        action->setMinimumWidth(0);
-        queueActions->addWidget(action);
-    }
-    panelLayout->addLayout(queueActions);
-    connect(queueList_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
-        playIndex(queueList_->row(item));
-    });
-    connect(queueJump_, &QPushButton::clicked, this, [this] { playIndex(queueList_->currentRow()); });
-    connect(queueRemove_, &QPushButton::clicked, this, [this] { removeQueueRow(queueList_->currentRow()); });
-    connect(queueUp_, &QPushButton::clicked, this, [this] { moveQueueRow(queueList_->currentRow(), -1); });
-    connect(queueDown_, &QPushButton::clicked, this, [this] { moveQueueRow(queueList_->currentRow(), 1); });
-    connect(queueList_, &QListWidget::currentRowChanged, this, [this](int row) {
-        queueJump_->setEnabled(row >= 0);
-        queueRemove_->setEnabled(row >= 0);
-        queueUp_->setEnabled(row > 0);
-        queueDown_->setEnabled(row >= 0 && row + 1 < queueList_->count());
-    });
-    expandedPanel_->hide();
     playlist_ = new PlaylistPopup(this);
     orderMenu_ = new OrderPopup(this);
     speedMenu_ = new SpeedPopup(this);
     volumeMenu_ = new VolumePopup(this);
+    playlist_->setObjectName(QStringLiteral("musicHoverPlaylist"));
+    orderMenu_->setObjectName(QStringLiteral("musicOrderMenu"));
+    speedMenu_->setObjectName(QStringLiteral("musicSpeedMenu"));
+    volumeMenu_->setObjectName(QStringLiteral("musicVolumeMenu"));
 
     previousButton_->entered = [this] { showOnly(nullptr, nullptr, false); };
     nextButton_->entered = [this] { showOnly(nullptr, nullptr, false); };
@@ -1795,7 +1607,10 @@ MusicWindow::MusicWindow(QWidget* parent)
     connect(speedButton_, &QAbstractButton::clicked, this, [this] { toggleSpeed(); });
     connect(orderButton_, &QAbstractButton::clicked, this, [this] { showOnly(orderMenu_, orderButton_, true); });
 
-    playlist_->picked = [this](const int index) { playIndex(index); };
+    playlist_->picked = [this](const int index) {
+        if (index == index_) togglePlay();
+        else playIndex(index);
+    };
     playlist_->labels = [this](const int index, QString* title, QString* detail) {
         const SongTags song = songFor(index);
         if (title != nullptr) {
@@ -1813,9 +1628,13 @@ MusicWindow::MusicWindow(QWidget* parent)
             *detail = info.suffix().isEmpty() ? QStringLiteral("Audio") : info.suffix().toUpper();
         }
     };
-    orderMenu_->picked = [this](const int mode) { setOrder(order_ == mode ? 0 : mode); };
+    orderMenu_->picked = [this](const int mode) { setOrder(order_ == mode ? 0 : mode); orderMenu_->hide(); };
     speedMenu_->picked = [this](const int milli) { setSpeedMilli(milli); };
     volumeMenu_->picked = [this](const int percent) { setVolumePercent(percent); };
+    progress_->hoverText = [this](const int value) {
+        const auto duration = durationMs_.load();
+        return duration > 0 ? formatTime(duration * value / 1000) : QString();
+    };
     progress_->moved = [this](const int value) {
         scrubbing_ = true;
         const auto duration = durationMs_.load();
@@ -1836,9 +1655,15 @@ MusicWindow::MusicWindow(QWidget* parent)
     clock_->setInterval(200);
     connect(clock_, &QTimer::timeout, this, [this] { refreshClock(); });
     clock_->start();
+    playlistShowTimer_ = new QTimer(this);
+    playlistShowTimer_->setSingleShot(true);
+    playlistShowTimer_->setInterval(300); // Panel::showFromOther
+    connect(playlistShowTimer_, &QTimer::timeout, this, [this] {
+        if (nameRect_.contains(mapFromGlobal(QCursor::pos()))) showOnly(playlist_, nameLabel_, false);
+    });
     hideTimer_ = new QTimer(this);
     hideTimer_->setSingleShot(true);
-    hideTimer_->setInterval(180);
+    hideTimer_->setInterval(300);
     connect(hideTimer_, &QTimer::timeout, this, [this] {
         if (!cursorOnChrome()) {
             hidePopups();
@@ -1955,94 +1780,6 @@ void MusicWindow::enqueue(const std::vector<MusicTrack>& tracks, const bool play
     prepareNextTrack();
     applySong();
     syncTransport();
-}
-
-void MusicWindow::setExpanded(bool expanded) {
-    expanded_ = expanded;
-    const QSignalBlocker blocker(expandButton_);
-    expandButton_->setChecked(expanded);
-    expandButton_->setText(expanded ? tr("Hide") : tr("Queue"));
-    expandButton_->setAccessibleName(expanded ? tr("Collapse now playing and queue") : tr("Expand now playing and queue"));
-    hidePopups();
-    expandedPanel_->setVisible(expanded);
-    const int textExtra = std::max(0, fontMetrics().height() - 18) * 4;
-    setFixedHeight(expanded ? kBarHeight + 292 + textExtra : kBarHeight);
-    if (expanded) { syncExpandedQueue(); syncExpandedSong(); }
-    layoutControls();
-    updateGeometry();
-}
-
-void MusicWindow::syncExpandedSong() {
-    if (!expandedTitle_) return;
-    expandedTitle_->setText(errorText_.isEmpty() ? songTitle_ : errorText_);
-    expandedTitle_->setToolTip(expandedTitle_->text());
-    expandedDetail_->setText(artistText_ + ((!artistText_.isEmpty() && !albumText_.isEmpty()) ? QStringLiteral(" · ") : QString()) + albumText_);
-    const auto id = tracks_.empty() ? 0 : tracks_[static_cast<std::size_t>(index_)].id;
-    expandedCover_->setPixmap(roundedCover(coverId_ == id ? cover_ : QImage(), 64));
-}
-
-void MusicWindow::syncExpandedQueue() {
-    if (!queueList_) return;
-    const int selected = queueList_->currentRow();
-    const QSignalBlocker blocker(queueList_);
-    // Preserve row selection/scroll while transport and metadata change. Queue
-    // positions (not file IDs) identify rows, so duplicate tracks remain valid.
-    while (queueList_->count() > static_cast<int>(tracks_.size())) delete queueList_->takeItem(queueList_->count() - 1);
-    while (queueList_->count() < static_cast<int>(tracks_.size())) queueList_->addItem(QString());
-    for (int row = 0; row < queueList_->count(); ++row) {
-        auto* item = queueList_->item(row);
-        const auto song = songFor(row);
-        item->setText((row == index_ ? tr("Now · ") : QString::number(row + 1) + QStringLiteral(" · "))
-            + song.title + (song.artist.isEmpty() ? QString() : QStringLiteral(" — ") + song.artist));
-        item->setToolTip(item->text());
-        auto weight = item->font(); weight.setBold(row == index_); item->setFont(weight);
-        const auto art = art_.find(tracks_[static_cast<std::size_t>(row)].id);
-        item->setIcon(QIcon(art == art_.end() ? paintNotePlate(28) : roundedCover(art->second, 28)));
-    }
-    const int row = queueList_->count() == 0 ? -1 : std::clamp(selected < 0 ? index_ : selected, 0, queueList_->count() - 1);
-    queueList_->setCurrentRow(row);
-    queueJump_->setEnabled(row >= 0);
-    queueRemove_->setEnabled(row >= 0);
-    queueUp_->setEnabled(row > 0);
-    queueDown_->setEnabled(row >= 0 && row + 1 < queueList_->count());
-    queueSummary_->setText(tr("Queue · %1 tracks").arg(tracks_.size()));
-}
-
-void MusicWindow::removeQueueRow(int row) {
-    if (row < 0 || row >= static_cast<int>(tracks_.size())) return;
-    invalidateNextTrack();
-    adoptPendingTrack(false);
-    const bool removingCurrent = row == index_;
-    const bool wasPaused = paused_.load();
-    if (removingCurrent) stopWorker();
-    tracks_.erase(tracks_.begin() + row);
-    index_ = MusicQueueEdit::afterRemoval(index_, row, static_cast<int>(tracks_.size()), order_);
-    history_.clear(); refillBag();
-    if (tracks_.empty()) {
-        stopWorker();
-        if (output_) output_->stop();
-        sink_->clear();
-        paused_.store(true);
-        durationMs_.store(0); consumedFrames_.store(0); originMs_.store(0);
-        cover_ = QImage(); coverId_ = 0;
-        clearSystemMedia();
-    } else if (removingCurrent) {
-        showTrack(); startWorker(); setPaused(wasPaused);
-    } else prepareNextTrack();
-    applySong(); syncTransport();
-}
-
-void MusicWindow::moveQueueRow(int row, int delta) {
-    const int to = row + delta;
-    if (row < 0 || row >= static_cast<int>(tracks_.size()) || to < 0 || to >= static_cast<int>(tracks_.size())) return;
-    invalidateNextTrack();
-    adoptPendingTrack(false);
-    std::swap(tracks_[static_cast<std::size_t>(row)], tracks_[static_cast<std::size_t>(to)]);
-    index_ = MusicQueueEdit::afterMove(index_, row, to);
-    history_.clear(); refillBag();
-    prepareNextTrack();
-    applySong(); syncTransport();
-    queueList_->setCurrentRow(to);
 }
 
 void MusicWindow::showTrack() {
@@ -2547,10 +2284,8 @@ void MusicWindow::requestCovers() {
                 if (!self->tracks_.empty() && self->tracks_[static_cast<std::size_t>(self->index_)].id == id) {
                     self->cover_ = image;
                     self->coverId_ = id;
-                    self->syncExpandedSong();
                     self->updateTray();
                 }
-                self->syncExpandedQueue();
                 if (self->playlist_ != nullptr) {
                     self->playlist_->setArt(id, QPixmap::fromImage(image));
                 }
@@ -2700,7 +2435,6 @@ void MusicWindow::refreshClock() {
                 errorText_ = QString::fromStdString(error);
                 setPaused(true);
                 applyName();
-                syncExpandedSong();
                 playButton_->setGlyph(Glyph::Play);
                 playButton_->setToolTip(QStringLiteral("Play"));
             }
@@ -2712,7 +2446,7 @@ void MusicWindow::refreshClock() {
         }
     }
     const auto duration = durationMs_.load();
-    progress_->setEnabled(duration > 0);
+    progress_->setEnabled(duration > 0 && !tracks_.empty() && errorText_.isEmpty());
     if (scrubbing_) {
         return;
     }
@@ -2724,8 +2458,7 @@ void MusicWindow::refreshClock() {
             trayCard_->setTimeline(value);
         }
     }
-    const QString text = expanded_ && duration > 0
-        ? formatTime(position) + QStringLiteral(" / ") + formatTime(duration) : formatTime(position);
+    const QString text = formatTime(position);
     if (timeLabel_->text() != text) {
         timeLabel_->setText(text);
         layoutControls();
@@ -2754,66 +2487,32 @@ void MusicWindow::onTrackEnded() {
 }
 
 void MusicWindow::layoutControls() {
-    const bool wide = width() >= 500;
-    const bool inlineOptions = expanded_ && !wide;
-    expandedOptions_->setVisible(inlineOptions);
-    int optionX = 0;
-    for (auto* button : {volumeButton_, orderButton_, repeatButton_, speedButton_}) {
-        QWidget* owner = inlineOptions ? expandedOptions_ : this;
-        if (button->parentWidget() != owner) button->setParent(owner);
-        if (inlineOptions) {
-            button->setGeometry(optionX, 0, 40, kControlHeight);
-            optionX += 44;
-        }
-    }
+    const bool wide = width() >= telegram_music::wideWidth || barOver_ || cursorOnChrome();
     const bool skip = previousAvailable() || nextAvailable();
     previousButton_->setVisible(skip);
     nextButton_->setVisible(skip);
-    volumeButton_->setVisible(wide || expanded_);
-    orderButton_->setVisible(wide || expanded_);
-    repeatButton_->setVisible(wide || expanded_);
-    speedButton_->setVisible(wide || expanded_);
+    volumeButton_->setVisible(wide);
+    orderButton_->setVisible(wide);
+    repeatButton_->setVisible(wide);
+    speedButton_->setVisible(wide);
 
-    int x = 9;
-    if (skip) {
-        previousButton_->setGeometry(x, 0, 24, kControlHeight);
-        x += 25;
-    }
-    playButton_->setGeometry(x, 0, 24, kControlHeight);
-    x += 24;
-    if (skip) {
-        x += 1;
-        nextButton_->setGeometry(x, 0, 24, kControlHeight);
-        x += 24;
-    }
-    x += 8;
-    const int nameLeft = x;
-
-    int right = width();
-    closeButton_->setGeometry(right - 39, 0, 39, kControlHeight);
-    right -= 39;
-    const int expandWidth = std::max(54, expandButton_->fontMetrics().horizontalAdvance(expandButton_->text()) + 20);
-    expandButton_->setGeometry(right - expandWidth, 1, expandWidth, kControlHeight - 2);
-    right -= expandWidth;
-    if (wide) {
-        speedButton_->setGeometry(right - 30, 0, 30, kControlHeight);
-        right -= 30;
-        repeatButton_->setGeometry(right - 30, 0, 30, kControlHeight);
-        right -= 30;
-        orderButton_->setGeometry(right - 30, 0, 30, kControlHeight);
-        right -= 30;
-        volumeButton_->setGeometry(right - 34, 0, 34, kControlHeight);
-        right -= 34;
-    }
-    right -= 8;
     const int timeWidth = std::max(32, timeLabel_->fontMetrics().horizontalAdvance(timeLabel_->text()) + 2);
-    timeLabel_->setGeometry(right - timeWidth, 0, timeWidth, kControlHeight);
-    const int nameWidth = std::max(0, right - timeWidth - 8 - nameLeft);
-    nameLabel_->setGeometry(nameLeft, 0, nameWidth, kControlHeight);
-    nameRect_ = nameLabel_->geometry();
-    progress_->setGeometry(0, kBarHeight - 16, width(), 16);
+    const auto g = telegram_music::geometry(width(), skip, wide, timeWidth,
+        nameLabel_->fontMetrics().height(), nameLabel_->fontMetrics().ascent());
+    previousButton_->setGeometry(g.previous);
+    playButton_->setGeometry(g.play);
+    nextButton_->setGeometry(g.next);
+    closeButton_->setGeometry(g.close);
+    speedButton_->setGeometry(g.speed);
+    repeatButton_->setGeometry(g.repeat);
+    orderButton_->setGeometry(g.order);
+    volumeButton_->setGeometry(g.volume);
+    timeLabel_->setVisible(wide); // Telegram hides the entire right-controls wrap.
+    timeLabel_->setGeometry(g.time);
+    nameLabel_->setGeometry(g.name);
+    nameRect_ = QRect(g.name.x(), 0, g.name.width(), kBarHeight - telegram_music::seekHeight);
+    progress_->setGeometry(g.seek);
     progress_->raise();
-    expandedPanel_->setGeometry(0, kBarHeight, width(), std::max(0, height() - kBarHeight));
     applyName();
 }
 
@@ -2828,14 +2527,22 @@ void MusicWindow::applyName() {
         nameLabel_->setForegroundRole(QPalette::WindowText);
     }
     const QString full = failed ? errorText_ : titleText_;
-    nameLabel_->setText(nameLabel_->fontMetrics().elidedText(full, Qt::ElideRight, std::max(0, nameLabel_->width())));
+    const auto elided = nameLabel_->fontMetrics().elidedText(full, Qt::ElideRight, std::max(0, nameLabel_->width()));
+    // FormatSongDocumentName: performer emphasized, song name normal.
+    const auto artist = !failed && !artistText_.isEmpty() && elided.startsWith(artistText_)
+        ? artistText_ : QString();
+    nameLabel_->setText(artist.isEmpty() ? elided.toHtmlEscaped()
+        : QStringLiteral("<b>%1</b>%2").arg(artist.toHtmlEscaped(), elided.mid(artist.size()).toHtmlEscaped()));
 }
 
 void MusicWindow::syncTransport() {
     const bool playing = !tracks_.empty() && !paused_.load() && !terminalEnded_ && errorText_.isEmpty();
+    progress_->setEnabled(!tracks_.empty() && durationMs_.load() > 0 && errorText_.isEmpty());
+    playlist_->setPlaying(playing);
     playButton_->setEnabled(!tracks_.empty());
     playButton_->setGlyph(playing ? Glyph::Pause : Glyph::Play);
     playButton_->setToolTip(playing ? tr("Pause") : tr("Play"));
+    playButton_->setAccessibleName(playButton_->toolTip());
     const bool skip = previousAvailable() || nextAvailable();
     previousButton_->setVisible(skip);
     nextButton_->setVisible(skip);
@@ -2872,7 +2579,10 @@ void MusicWindow::syncTransport() {
         orderButton_->setToolTip(QStringLiteral("Playback order"));
     }
     const int volume = muted_.load() ? 0 : volumePercent_.load();
-    volumeButton_->setGlyph(volume <= 0 ? Glyph::VolumeOff : volume < 50 ? Glyph::VolumeLow : Glyph::VolumeFull);
+    volumeButton_->setGlyph(volume <= 0 ? Glyph::VolumeOff : volume < 66 ? Glyph::VolumeLow : Glyph::VolumeFull);
+    volumeButton_->setAccessibleName(tr("Volume %1%").arg(volume));
+    repeatButton_->setAccessibleName(repeatButton_->toolTip());
+    orderButton_->setAccessibleName(orderButton_->toolTip());
     layoutControls();
     updateTray();
 }
@@ -2978,7 +2688,9 @@ void MusicWindow::showOnly(QWidget* popup, QWidget* anchor, const bool alignRigh
     popup->adjustSize();
     const QPoint origin = anchor->mapToGlobal(QPoint(0, 0));
     int x = alignRight ? origin.x() + anchor->width() - popup->width() : origin.x();
-    int y = origin.y() - popup->height() + 8;
+    // Telegram's bar is above its chat; this footer opens upward instead.
+    if (popup == volumeMenu_) x = origin.x() + (anchor->width() - popup->width()) / 2;
+    int y = origin.y() - popup->height() + 1;
     if (QScreen* screen = QGuiApplication::screenAt(origin)) {
         const QRect area = screen->availableGeometry();
         x = std::clamp(x, area.left() + 8, std::max(area.left() + 8, area.right() - popup->width() - 8));
@@ -2990,6 +2702,7 @@ void MusicWindow::showOnly(QWidget* popup, QWidget* anchor, const bool alignRigh
 }
 
 void MusicWindow::hidePopups() {
+    if (playlistShowTimer_) playlistShowTimer_->stop();
     for (QWidget* popup : {static_cast<QWidget*>(playlist_), static_cast<QWidget*>(orderMenu_), static_cast<QWidget*>(speedMenu_), static_cast<QWidget*>(volumeMenu_)}) {
         if (popup != nullptr) {
             popup->hide();
@@ -3030,9 +2743,20 @@ void MusicWindow::paintEvent(QPaintEvent*) {
     painter.fillRect(0, 0, width(), 1, playerHairline());
 }
 
+void MusicWindow::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && nameRect_.contains(event->pos())) {
+        hidePopups();
+        showTrayCard();
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
 void MusicWindow::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (nameRect_.contains(event->pos())) {
-        setExpanded(!expanded_);
+    if (event->button() == Qt::LeftButton && nameRect_.contains(event->pos())) {
+        hidePopups();
+        showTrayCard();
         event->accept();
         return;
     }
@@ -3041,8 +2765,11 @@ void MusicWindow::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void MusicWindow::mouseMoveEvent(QMouseEvent* event) {
     QWidget::mouseMoveEvent(event);
-    if (!expanded_ && nameRect_.contains(event->pos())) {
-        showOnly(playlist_, nameLabel_, false);
+    if (nameRect_.contains(event->pos())) {
+        if (!playlist_->isVisible() && !playlistShowTimer_->isActive()) playlistShowTimer_->start();
+    } else {
+        playlistShowTimer_->stop();
+        armHide();
     }
 }
 
@@ -3054,6 +2781,7 @@ void MusicWindow::enterEvent(QEvent* event) {
 
 void MusicWindow::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
+    playlistShowTimer_->stop();
     QTimer::singleShot(0, this, [this] {
         if (!rect().contains(mapFromGlobal(QCursor::pos()))) {
             barOver_ = false;
@@ -3075,12 +2803,26 @@ bool MusicWindow::eventFilter(QObject* watched, QEvent* event) {
         default: break;
         }
     }
-    if (watched == this && event->type() == QEvent::PaletteChange) {
-        syncExpandedSong();
-        syncExpandedQueue();
-    }
     if (!isVisible()) {
         return QWidget::eventFilter(watched, event);
+    }
+    if (event->type() == QEvent::Wheel && watched == volumeButton_) {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        if (wheel->angleDelta().y()) {
+            setVolumePercent((muted_.load() ? 0 : volumePercent_.load()) + wheel->angleDelta().y() / 12);
+            wheel->accept();
+            return true;
+        }
+    }
+    if (event->type() == QEvent::Enter &&
+        (watched == playlist_ || watched == orderMenu_ || watched == speedMenu_ || watched == volumeMenu_)) {
+        hideTimer_->stop();
+    } else if (event->type() == QEvent::Leave &&
+        (watched == playlist_ || watched == orderMenu_ || watched == speedMenu_ || watched == volumeMenu_)) {
+        armHide();
+    }
+    if (event->type() == QEvent::KeyPress && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+        hidePopups();
     }
     if (event->type() == QEvent::MouseButtonPress) {
         if (!cursorOnChrome() && !rect().contains(mapFromGlobal(static_cast<QMouseEvent*>(event)->globalPos()))) {
@@ -3172,8 +2914,6 @@ void MusicWindow::applySong() {
             : artistText_ + QStringLiteral(" — ") + songTitle_;
     }
     applyName();
-    syncExpandedSong();
-    syncExpandedQueue();
     if (playlist_ != nullptr) {
         playlist_->sync(tracks_, index_);
         for (const auto& entry : art_) {

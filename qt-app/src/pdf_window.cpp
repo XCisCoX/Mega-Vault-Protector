@@ -929,7 +929,7 @@ void PdfWindow::relayout() {
         impl_->pages[i]->rotation = impl_->rotation;
         impl_->pages[i]->setFixedSize(width + 2 * kPageMargin, height + 2 * kPageMargin);
     }
-    impl_->host->setMinimumWidth(width + 2 * kPageMargin + 48);
+    //impl_->host->setMinimumWidth(width + 2 * kPageMargin + 48);
     int contentHeight = impl_->pagesLayout->contentsMargins().top()
         + impl_->pagesLayout->contentsMargins().bottom();
     if (!impl_->pages.empty()) {
@@ -938,7 +938,7 @@ void PdfWindow::relayout() {
     for (auto* page : impl_->pages) {
         contentHeight += page->height();
     }
-    impl_->host->setMinimumHeight(contentHeight);
+    //impl_->host->setMinimumHeight(contentHeight);
     // Page positions are read by the anchor helpers, so settle the layout now.
     impl_->pagesLayout->activate();
 

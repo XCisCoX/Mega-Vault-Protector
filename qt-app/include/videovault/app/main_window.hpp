@@ -196,6 +196,9 @@ private:
     void openSoundCloud(const QString& query = QString());
     // The library's own music page: audio items, not a provider search.
     void openMusicLibrary();
+    // One footer owned by the main shell, outside the page stack. Music and
+    // the gallery borrow it, so changing pages cannot hide or restart audio.
+    MusicWindow* ensureMusicPlayer();
     void offerPluginSearchRow();
     // The provider shown as a folder of the library: one mixed root list of
     // album folders and song rows, an album opening as a folder of its tracks,

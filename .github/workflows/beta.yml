@@ -2,7 +2,7 @@ name: Beta Build
 # Manual prerelease only. Tag pushes are published by release.yml, so this
 # workflow must not also run on v* or the two jobs fight over the same tag.
 # Actions -> Beta Build -> Run workflow takes the next unused beta tag
-# (v2.0.4-beta.1, then v2.0.4-beta.2) without a typed version.
+# (v2.1.1-beta.1, then v2.1.1-beta.2) without a typed version.
 on:
   workflow_dispatch:
 
@@ -224,6 +224,9 @@ jobs:
           $staging = "$env:RUNNER_TEMP\package"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           Copy-Item $exe $staging
+          # Preserve the GPL notices for the bundled Telegram player assets.
+          New-Item -ItemType Directory -Force -Path "$staging\licenses" | Out-Null
+          Copy-Item -Recurse "$exeDir\licenses\telegram-player" "$staging\licenses"
           # Ship EVERY runtime DLL the linker resolved (staged next to the exe
           # by the POST_BUILD TARGET_RUNTIME_DLLS copy): Qt, argon2, libsodium,
           # sqlcipher, libcrypto (OpenSSL), and FFmpeg. The previous hand-

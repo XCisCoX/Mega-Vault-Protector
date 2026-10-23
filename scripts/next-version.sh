@@ -10,6 +10,11 @@ if [ "${1:-}" = "--beta" ]; then
     beta=1
 fi
 
+# Floor of the upcoming release line. Tags below it (the 2.0.x line) cannot
+# pull the next version back down: after the last 2.0 tag this yields 2.1.0.
+floor_major=2
+floor_minor=1
+
 major=2
 minor=0
 patch=3
@@ -34,7 +39,14 @@ while IFS= read -r tag; do
 done < <(git tag -l 'v*')
 
 if [ "$found" -eq 1 ]; then
-    patch=$((patch + 1))
+    if [ "$major" -lt "$floor_major" ] \
+        || { [ "$major" -eq "$floor_major" ] && [ "$minor" -lt "$floor_minor" ]; }; then
+        major="$floor_major"
+        minor="$floor_minor"
+        patch=0
+    else
+        patch=$((patch + 1))
+    fi
 fi
 
 if [ "$beta" -eq 1 ]; then

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QPointer>
 
 #include <cstdint>
 #include <functional>
@@ -25,7 +26,7 @@ class MusicWindow;
 
 // The library's music page: every audio item in the vault, listed like a music
 // app (title, artist, size) instead of a folder of files. Playing a row hands a
-// queue to the existing MusicWindow bar, which sits at the bottom of the page.
+// queue to the borrowed, MainWindow-owned persistent footer.
 class MusicLibraryPage final : public QWidget {
     Q_OBJECT
 
@@ -33,13 +34,11 @@ public:
     explicit MusicLibraryPage(QWidget* parent = nullptr);
     void setVault(const std::shared_ptr<videovault::core::Vault>& vault);
     void refresh();
-    // Provider search is only offered when a music provider is installed and
-    // enabled; the local library works without one.
-    void setProviderAvailable(bool available);
+    // Borrowed: never reparents, embeds, closes or deletes the central footer.
+    void setPlayer(MusicWindow* player);
 
 signals:
     void closed();
-    void providerRequested();
 
 private:
     struct Track {
@@ -72,9 +71,14 @@ private:
     // the complete new track sequence. Every mutation reloads and says what
     // happened, so a refused edit is never silent.
     void createPlaylist(std::int64_t initialTrack = 0);
-    void renamePlaylist(const Playlist& playlist);
-    void deletePlaylist(const Playlist& playlist);
+    void renamePlaylist(Playlist playlist);
+    void deletePlaylist(Playlist playlist);
     void changePlaylistTracks(std::int64_t id, std::vector<std::int64_t> ids);
+    void addPlaylistTracks();
+    void editSelectedTrack(int direction); // 0 removes, -1/+1 moves in stored order.
+    void updateActions();
+    void showError(const QString& message);
+    void runPlaylistEdit(std::function<QString()> work);
     [[nodiscard]] const Playlist* playlistById(std::int64_t id) const;
     void openPlaylist(std::int64_t id);
     void rebuild();
@@ -85,7 +89,6 @@ private:
     // N package opens just to paint a list.
     void startCoverLoads();
     void loadNextCover();
-    [[nodiscard]] std::vector<Track> playableOrder() const;
 
     std::shared_ptr<videovault::core::Vault> vault_;
     std::vector<Track> tracks_;
@@ -101,7 +104,16 @@ private:
     QLabel* count_{nullptr};
     QLabel* empty_{nullptr};
     QPushButton* playAll_{nullptr};
-    QPushButton* provider_{nullptr};
+    QPushButton* newPlaylist_{nullptr};
+    QPushButton* openPlaylist_{nullptr};
+    QPushButton* renamePlaylist_{nullptr};
+    QPushButton* deletePlaylist_{nullptr};
+    QPushButton* addTracks_{nullptr};
+    QPushButton* removeTrack_{nullptr};
+    QPushButton* moveUp_{nullptr};
+    QPushButton* moveDown_{nullptr};
+    QLabel* playlistTitle_{nullptr};
+    QLabel* status_{nullptr};
     QComboBox* section_{nullptr};
     QComboBox* group_{nullptr};
     QPushButton* playlistBack_{nullptr};
@@ -111,7 +123,9 @@ private:
     int coverGeneration_{0};
     bool coverBusy_{false};
     int currentSection_{SongsSection};
-    MusicWindow* player_{nullptr};
+    QPointer<MusicWindow> player_;
+    bool playlistEditBusy_{false};
+    std::uint64_t vaultGeneration_{0};
 };
 
 } // namespace videovault::app

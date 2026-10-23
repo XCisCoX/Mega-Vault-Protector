@@ -14,7 +14,7 @@ fun httpTest(args: Array<String>) {
     val tls = SSLContext.getInstance("TLS").apply { init(km.keyManagers,null,null) }
     val server = HttpsServer.create(InetSocketAddress("localhost",443),0).apply { httpsConfigurator = HttpsConfigurator(tls) }
     server.createContext("/ok") { e ->
-        check(e.requestHeaders.getFirst("User-Agent") == "MegaVaultProtect/2.0.3 (music plugin)")
+        check(e.requestHeaders.getFirst("User-Agent") == "MegaVaultProtect/2.1.0 (music plugin)")
         val b="fLaCfixture".toByteArray(); e.responseHeaders.add("Content-Type","application/octet-stream"); e.sendResponseHeaders(200,b.size.toLong()); e.responseBody.use { it.write(b) }
     }
     server.createContext("/bad") { e -> val b="<html>".toByteArray(); e.responseHeaders.add("Content-Type","audio/flac"); e.sendResponseHeaders(200,b.size.toLong()); e.responseBody.use { it.write(b) } }
@@ -25,7 +25,7 @@ fun httpTest(args: Array<String>) {
         val m=PluginManifest("test.fixture","Fixture","1.0.0","Fixture","https://localhost",setOf("localhost"),"Fixture")
         fun body(path: String, cap: Int): ByteArray {
             val c=java.net.URL("https://localhost$path").openConnection() as javax.net.ssl.HttpsURLConnection
-            c.setRequestProperty("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)")
+            c.setRequestProperty("User-Agent", "MegaVaultProtect/2.1.0 (music plugin)")
             try { return PluginHttp.readBody(c,cap,true) } finally { c.disconnect() }
         }
         check(body("/ok",100).contentEquals("fLaCfixture".toByteArray()))

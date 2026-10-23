@@ -49,6 +49,8 @@ public:
     void clear();
     // Number of interleaved s16 samples still buffered.
     std::size_t buffered_samples() const;
+    // PCM actually pulled by QAudioOutput, not decoded/queued PCM. Reset on clear.
+    std::uint64_t consumed_samples() const;
 
     qint64 readData(char* data, qint64 maxSize) override;
     qint64 writeData(const char* data, qint64 maxSize) override;
@@ -57,6 +59,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::int16_t> buffer_;
     std::size_t read_cursor_{0};
+    std::uint64_t consumedSamples_{0};
 };
 
 // Video display surface: paints the latest frame directly (no QPixmap
@@ -71,6 +74,8 @@ public:
         setAttribute(Qt::WA_OpaquePaintEvent);
         setMouseTracking(true);
     }
+
+    void setPhotoMode(bool photo) { photoMode_ = photo; update(); }
 
     void setFrame(const QImage& image) {
         frame_ = image;
@@ -130,7 +135,7 @@ protected:
                 // pixel per screen pixel: a 300px still should look like a
                 // 300px still, not a blurred wall.
                 QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
-                if (fitted.width() > frame_.width() || fitted.height() > frame_.height()) {
+                if (photoMode_ && (fitted.width() > frame_.width() || fitted.height() > frame_.height())) {
                     fitted = frame_.size();
                 }
                 const QRectF target(
@@ -158,6 +163,10 @@ private:
     // A neutral studio backdrop rather than pure black, with a soft lift behind
     // the picture so it reads as an object on a surface.
     void paintBackdrop(QPainter& painter) const {
+        if (!photoMode_) {
+            painter.fillRect(rect(), Qt::black);
+            return;
+        }
         QLinearGradient base(0, 0, 0, height());
         base.setColorAt(0.0, QColor(17, 17, 20));
         base.setColorAt(1.0, QColor(9, 9, 11));
@@ -174,6 +183,7 @@ private:
 
     // Shadow + hairline so the picture has an edge instead of bleeding away.
     void paintPlate(QPainter& painter, const QRectF& target) const {
+        if (!photoMode_) return;
         painter.setRenderHint(QPainter::Antialiasing, true);
         for (int step = 3; step >= 1; --step) {
             const qreal spread = step * 6.0;
@@ -217,6 +227,7 @@ private:
         painter.drawText(chip, Qt::AlignCenter, info_);
     }
 
+    bool photoMode_{false};
     QImage frame_;
     QString text_;
     QString overlayText_;
@@ -247,7 +258,7 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
         const bool active = hovered_ || isSliderDown();
-        const int track_h = active ? 6 : 3;
+        const int track_h = 3;
         const int track_y = (height() - track_h) / 2;
         const double fraction = maximum() > minimum()
             ? static_cast<double>(value() - minimum())
@@ -268,71 +279,57 @@ protected:
             const int handle_x = static_cast<int>(width() * fraction);
             // Round handle.
             painter.setBrush(QColor(255, 255, 255));
-            painter.drawEllipse(QPointF(handle_x, height() / 2.0), 7.0, 7.0);
-            // Time bubble above the cursor.
-            const int shown_ms = isSliderDown() ? value() : hoverMs_;
-            const QString time_text = formatSliderTime(shown_ms);
-            const QFontMetrics fm(font());
-            const int bubble_w = fm.horizontalAdvance(time_text) + 16;
-            const int bubble_h = fm.height() + 8;
-            const int bubble_x = std::clamp(handle_x - bubble_w / 2, 2, width() - bubble_w - 2);
-            const QRect bubble(bubble_x, 1, bubble_w, bubble_h);
-            painter.setBrush(QColor(18, 22, 30, 235));
-            painter.setPen(QPen(QColor(255, 255, 255, 70), 1));
-            painter.drawRoundedRect(bubble, 6, 6);
-            painter.setPen(QColor(238, 242, 248));
-            painter.drawText(bubble, Qt::AlignCenter, time_text);
+            painter.drawEllipse(QPointF(std::clamp(handle_x, 6, std::max(6, width() - 6)), height() / 2.0), 6.0, 6.0);
+
         }
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
         hovered_ = true;
-        if (maximum() > minimum()) {
-            const double fraction = std::clamp(
-                static_cast<double>(event->pos().x())
-                    / static_cast<double>(std::max(1, width())),
-                0.0, 1.0);
-            hoverMs_ = minimum() + static_cast<int>(fraction * (maximum() - minimum()));
+        if (isSliderDown()) {
+            setSliderPosition(valueAt(event->pos().x()));
+            event->accept();
+        } else {
+            QSlider::mouseMoveEvent(event);
         }
         update();
-        QSlider::mouseMoveEvent(event);
     }
 
     void leaveEvent(QEvent* event) override {
         hovered_ = false;
-        hoverMs_ = value();
         update();
         QSlider::leaveEvent(event);
     }
 
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() == Qt::LeftButton && maximum() > minimum()) {
-            const double fraction = std::clamp(
-                static_cast<double>(event->pos().x())
-                    / static_cast<double>(std::max(1, width())),
-                0.0, 1.0);
-            setValue(minimum() + static_cast<int>(fraction * (maximum() - minimum())));
+            // Mark down BEFORE changing position: even a groove click emits a
+            // seek press/release, with no QStyle page-step correction.
+            setSliderDown(true);
+            setSliderPosition(valueAt(event->pos().x()));
+            event->accept();
+            return;
         }
         QSlider::mousePressEvent(event);
     }
 
-private:
-    static QString formatSliderTime(const int ms) {
-        const int total = std::max(0, ms) / 1000;
-        const int hours = total / 3600;
-        const int minutes = (total % 3600) / 60;
-        const int seconds = total % 60;
-        if (hours > 0) {
-            return QStringLiteral("%1:%2:%3")
-                .arg(hours).arg(minutes, 2, 10, QLatin1Char('0'))
-                .arg(seconds, 2, 10, QLatin1Char('0'));
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && isSliderDown()) {
+            setSliderPosition(valueAt(event->pos().x()));
+            setValue(sliderPosition());
+            setSliderDown(false);
+            event->accept();
+            return;
         }
-        return QStringLiteral("%1:%2")
-            .arg(minutes).arg(seconds, 2, 10, QLatin1Char('0'));
+        QSlider::mouseReleaseEvent(event);
     }
 
+private:
+    int valueAt(int x) const {
+        const double fraction = std::clamp(double(x) / std::max(1, width()), 0.0, 1.0);
+        return minimum() + int(fraction * (double(maximum()) - minimum()));
+    }
     bool hovered_{false};
-    int hoverMs_{0};
 };
 
 // PotPlayer-style window with a worker-thread decode pipeline: the worker
@@ -361,7 +358,19 @@ public:
     // 0 off, 1 repeat the library, 2 repeat this file.
     int repeatMode() const { return repeatMode_; }
     bool shuffleOn() const { return shuffle_; }
-    // Plays inside the main window until the viewer is popped into its own window.
+    // Pop-out uses a standalone, maximized viewer; normal playback stays
+    // embedded in the maximized main window. Re-presenting a pop-out keeps
+    // the decoder, clock and fullscreen state intact.
+    void presentViewer(QWidget* owner = nullptr);
+    // Re-shows the current picture after the widget gets a new native surface
+    // (embed <-> pop-out); the frame buffer survives a reparent, the pixels do not.
+    void repaintFrame();
+    // Blanks the picture surface (used right before the widget is detached, so
+    // a stale backing-store copy can never be mistaken for a second player).
+    void clearSurface();
+    bool isPhotoViewer() const { return imageMode_; }
+    bool isMediaViewer() const { return viewerOverlay_; }
+    // Photos and legacy embedded callers can still use the in-window surface.
     void prepareDock();
     void detach();
     bool isDetached() const { return detached_; }
@@ -401,6 +410,8 @@ private:
     void showChrome();
     void hideChrome();
     void layoutChrome();
+    void layoutPhotoChrome();
+    void showPhotoMenu();
     void updatePopIcon();
     void refreshTransportIcons();
     void applyDetachedFrame();
@@ -445,6 +456,11 @@ private:
     QAbstractButton* windowMax_{nullptr};
     QPushButton* popButton_{nullptr};
     bool detached_{false};
+    bool viewerOverlay_{false};
+    bool windowDragPressed_{false};
+    bool windowDragMoved_{false};
+    QPoint windowDragStart_;
+    QPoint windowDragPosition_;
     bool frameReady_{false};
     QWidget* controlsOverlay_{nullptr};
     QPushButton* centerPlayButton_{nullptr};
@@ -461,6 +477,9 @@ private:
     QSlider* volumeSlider_{nullptr};
     QComboBox* cacheCombo_{nullptr};
     QPushButton* fullscreenButton_{nullptr};
+    QPushButton* videoMenuButton_{nullptr};
+    bool suppressVideoRelease_{false};
+    bool fullscreenWasMaximized_{false};
     QPushButton* repeatButton_{nullptr};
     QPushButton* shuffleButton_{nullptr};
     int repeatMode_{0};
@@ -484,6 +503,10 @@ private:
     QPushButton* zoomInButton_{nullptr};
     QPushButton* fitButton_{nullptr};
     QPushButton* rotateButton_{nullptr};
+    // Telegram photo chrome: right-aligned icon cells, no control card.
+    QPushButton* photoRotateButton_{nullptr};
+    QPushButton* photoMoreButton_{nullptr};
+    QLabel* photoName_{nullptr};
 
     // Audio device (UI thread only).
     AudioSink* audioSink_{nullptr};
@@ -491,6 +514,16 @@ private:
     std::atomic<AudioSink*> audioSinkAtomic_{nullptr};
     std::int64_t audioOffsetMs_{0};
     bool audioSetupDone_{false};
+    // Short transaction lock only: never held during decode, Qt device calls,
+    // sleeping or worker join. Serial rejects an in-flight pre-seek decode.
+    std::mutex audioPipelineMutex_;
+    std::atomic<std::uint64_t> audioSeekSerial_{0};
+    std::uint64_t workerAudioSerial_{0}; // worker only
+    std::uint64_t deviceAudioSerial_{0}; // UI only
+    std::atomic<bool> audioSeekPending_{false};
+    std::atomic<bool> audioDeviceFailed_{false};
+    std::atomic<std::int64_t> audioBaseMs_{-1};
+    std::atomic<int> audioDeviceBufferMs_{60};
 
     // Decode worker communication.
     std::thread worker_;

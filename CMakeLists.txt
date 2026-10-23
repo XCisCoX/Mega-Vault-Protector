@@ -7,8 +7,8 @@ project(MegaVaultProtect
 )
 
 # User-facing version. CI passes the next unused GitHub tag
-# (-DMVP_VERSION=2.0.4). Local builds stay on the latest published line.
-set(MVP_VERSION "2.0.3" CACHE STRING "Version stamped into this build")
+# (-DMVP_VERSION=2.1.1). Local builds stay on the upcoming release line.
+set(MVP_VERSION "2.1.0" CACHE STRING "Version stamped into this build")
 
 option(MVP_BUILD_APP "Build the Qt desktop application" ON)
 option(MVP_BUILD_TESTS "Build focused core tests" ON)
