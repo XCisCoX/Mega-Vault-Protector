@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/version.h>
 #include <libswscale/swscale.h>
 }
 
@@ -262,7 +263,12 @@ std::uint64_t duration_milliseconds(AVFormatContext* format, AVStream* stream) {
 }
 
 std::uint32_t stream_rotation(AVStream* stream) {
+#if LIBAVUTIL_VERSION_MAJOR < 57
+    // FFmpeg 4.x declares the out-parameter as int*, 5.1+ as size_t*.
+    int size = 0;
+#else
     std::size_t size = 0U;
+#endif
     auto* data = av_stream_get_side_data(stream, AV_PKT_DATA_DISPLAYMATRIX, &size);
     if (data == nullptr || size < 9U * sizeof(int32_t)) {
         return 0U;

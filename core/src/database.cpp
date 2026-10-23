@@ -17,7 +17,14 @@ namespace {
 class Statement final {
 public:
     Statement(sqlite3* database, const char* sql) : database_(database) {
+#if defined(SQLITE_PREPARE_PERSISTENT) && SQLITE_VERSION_NUMBER >= 3020000
         status_ = sqlite3_prepare_v3(database, sql, -1, SQLITE_PREPARE_PERSISTENT, &statement_, nullptr);
+#else
+        // Ubuntu 22.04 links an older SQLCipher whose header has no prepare_v3.
+        // The v2 call is the documented fallback and keeps statement caching
+        // behaviour identical apart from SQLite's internal statement reuse.
+        status_ = sqlite3_prepare_v2(database, sql, -1, &statement_, nullptr);
+#endif
     }
     ~Statement() {
         if (statement_ != nullptr) {

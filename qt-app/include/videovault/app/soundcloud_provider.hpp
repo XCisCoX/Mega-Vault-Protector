@@ -55,6 +55,9 @@ public:
         bool blocked{false};
         bool geo_blocked{false};
         bool access_unknown{false};
+        // `has_downloads_left: false` means the artist's allowance is used up:
+        // downloadable stays true while no original can be fetched any more.
+        bool downloads_exhausted{false};
         QString codec;   // "mp3" / "opus" / "aac" when known
         QString quality; // preset name, e.g. "mp3_0_1"
         // Signing/authorization token the stream URL may require.

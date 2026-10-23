@@ -134,7 +134,7 @@ SoundCloudTransport::Result SoundCloudTransport::get(QUrl url, int limit,
         tick.start(); loop.exec();
         result.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         redirect = url.resolved(reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl());
-        if (result.status < 300 || result.status >= 400) redirect = {};
+        if (result.status < 300 || result.status >= 400) redirect = QUrl();
         if (reply->error() != QNetworkReply::NoError && result.error.isEmpty()) result.error = reply->errorString();
         delete reply;
         if (!result.error.isEmpty()) return result;

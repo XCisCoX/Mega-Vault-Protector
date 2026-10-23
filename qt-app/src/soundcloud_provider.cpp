@@ -172,7 +172,7 @@ SoundCloudProvider::Rights SoundCloudProvider::download_rights(const Track& trac
         // A preview or blocked track is never saved, even when the stream exists.
         return playable;
     }
-    if (!track.downloadable) {
+    if (!track.downloadable || track.downloads_exhausted) {
         return Rights::NotDownloadable;
     }
     return Rights::None;
@@ -203,6 +203,8 @@ bool SoundCloudProvider::parse_track(const QJsonObject& object, Track* track) {
     parsed.duration_ms = std::isfinite(duration) ? static_cast<qint64>(std::clamp(duration, 0.0, 86400000.0)) : 0;
     parsed.streamable = object.value("streamable").toBool(false);
     parsed.downloadable = object.value("downloadable").toBool(false);
+    parsed.downloads_exhausted = object.contains("has_downloads_left")
+        && !object.value("has_downloads_left").toBool(true);
     parsed.preview_only = is_preview(object);
     parsed.blocked = is_blocked(object);
     parsed.geo_blocked = object.value("geo_blocked").toBool(false);
@@ -261,7 +263,15 @@ QUrl SoundCloudProvider::hls_stream_url(const QJsonObject& raw) {
     const auto transcodings = raw.value("media").toObject().value("transcodings").toArray();
     for (const auto& entry : transcodings) {
         const auto item = entry.toObject();
-        const QUrl url(item.value("url").toString());
+        const auto text = item.value("url").toString();
+        const QUrl url(text);
+        // A snipped rendition (or a preview media URL) is not the whole track:
+        // selecting it would play a snippet as if it were the release.
+        if (item.value("snipped").toBool(false)
+            || text.contains(QStringLiteral("preview"), Qt::CaseInsensitive)
+            || text.contains(QStringLiteral("snipped"), Qt::CaseInsensitive)) {
+            continue;
+        }
         if (item.value("format").toObject().value("protocol").toString() == "hls"
             && url.scheme() == "https" && url.isValid()) return url;
     }
@@ -318,9 +328,14 @@ QVector<SoundCloudProvider::Track> SoundCloudProvider::parse_track_collection(
 }
 
 QUrl SoundCloudProvider::progressive_stream_url(
-    const Track&, const QJsonObject& raw, bool* has_hls) {
+    const Track& track, const QJsonObject& raw, bool* has_hls) {
     if (has_hls != nullptr) {
         *has_hls = false;
+    }
+    // Rendition URLs are only useful for a track whose rights allow full
+    // playback: a preview or blocked track must not reach a decoder at all.
+    if (playback_rights(track) != Rights::None) {
+        return {};
     }
     const auto transcodings = raw.value("media").toObject().value("transcodings").toArray();
     QUrl fallback;
@@ -328,8 +343,14 @@ QUrl SoundCloudProvider::progressive_stream_url(
         const auto transcoding = entry.toObject();
         const auto format = transcoding.value("format").toObject();
         const auto protocol = format.value("protocol").toString();
-        const auto url = QUrl(transcoding.value("url").toString());
+        const auto text = transcoding.value("url").toString();
+        const auto url = QUrl(text);
         if (!url.isValid() || url.scheme() != QStringLiteral("https")) {
+            continue;
+        }
+        if (transcoding.value("snipped").toBool(false)
+            || text.contains(QStringLiteral("preview"), Qt::CaseInsensitive)
+            || text.contains(QStringLiteral("snipped"), Qt::CaseInsensitive)) {
             continue;
         }
         if (protocol == QStringLiteral("progressive")) {
