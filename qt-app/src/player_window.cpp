@@ -1793,13 +1793,16 @@ void PlayerWindow::workerLoop() {
             // The picture follows the audible PCM position (device pulls minus
             // its own buffer lead). Both sides advance on one device clock, so
             // a slow decoder stall freezes the picture instead of drifting it.
-            master = std::max(master, video_pacing::audibleMs(
+            master = std::max<std::int64_t>(master, video_pacing::audibleMs(
                 base, sink->consumed_samples(), channels, rate,
                 audioDeviceBufferMs_.load()));
             wallBase = master;
             wallStart = clock.elapsed();
         } else {
-            master = std::max(master, wallBase + clock.elapsed() - wallStart);
+            // Explicit type: qint64 is `long long` on Linux while std::int64_t
+            // is `long`, so the template cannot deduce a common type there.
+            master = std::max<std::int64_t>(
+                master, wallBase + clock.elapsed() - wallStart);
         }
         return master;
     };
@@ -1907,7 +1910,7 @@ void PlayerWindow::workerLoop() {
         // tails to finish. Never declare ended at demux EOF and truncate PCM.
         if (eof && (!sink || sink->buffered_samples() == 0U || audioDeviceFailed_.load())) {
             if (tailStart < 0) { tailStart = clock.elapsed(); tailBase = now; }
-            now = std::max(now, tailBase + clock.elapsed() - tailStart);
+            now = std::max<std::int64_t>(now, tailBase + clock.elapsed() - tailStart);
         } else {
             tailStart = -1;
         }
