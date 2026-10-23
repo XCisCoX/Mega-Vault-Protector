@@ -1,6 +1,9 @@
 #include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/plugin_host.hpp"
 #include "videovault/app/plugin_audio.hpp"
+#include "videovault/app/remote_stream_source.hpp"
+#include "videovault/app/music_resolver.hpp"
+#include <limits>
 #include "videovault/core/vault.hpp"
 #include <QApplication>
 #include <QBuffer>
@@ -38,12 +41,16 @@
 #include <QTimer>
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <winhttp.h>
 #endif
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
+#include <cstring>
 #include <span>
 static void pluginResources() { Q_INIT_RESOURCE(plugins); }
 namespace videovault::app {
@@ -214,6 +221,46 @@ bool winHttpGet(const QUrl &url, const qint64 limit,
     return true;
 }
 #endif
+// Authenticated bounded local reads behind the same progressive player seam.
+class PluginVaultSource final : public ByteSource {
+public:
+    PluginVaultSource(std::shared_ptr<core::Vault> vault, std::int64_t id)
+        : vault_(std::move(vault)), id_(id) {
+        auto size = vault_->video_size(id_);
+        if (size && size.value() <= std::uint64_t(std::numeric_limits<std::int64_t>::max()))
+            size_ = static_cast<std::int64_t>(size.value());
+    }
+    int read(unsigned char* bytes, int count) override {
+        if (cancelled_ || !vault_->is_unlocked()) return 0;
+        if (count <= 0 || position_ >= size_) return 0;
+        auto result = vault_->read_video_range(id_, position_, std::min(count, 64 * 1024));
+        if (!result) return -1;
+        std::memcpy(bytes, result.value().data(), result.value().size());
+        position_ += result.value().size(); return static_cast<int>(result.value().size());
+    }
+    std::int64_t seek(std::int64_t offset, int whence) override {
+        if (whence == kSeekSize) return size_;
+        auto base = whence == SEEK_CUR ? position_ : whence == SEEK_END ? size_ : 0;
+        if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) return -1;
+        if ((offset > 0 && base > std::numeric_limits<std::int64_t>::max() - offset) || offset < -base) return -1;
+        position_ = std::clamp<std::int64_t>(base + offset, 0, size_); return position_;
+    }
+    std::int64_t size() const override { return size_; }
+    void cancel() override { cancelled_ = true; }
+private:
+    std::shared_ptr<core::Vault> vault_;
+    std::int64_t id_, size_ = 0, position_ = 0;
+    std::atomic_bool cancelled_{false};
+};
+core::TrackProvenance trackProvenance(const PluginManifest& m, const QString& id, const QJsonObject& item) {
+    core::TrackProvenance p;
+    p.provider_id = m.id.toStdString(); p.provider_track_id = id.toStdString();
+    auto url = m.baseUrl; url.setPath("/track/" + id);
+    p.source_url = url.toString().toStdString(); p.title = item.value("title").toString().toStdString();
+    p.artist = pluginArtistNames(item).toStdString(); p.album = item.value("album").toString().toStdString();
+    p.codec = "flac";
+    return p;
+}
 class Switch final : public QCheckBox {
   public:
     explicit Switch(QWidget *p) : QCheckBox(p) {
@@ -255,7 +302,12 @@ bool PluginManifest::parse(const QByteArray &bytes, PluginManifest *out, QString
         if (!fields.contains(it.key()))
             return fail("Unsupported manifest field: " + it.key());
     const auto protocol = o.value("protocol").toString();
-    if (o.value("schemaVersion") != QJsonValue(1) || (protocol != "monochrome-tracks-v1" && protocol != "megavault-actions-v1"))
+    // Music-provider protocols share the same host-owned pipeline (network,
+    // playback, encrypted import). Each one is named, never inferred from the
+    // provider's base URL, so adding a provider cannot widen another one's scope.
+    static const QStringList kMusicProtocols{"monochrome-tracks-v1", "soundcloud-tracks-v1"};
+    if (o.value("schemaVersion") != QJsonValue(1)
+        || (!kMusicProtocols.contains(protocol) && protocol != "megavault-actions-v1"))
         return fail("Unsupported schema or provider protocol.");
     PluginManifest m;
     m.protocol = protocol;
@@ -334,14 +386,21 @@ bool PluginManifest::parse(const QByteArray &bytes, PluginManifest *out, QString
     const auto net = o.value("network").toObject();
     if (net.size() != 2 || !net.value("allowedHosts").isArray())
         return fail("Invalid network policy.");
+    const QRegularExpression domain(
+        "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$");
     for (auto h : net.value("allowedHosts").toArray()) {
         const auto host = h.toString();
-        if (!QRegularExpression("^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$")
-                 .match(host)
-                 .hasMatch() ||
-            m.hosts.contains(host) || host.endsWith(".localhost") || host.endsWith(".local") ||
-            host.endsWith(".internal") || host.endsWith(".home") || host.endsWith(".lan"))
-            return fail("Only exact public HTTPS DNS hosts are supported.");
+        // A provider CDN may live on subdomains the API hands out at runtime
+        // ("cf-media.sndcdn.com"), so one leading label wildcard is allowed for
+        // that. It matches exactly one subdomain (see allows()) and never the
+        // bare domain, so it cannot approve an unrelated host.
+        const bool wildcard = host.startsWith("*.");
+        const auto base = wildcard ? host.mid(2) : host;
+        if (!domain.match(base).hasMatch() || m.hosts.contains(host)
+            || base.endsWith(".localhost") || base.endsWith(".local")
+            || base.endsWith(".internal") || base.endsWith(".home")
+            || base.endsWith(".lan"))
+            return fail("Only public HTTPS DNS hosts (optionally one *. subdomain) are supported.");
         m.hosts.append(host);
     }
     if (m.hosts.isEmpty() || m.hosts.size() > 8)
@@ -356,9 +415,33 @@ bool PluginManifest::parse(const QByteArray &bytes, PluginManifest *out, QString
         error->clear();
     return true;
 }
+bool pluginProtocolIsMusic(const QString &protocol) {
+    return protocol == "monochrome-tracks-v1" || protocol == "soundcloud-tracks-v1";
+}
 bool PluginManifest::allows(const QUrl &url) const {
-    return url.isValid() && url.scheme() == "https" && url.userInfo().isEmpty() && url.port(443) == 443 &&
-           !url.hasFragment() && hosts.contains(url.host().toLower());
+    if (!url.isValid() || url.scheme() != "https" || !url.userInfo().isEmpty()
+        || url.port(443) != 443 || url.hasFragment())
+        return false;
+    const auto host = url.host().toLower();
+    for (const auto &allowed : hosts) {
+        const auto entry = allowed.toLower();
+        // A manifest may approve one host, or a single-level subdomain wildcard
+        // for content delivery hosts ("*.sndcdn.com"). The wildcard never
+        // matches the bare domain and never spans two labels, so it cannot
+        // approve an unrelated host that merely contains the suffix.
+        if (entry.startsWith("*.")) {
+            const auto suffix = entry.mid(1); // ".sndcdn.com"
+            if (!host.endsWith(suffix) || host.size() <= suffix.size())
+                continue;
+            const auto label = host.left(host.size() - suffix.size());
+            if (!label.isEmpty() && !label.contains('.'))
+                return true;
+            continue;
+        }
+        if (host == entry)
+            return true;
+    }
+    return false;
 }
 QString pluginArtistNames(const QJsonObject &o) {
     QStringList names;
@@ -386,7 +469,7 @@ PluginHost::PluginHost(QString directory, QObject *parent)
         directory_ = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/plugins";
     PluginManifest m;
     QString e;
-    for(const auto& path : {":/plugins/monochrome.json", ":/plugins/text-tools.json"}) {
+    for(const auto& path : {":/plugins/monochrome.json", ":/plugins/soundcloud.json", ":/plugins/text-tools.json"}) {
         QFile builtin(path);
         if (builtin.open(QIODevice::ReadOnly) && PluginManifest::parse(builtin.readAll(), &m, &e)) { m.builtin=true;manifests_.append(m); }
     }
@@ -511,14 +594,14 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
             box->addLayout(top);
             // Type and version are secondary information: keeping them out of the
             // title line makes each card's name the first thing read.
-            const QString kind = m.protocol == "monochrome-tracks-v1"
+            const QString kind = pluginProtocolIsMusic(m.protocol)
                 ? QStringLiteral("Music provider") : QStringLiteral("Local tool");
             auto *subtitle = new QLabel(kind + " · version " + m.version, panel);
             subtitle->setTextFormat(Qt::PlainText);
             subtitle->setProperty("secondary", true);
             subtitle->setForegroundRole(QPalette::PlaceholderText);
             box->addWidget(subtitle);
-            const auto permissionNotice = m.protocol=="monochrome-tracks-v1" ? "Permissions: network (" + m.hosts.join(", ") + "), audio playback, encrypted vault import." : QString("Host permissions: none. Commands run locally inside the sandbox.");
+            const auto permissionNotice = pluginProtocolIsMusic(m.protocol) ? "Permissions: network (" + m.hosts.join(", ") + "), audio playback, encrypted vault import." : QString("Host permissions: none. Commands run locally inside the sandbox.");
             auto *notice = new QLabel(m.description + "\n" + m.sourceNotice, panel);
             notice->setTextFormat(Qt::PlainText);
             notice->setWordWrap(true);
@@ -537,7 +620,7 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
             for(const auto& setting:m.settings) {
                 auto* row=new QHBoxLayout;auto* label=new QLabel(setting.title,options);label->setTextFormat(Qt::PlainText);label->setWordWrap(true);row->addWidget(label,1);auto* toggle=new Switch(options);toggle->setAccessibleName(setting.title);toggle->setObjectName("pluginPreference_"+m.id+"_"+setting.id);const auto key=settingKey(m.id)+"preferences/"+setting.id;toggle->setChecked(QSettings().value(key,setting.defaultValue).toBool());row->addWidget(toggle);opts->addLayout(row);connect(toggle,&QCheckBox::toggled,this,[this,key,id=m.id](bool checked){QSettings().setValue(key,checked);emit changed(id);});
             }
-            if(m.protocol=="monochrome-tracks-v1") {
+            if(pluginProtocolIsMusic(m.protocol)) {
             const auto key = settingKey(m.id);
             const auto vk = settingKey(m.id, identity(vault));
             auto *autoRow = new QHBoxLayout;
@@ -603,7 +686,7 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
                 explanation->setWordWrap(true);opts->addWidget(explanation);
             }
             box->addWidget(options);
-            auto* open=new QPushButton(m.protocol=="monochrome-tracks-v1"?"Open music":"Open tools",panel);
+            auto* open=new QPushButton(pluginProtocolIsMusic(m.protocol)?"Open music":"Open tools",panel);
             open->setObjectName("pluginOpen_"+m.id);open->setEnabled(enabled(m.id));box->addWidget(open,0,Qt::AlignLeft);
             connect(open,&QPushButton::clicked,this,[this,id=m.id]{if(enabled(id))emit openRequested(id);});
             options->setEnabled(enabled(m.id));
@@ -649,7 +732,7 @@ QWidget *PluginHost::manager(const std::shared_ptr<core::Vault> &vault, QWidget 
 }
 MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
     : QWidget(parent), host_(host), network_(new QNetworkAccessManager(this)),
-      player_(new PluginAudioPlayer(this)), buffer_(new QBuffer(this)) {
+      player_(new PluginAudioPlayer(this)) {
     setObjectName("musicPluginPage");
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(20, 16, 20, 16);
@@ -740,7 +823,7 @@ MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
     connect(play_, &QPushButton::clicked, this, [this] {
         if (player_->state() == QMediaPlayer::PlayingState)
             player_->pause();
-        else if (buffer_->isOpen())
+        else if (playbackSource_)
             player_->play();
     });
     connect(stop, &QPushButton::clicked, this, &MusicPluginPage::stopAndClear);
@@ -763,7 +846,7 @@ MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
             [this](QMediaPlayer::Error e) {
                 if (e != QMediaPlayer::NoError) {
                     autoSave_ = false;
-                    status_->setText("Playback backend could not decode the in-memory FLAC: " +
+                    status_->setText("Playback backend could not decode the progressive audio: " +
                                      player_->errorString() + ". No automatic save was performed.");
                 }
             });
@@ -776,6 +859,17 @@ MusicPluginPage::MusicPluginPage(PluginHost *host, QWidget *parent)
         stopAndClear();
         notice_->setText(manifest().sourceNotice);
     });
+    auto* streamTimer = new QTimer(this);
+    streamTimer->setInterval(100);
+    connect(streamTimer, &QTimer::timeout, this, [this] {
+        if (playbackSource_ && (!vault_ || !vault_->is_unlocked())) { stopAndClear(); return; }
+        if (!streamImport_ || !streamImport_->finished() || !importBusy_) return;
+        importBusy_ = false; saved_ = streamImport_->committed();
+        download_->setEnabled(!saved_);
+        status_->setText(saved_ ? "Available offline · saved in the encrypted vault." : streamImport_->errorString());
+        if (saved_) emit imported();
+    });
+    streamTimer->start();
     refreshProviders();
 }
 MusicPluginPage::~MusicPluginPage() { stopAndClear(); }
@@ -797,7 +891,7 @@ void MusicPluginPage::setEmbedded(const bool embedded) {
 QString MusicPluginPage::vaultIdentity() const { return identity(vault_); }
 PluginManifest MusicPluginPage::manifest() const {
     for (const auto &m : host_->manifests())
-        if (m.protocol=="monochrome-tracks-v1" && m.id == providers_->currentData().toString() && host_->enabled(m.id))
+        if (m.protocol == "monochrome-tracks-v1" && m.id == providers_->currentData().toString() && host_->enabled(m.id))
             return m;
     return {};
 }
@@ -806,7 +900,7 @@ void MusicPluginPage::refreshProviders() {
     QSignalBlocker blocker(providers_);
     providers_->clear();
     for (auto m : host_->manifests())
-        if (m.protocol=="monochrome-tracks-v1" && host_->enabled(m.id))
+        if (m.protocol == "monochrome-tracks-v1" && host_->enabled(m.id))
             providers_->addItem(m.name, m.id);
     int idx = providers_->findData(id);
     if (idx >= 0)
@@ -838,10 +932,15 @@ void MusicPluginPage::clearPlayback(bool clearCatalogue) {
     requestBuffers_.clear();
     artwork_.clear();
     thumbnailBusy_ = false;
+    if (streamImport_) streamImport_->cancel();
+    streamImport_.reset();
+    if (playbackSource_) playbackSource_->cancel();
     player_->stop();
-    player_->setMedia(QMediaContent());
-    buffer_->close();
-    wipe(buffer_->buffer());
+    // setSource borrows the source while its asynchronous open runs. Cancel
+    // wakes that read; wait for the open worker before destroying the source.
+    for (auto* watcher : player_->findChildren<QFutureWatcherBase*>())
+        watcher->waitForFinished();
+    playbackSource_.reset();
     if (clearCatalogue) {
         results_->clear();
         query_->clear();
@@ -1283,69 +1382,50 @@ void MusicPluginPage::activate(QListWidgetItem *row) {
         safe = "Track";
     pinnedName_ = safe + ".flac";
     nowPlaying_->setText(name + " — " + pluginArtistNames(obj) + " · Monochrome");
-    status_->setText("Loading verified FLAC into memory…");
-    auto u = m.baseUrl;
-    u.setPath("/track/" + id);
-    request(u, qint64(cap) * 1024 * 1024, [this](QByteArray b) {
-        if (!pluginFlac(b)) {
-            wipe(b);
-            status_->setText(
-                "Provider did not return a valid FLAC stream header. Playback and save rejected.");
-            return;
-        }
-        buffer_->setData(std::move(b));
-        buffer_->open(QIODevice::ReadOnly);
+    pinnedProvenance_ = trackProvenance(m, id, obj);
+    // Resolve provenance before constructing or starting any /track request.
+    const auto local = MusicResolver(pinnedVault_).find(m.id.toStdString(), id.toStdString());
+    if (local) {
+        playbackSource_ = std::make_unique<PluginVaultSource>(pinnedVault_, local->video_id);
+        saved_ = true; autoSave_ = false;
+        status_->setText("Available offline · playing the encrypted vault copy (no provider request).");
+    } else {
+        RemoteStreamSource::Limits limits;
+        limits.buffer_bytes = qint64(cap) * 1024 * 1024;
+        limits.max_bytes = 1LL << 30; limits.require_flac = true;
+        limits.allowed_hosts = m.hosts;
+        auto u = m.baseUrl; u.setPath("/track/" + id);
+        auto source = std::make_unique<RemoteStreamSource>(u, limits);
+        const auto gen = generation_;
+        source->set_failure_callback([this, gen](const QString& error) {
+            if (gen != generation_) return;
+            if (streamImport_) streamImport_->cancel();
+            download_->setEnabled(false);
+            status_->setText("Streaming failed · not available offline: " + error);
+        });
+        playbackSource_ = std::move(source);
         download_->setEnabled(true);
-        play_->setEnabled(true);
-        status_->setText("Audio loaded in memory. Download saves directly to the encrypted vault, not your "
-                         "Downloads folder.");
-        player_->setMedia(QMediaContent(), buffer_);
-        player_->play();
-    });
+        status_->setText("Streaming progressively · not saved offline. Download encrypts while fetching.");
+    }
+    if (auto* remote = dynamic_cast<RemoteStreamSource*>(playbackSource_.get())) {
+        remote->start();
+        if (remote->failed()) { play_->setEnabled(false); return; }
+    }
+    play_->setEnabled(true);
+    player_->setSource(playbackSource_.get());
+    player_->play();
 }
 void MusicPluginPage::saveAudio() {
-    if (importBusy_ || saved_ || !buffer_->isOpen() || buffer_->size() == 0 || !pinnedVault_ ||
-        pinnedVault_ != vault_ || !vault_->is_unlocked() || !host_->enabled(pinnedPlugin_))
-        return;
-    importBusy_ = true;
-    download_->setEnabled(false);
-    status_->setText("Encrypting audio directly into vault…");
-    const auto gen = generation_;
-    auto vault = pinnedVault_;
-    auto folder = pinnedFolder_;
-    auto name = pinnedName_;
-    auto token = std::make_shared<std::atomic_bool>(false);
-    cancellation_ = token;
-    auto bytes = std::make_shared<QByteArray>(buffer_->data());
-    auto *watcher = new QFutureWatcher<QString>(this);
-    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, gen] {
-        const auto result = watcher->result();
-        watcher->deleteLater();
-        if (gen != generation_)
-            return;
-        importBusy_ = false;
-        saved_ = result.isEmpty();
-        download_->setEnabled(!saved_);
-        status_->setText(saved_ ? "Saved in the encrypted vault." : result);
-        if (saved_)
-            emit imported();
-    });
-    watcher->setFuture(QtConcurrent::run([vault, folder, name, token, bytes] {
-        QString error;
-        if (token->load() || !vault->is_unlocked())
-            error = "Save cancelled.";
-        else {
-            auto utf8 = name.toUtf8();
-            auto result = vault->import_bytes(
-                std::span<const unsigned char>(reinterpret_cast<const unsigned char *>(bytes->constData()),
-                                               size_t(bytes->size())),
-                std::string_view(utf8.constData(), size_t(utf8.size())), folder);
-            if (!result)
-                error = QString::fromUtf8(core::user_message(result.error().code).data());
-        }
-        wipe(*bytes);
-        return error;
-    }));
+    if (importBusy_ || saved_ || !playbackSource_ || !pinnedVault_ || pinnedVault_ != vault_
+        || !vault_->is_unlocked() || !host_->enabled(pinnedPlugin_)) return;
+    auto* source = dynamic_cast<RemoteStreamSource*>(playbackSource_.get());
+    if (!source || source->failed()) return;
+    // The tap owns a bounded queue, not a second whole-track buffer. Its worker
+    // starts StreamImport once response headers declare the exact plaintext size.
+    streamImport_ = std::make_unique<RemoteStreamImport>(*source, pinnedVault_, pinnedName_,
+        pinnedFolder_, pinnedProvenance_);
+    importBusy_ = true; download_->setEnabled(false);
+    status_->setText("Saving offline · encrypting incoming bytes directly into the vault…");
 }
 
 namespace {
@@ -1353,130 +1433,35 @@ namespace {
 // enough that a list of rows never turns into a burst of connections.
 constexpr int kDownloadConcurrency = 2;
 
-// The same allowlisted HTTPS route the search uses, with the downloader's own
-// buffer and callbacks. Progress may arrive on a worker thread; completion is
-// always delivered on the thread that owns the network manager.
-void fetchTrackBytes(QNetworkAccessManager *network, const QUrl &url, const qint64 limit,
-                     const std::function<void(qint64, qint64)> &progress,
-                     const std::function<void(QByteArray, QString)> &done,
-                     const int redirects = 0) {
-    if (redirects > 4 || !url.isValid() || url.host().isEmpty()) {
-        done(QByteArray(), QStringLiteral("Invalid provider URL."));
-        return;
+} // namespace
+struct PluginTrackDownloader::ActiveDownload {
+    std::unique_ptr<RemoteStreamSource> source;
+    std::unique_ptr<RemoteStreamImport> import;
+    std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
+    QString id, plugin;
+    void cancel() {
+        cancelled->store(true);
+        if (source) source->cancel();
+        if (import) import->cancel();
     }
-#ifdef Q_OS_WIN
-    if (!proxyEnabled()) {
-        auto deliver = [network, url, limit, progress, done, redirects](
-                           QByteArray body, int status, QUrl location, QString error) mutable {
-            if (error.isEmpty() && status >= 300 && status < 400 && location.isValid()) {
-                fetchTrackBytes(network, url.resolved(location), limit, progress, done,
-                                redirects + 1);
-                return;
-            }
-            if (error.isEmpty() && (status < 200 || status >= 300))
-                error = QStringLiteral("HTTP %1").arg(status);
-            if (!error.isEmpty()) {
-                wipe(body);
-                done(QByteArray(), error);
-                return;
-            }
-            if (body.size() > limit) {
-                wipe(body);
-                done(QByteArray(),
-                     QStringLiteral("The track is larger than the configured audio memory limit."));
-                return;
-            }
-            done(std::move(body), QString());
-        };
-        QtConcurrent::run([url, limit, progress, deliver]() mutable {
-            QByteArray body;
-            int status = 0;
-            QUrl location;
-            QString error;
-            const bool ok = winHttpGet(url, limit, progress, &body, &status, &location, &error);
-            const QString failure = ok ? QString() : error;
-            QMetaObject::invokeMethod(
-                qApp,
-                [deliver, body = std::move(body), status, location, failure]() mutable {
-                    deliver(std::move(body), status, location, failure);
-                },
-                Qt::QueuedConnection);
-        });
-        return;
-    }
-#endif
-    configureNetworkProxy(network);
-    QNetworkRequest req(url);
-    req.setRawHeader("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)");
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
-    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-    req.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
-    auto *reply = network->get(req);
-    auto bytes = std::make_shared<QByteArray>();
-    auto exceeded = std::make_shared<bool>(false);
-    auto *timer = new QTimer(reply);
-    timer->setSingleShot(true);
-    timer->start(180000);
-    QObject::connect(timer, &QTimer::timeout, reply, &QNetworkReply::abort);
-    QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
-                     [progress](qint64 received, qint64 total) { progress(received, total); });
-    QObject::connect(reply, &QNetworkReply::metaDataChanged, reply, [reply, limit, exceeded] {
-        if (reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > limit) {
-            *exceeded = true;
-            reply->abort();
+    ~ActiveDownload() { cancel(); }
+};
+PluginTrackDownloader::PluginTrackDownloader(PluginHost *host, QObject *parent)
+    : QObject(parent), host_(host), network_(new QNetworkAccessManager(this)) {
+    connect(host_, &PluginHost::changed, this, [this](const QString& id) {
+        if (!host_->enabled(id)) {
+            for (const auto& job : downloads_) if (job->plugin == id) job->cancel();
         }
     });
-    QObject::connect(reply, &QNetworkReply::readyRead, reply,
-                     [reply, bytes, limit, exceeded] {
-                         const qint64 remaining = limit - bytes->size();
-                         if (remaining <= 0 || reply->bytesAvailable() > remaining) {
-                             *exceeded = true;
-                             reply->abort();
-                             return;
-                         }
-                         bytes->append(reply->read(remaining));
-                     });
-    QObject::connect(reply, &QNetworkReply::finished, reply,
-                     [network, reply, bytes, exceeded, limit, progress, done, url, redirects] {
-                         reply->deleteLater();
-                         if (*exceeded) {
-                             wipe(*bytes);
-                             done(QByteArray(),
-                                  QStringLiteral(
-                                      "The track is larger than the configured audio memory limit."));
-                             return;
-                         }
-                         bytes->append(reply->readAll());
-                         const int status =
-                             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                         const QUrl location =
-                             reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
-                         if (reply->error() == QNetworkReply::NoError && status >= 300 &&
-                             status < 400 && location.isValid()) {
-                             wipe(*bytes);
-                             fetchTrackBytes(network, url.resolved(location), limit, progress, done,
-                                             redirects + 1);
-                             return;
-                         }
-                         if (reply->error() != QNetworkReply::NoError) {
-                             const QString failure = reply->errorString();
-                             wipe(*bytes);
-                             done(QByteArray(), failure);
-                             return;
-                         }
-                         if (status < 200 || status >= 300) {
-                             wipe(*bytes);
-                             done(QByteArray(), QStringLiteral("HTTP %1").arg(status));
-                             return;
-                         }
-                         done(std::move(*bytes), QString());
-                     });
 }
-} // namespace
-
-PluginTrackDownloader::PluginTrackDownloader(PluginHost *host, QObject *parent)
-    : QObject(parent), host_(host), network_(new QNetworkAccessManager(this)) {}
+PluginTrackDownloader::~PluginTrackDownloader() {
+    for (const auto& job : downloads_) job->cancel();
+}
 void PluginTrackDownloader::setVault(std::shared_ptr<core::Vault> vault) {
+    if (vault_ == vault) return;
+    ++generation_;
+    for (const auto& job : downloads_) job->cancel();
+    downloads_.clear(); queue_.clear(); states_.clear(); percent_.clear(); active_ = 0;
     vault_ = std::move(vault);
 }
 PluginManifest PluginTrackDownloader::manifest() const {
@@ -1493,12 +1478,16 @@ void PluginTrackDownloader::enqueue(const QJsonObject &track) {
     QString id = track.value("_id").toString(track.value("trackId").toString());
     if (!validId(id))
         return;
+    const auto provider = manifest();
+    if (provider.id.isEmpty()) return;
     const int current = state(id);
-    if (current == Queued || current == Fetching || current == Encrypting || current == Saved)
+    if (current == Saved && MusicResolver(vault_).has_local_copy(provider.id.toStdString(), id.toStdString())) return;
+    if (current == Queued || current == Fetching || current == Encrypting)
         return;
     Job job;
     job.id = id;
     job.item = track;
+    job.provider = provider;
     QString name = track.value("title").toString();
     if (name.isEmpty())
         name = track.value("name").toString();
@@ -1518,117 +1507,109 @@ void PluginTrackDownloader::pump() {
     }
 }
 void PluginTrackDownloader::start(const Job &job) {
-    auto fail = [this](const QString &id, const QString &message) {
-        states_[id] = Failed;
-        emit stateChanged(id, Failed, -1);
-        emit finished(id, false, message);
-    };
-    const auto m = manifest();
-    if (m.id.isEmpty() || !vault_ || !vault_->is_unlocked()) {
-        fail(job.id, QStringLiteral("No enabled music provider for this vault."));
+    const auto m = job.provider;
+    if (m.id.isEmpty() || !host_->enabled(m.id) || m.protocol != "monochrome-tracks-v1" || !vault_ || !vault_->is_unlocked()) {
+        states_[job.id] = Failed;
+        emit stateChanged(job.id, Failed, -1);
+        emit finished(job.id, false, "No enabled Monochrome provider for this vault.");
         return;
     }
-    QUrl url = m.baseUrl;
-    url.setPath("/track/" + job.id);
+    const auto local = MusicResolver(vault_).find(m.id.toStdString(), job.id.toStdString());
+    if (local) {
+        states_[job.id] = Saved;
+        emit stateChanged(job.id, Saved, 100);
+        emit finished(job.id, true, "Already available offline.");
+        return;
+    }
+    QUrl url = m.baseUrl; url.setPath("/track/" + job.id);
     if (!m.allows(url)) {
-        fail(job.id, QStringLiteral("The provider URL is not approved."));
-        return;
+        states_[job.id] = Failed; emit stateChanged(job.id, Failed, -1);
+        emit finished(job.id, false, "The provider URL is not approved."); return;
     }
-    const auto key = host_->settingKey(m.id);
-    const auto vaultKey = host_->settingKey(m.id, identity(vault_));
-    // The destination folder belongs to this vault, exactly like the settings
-    // the page uses; a locked or different vault simply fails the import.
-    const qlonglong folder = QSettings().value(vaultKey + "folder", qlonglong(0)).toLongLong();
-    int capMiB = QSettings().value(key + "memoryMiB", 32).toInt();
-    if (capMiB != 32 && capMiB != 64 && capMiB != 128)
-        capMiB = 32;
-
-    ++active_;
-    states_[job.id] = Fetching;
-    percent_[job.id] = -1;
-    emit stateChanged(job.id, Fetching, -1);
-
-    const QString trackId = job.id;
-    const auto progress = [this, trackId](qint64 received, qint64 total) {
-        const int value =
-            total > 0 ? int(std::min<qint64>(100, received * 100 / total)) : -1;
-        // WinHTTP reports from its worker thread; rows are updated on the UI one.
-        // On the owning thread (Qt transport) the row is updated right away.
-        const auto apply = [this, trackId, value] {
-            if (states_.value(trackId) != Fetching)
-                return;
-            percent_[trackId] = value;
-            emit stateChanged(trackId, Fetching, value);
-        };
-        if (QThread::currentThread() == thread())
-            apply();
-        else
-            QMetaObject::invokeMethod(this, apply, Qt::QueuedConnection);
+    const auto operation = std::make_shared<ActiveDownload>();
+    operation->id = job.id; operation->plugin = m.id;
+    downloads_.append(operation); ++active_;
+    states_[job.id] = Fetching; emit stateChanged(job.id, Fetching, -1);
+    const auto gen = generation_;
+    const auto vault = vault_;
+    const auto folder = QSettings().value(host_->settingKey(m.id, identity(vault)) + "folder", qlonglong(0)).toLongLong();
+    const auto provenance = trackProvenance(m, job.id, job.item);
+    QPointer<PluginTrackDownloader> self(this);
+    const auto finish = [self, operation, gen](QString failure) {
+        if (!self || gen != self->generation_ || !self->downloads_.contains(operation)) return;
+        operation->cancel();
+        self->downloads_.removeAll(operation); --self->active_;
+        const int result = failure.isEmpty() ? Saved : Failed;
+        self->states_[operation->id] = result;
+        emit self->stateChanged(operation->id, result, failure.isEmpty() ? 100 : -1);
+        emit self->finished(operation->id, failure.isEmpty(), failure);
+        self->pump();
     };
-    const auto done = [this, job, folder](QByteArray bytes, QString error) mutable {
-        if (!error.isEmpty()) {
-            wipe(bytes);
-            states_[job.id] = Failed;
-            --active_;
-            emit stateChanged(job.id, Failed, -1);
-            emit finished(job.id, false, error);
-            pump();
-            return;
-        }
-        if (!pluginFlac(bytes)) {
-            wipe(bytes);
-            states_[job.id] = Failed;
-            --active_;
-            emit stateChanged(job.id, Failed, -1);
-            emit finished(job.id, false,
-                          QStringLiteral("The provider did not return a valid FLAC stream."));
-            pump();
-            return;
-        }
-        if (!vault_ || !vault_->is_unlocked()) {
-            wipe(bytes);
-            states_[job.id] = Failed;
-            --active_;
-            emit stateChanged(job.id, Failed, -1);
-            emit finished(job.id, false, QStringLiteral("The vault locked during the download."));
-            pump();
-            return;
-        }
-        states_[job.id] = Encrypting;
-        percent_[job.id] = 100;
-        emit stateChanged(job.id, Encrypting, 100);
-        auto vault = vault_;
-        auto payload = std::make_shared<QByteArray>(std::move(bytes));
-        auto *watcher = new QFutureWatcher<QString>(this);
-        connect(watcher, &QFutureWatcher<QString>::finished, this,
-                [this, watcher, payload, id = job.id] {
-                    const QString failure = watcher->result();
-                    watcher->deleteLater();
-                    wipe(*payload);
-                    --active_;
-                    states_[id] = failure.isEmpty() ? Saved : Failed;
-                    emit stateChanged(id, states_.value(id), failure.isEmpty() ? 100 : -1);
-                    emit finished(id, failure.isEmpty(), failure);
-                    pump();
-                });
-        watcher->setFuture(QtConcurrent::run([vault, folder, name = job.name, payload] {
-            if (!vault->is_unlocked())
-                return QStringLiteral("The vault locked during the download.");
-            const auto utf8 = name.toUtf8();
-            auto result = vault->import_bytes(
-                std::span<const unsigned char>(
-                    reinterpret_cast<const unsigned char *>(payload->constData()),
-                    std::size_t(payload->size())),
-                std::string_view(utf8.constData(), std::size_t(utf8.size())), folder);
-            if (!result)
-                return QString::fromUtf8(core::user_message(result.error().code).data());
-            return QString();
-        }));
+    const auto progress = [self, operation, gen](qint64 received, qint64 total) {
+        if (!self) return;
+        const auto apply = [self, operation, gen, received, total] {
+            if (!self || gen != self->generation_ || operation->cancelled->load()) return;
+            const int value = total > 0 ? int(std::min(100.0, 100.0 * double(received) / double(total))) : -1;
+            self->percent_[operation->id] = value;
+            emit self->stateChanged(operation->id, Fetching, value);
+        };
+        if (QThread::currentThread() == self->thread()) apply();
+        else QMetaObject::invokeMethod(self, apply, Qt::QueuedConnection);
     };
     if (fetcher_) {
-        fetcher_(job.id, progress, done);
+        // Backwards-compatible deterministic injection only. Production never
+        // fetches a complete QByteArray; even this seam uses StreamImport and
+        // records exactly the same provenance/identity as a live download.
+        fetcher_(job.id, progress, [self, operation, finish, vault, folder, provenance, job, gen](QByteArray bytes, QString failure) {
+            if (!self || gen != self->generation_) { wipe(bytes); return; }
+            if (!failure.isEmpty() || !pluginFlac(bytes)) {
+                wipe(bytes); finish(failure.isEmpty() ? "The provider did not return valid FLAC." : failure); return;
+            }
+            self->states_[job.id] = Encrypting; emit self->stateChanged(job.id, Encrypting, 100);
+            auto* watcher = new QFutureWatcher<QString>(self);
+            QObject::connect(watcher, &QFutureWatcher<QString>::finished, self, [watcher, finish] {
+                const auto error = watcher->result(); watcher->deleteLater(); finish(error);
+            });
+            watcher->setFuture(QtConcurrent::run([vault, folder, provenance, name = job.name, operation, bytes = std::move(bytes)]() mutable {
+                auto begun = vault->begin_stream_import(name.toUtf8().toStdString(), bytes.size(), folder, &provenance);
+                QString error;
+                if (!begun) error = QString::fromUtf8(core::user_message(begun.error().code).data());
+                else {
+                    auto import = std::move(begun.value());
+                    for (int at = 0; at < bytes.size() && error.isEmpty(); at += 65536) {
+                        if (operation->cancelled->load()) { error = "Save cancelled."; break; }
+                        auto stored = import.append(std::span<const unsigned char>(
+                            reinterpret_cast<const unsigned char*>(bytes.constData() + at), std::min(65536, bytes.size() - at)));
+                        if (!stored) error = QString::fromUtf8(core::user_message(stored.error().code).data());
+                    }
+                    if (error.isEmpty() && !operation->cancelled->load()) {
+                        auto result = import.commit();
+                        if (!result) error = QString::fromUtf8(core::user_message(result.error().code).data());
+                    } else if (error.isEmpty()) error = "Save cancelled.";
+                }
+                wipe(bytes); return error;
+            }));
+        });
         return;
     }
-    fetchTrackBytes(network_, url, qint64(capMiB) * 1024 * 1024, progress, done);
+    RemoteStreamSource::Limits limits;
+    int cap = QSettings().value(host_->settingKey(m.id) + "memoryMiB", 32).toInt();
+    if (cap != 32 && cap != 64 && cap != 128) cap = 32;
+    limits.buffer_bytes = qint64(cap) << 20; limits.max_bytes = 1LL << 30; limits.require_flac = true; limits.allowed_hosts = m.hosts;
+    operation->source = std::make_unique<RemoteStreamSource>(url, limits);
+    operation->import = std::make_unique<RemoteStreamImport>(*operation->source, vault, job.name, folder, provenance);
+    operation->source->set_progress_callback(progress);
+    auto* timer = new QTimer(this); timer->setInterval(50);
+    connect(timer, &QTimer::timeout, this, [this, operation, finish, gen, vault, timer] {
+        if (gen != generation_) { timer->deleteLater(); return; }
+        if (operation->cancelled->load() || !vault->is_unlocked() || !host_->enabled(operation->plugin)) {
+            timer->deleteLater(); finish("Offline save cancelled or vault locked."); return;
+        }
+        if (operation->source->failed()) { timer->deleteLater(); finish(operation->source->errorString()); return; }
+        if (operation->import->finished()) {
+            timer->deleteLater(); finish(operation->import->committed() ? QString() : operation->import->errorString()); return;
+        }
+    });
+    timer->start(); operation->source->start();
 }
 } // namespace videovault::app

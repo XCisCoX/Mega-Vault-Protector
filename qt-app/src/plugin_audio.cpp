@@ -1,4 +1,5 @@
 #include "videovault/app/plugin_audio.hpp"
+#include "videovault/app/byte_source.hpp"
 #include "videovault/app/media_decoder.hpp"
 #include <QAudioDeviceInfo>
 #include <QAudioOutput>
@@ -154,6 +155,74 @@ class PluginAudioPlayer::Impl {
         change(QMediaPlayer::PlayingState);
         timer.start();
     }
+    // Wires a freshly opened decoder to the audio device and starts playback if
+    // the caller already asked for it. Shared by the RAM and streaming paths.
+    void attach(std::shared_ptr<MediaDecoder> decoder) {
+        QAudioFormat format;
+        format.setCodec("audio/pcm");
+        format.setSampleRate(decoder->audio_sample_rate());
+        format.setChannelCount(decoder->audio_channels());
+        format.setSampleSize(16);
+        format.setByteOrder(QAudioFormat::LittleEndian);
+        format.setSampleType(QAudioFormat::SignedInt);
+        const auto device = QAudioDeviceInfo::defaultOutputDevice();
+        if (device.isNull() || !device.isFormatSupported(format)) {
+            fail("No audio device supports the decoded PCM format.");
+            return;
+        }
+        length = decoder->duration_ms();
+        source = new PcmSource(std::move(decoder), owner);
+        output = new QAudioOutput(device, format, owner);
+        output->setBufferSize(65536);
+        output->setVolume(0.5);
+        status = QMediaPlayer::LoadedMedia;
+        emit owner->durationChanged(length);
+        QObject::connect(output, &QAudioOutput::stateChanged, owner, [this](QAudio::State next) {
+            if (next == QAudio::StoppedState && output && output->error() != QAudio::NoError)
+                fail("Qt audio device stopped with error " + QString::number(output->error()) + ".");
+            else if (next == QAudio::IdleState && source && source->atEnd()) {
+                timer.stop();
+                status = QMediaPlayer::EndOfMedia;
+                lastPosition = length;
+                change(QMediaPlayer::StoppedState);
+                emit owner->positionChanged(length);
+            }
+        });
+        if (wantPlay)
+            start();
+    }
+
+    // Opens a live provider stream. The worker thread blocks inside the source
+    // until the demuxer has the bytes it needs, which is why playback starts
+    // before the track has been fully fetched.
+    void load_source(ByteSource *source) {
+        clear();
+        status = QMediaPlayer::LoadingMedia;
+        const auto gen = generation;
+        auto *watcher = new QFutureWatcher<OpenResult>(owner);
+        QObject::connect(watcher, &QFutureWatcher<OpenResult>::finished, owner, [this, watcher, gen] {
+            auto result = watcher->result();
+            watcher->deleteLater();
+            if (gen != generation)
+                return;
+            if (!result.decoder) {
+                fail("Cannot decode the provider stream: " + result.error);
+                return;
+            }
+            attach(std::move(result.decoder));
+        });
+        watcher->setFuture(QtConcurrent::run([source] {
+            OpenResult result;
+            result.decoder = std::make_shared<MediaDecoder>();
+            result.decoder->prepare_for_audio();
+            result.decoder->set_stream_cache_bytes(256U << 10);
+            if (!result.decoder->open_source(source, &result.error, "music.mp3") ||
+                !result.decoder->has_audio())
+                result.decoder.reset();
+            return result;
+        }));
+    }
+
     void load(const QByteArray &bytes) {
         clear();
         status = QMediaPlayer::LoadingMedia;
@@ -168,38 +237,7 @@ class PluginAudioPlayer::Impl {
                 fail("Cannot decode in-memory audio: " + result.error);
                 return;
             }
-            QAudioFormat format;
-            format.setCodec("audio/pcm");
-            format.setSampleRate(result.decoder->audio_sample_rate());
-            format.setChannelCount(result.decoder->audio_channels());
-            format.setSampleSize(16);
-            format.setByteOrder(QAudioFormat::LittleEndian);
-            format.setSampleType(QAudioFormat::SignedInt);
-            const auto device = QAudioDeviceInfo::defaultOutputDevice();
-            if (device.isNull() || !device.isFormatSupported(format)) {
-                fail("No audio device supports the decoded PCM format.");
-                return;
-            }
-            length = result.decoder->duration_ms();
-            source = new PcmSource(result.decoder, owner);
-            output = new QAudioOutput(device, format, owner);
-            output->setBufferSize(65536);
-            output->setVolume(0.5);
-            status = QMediaPlayer::LoadedMedia;
-            emit owner->durationChanged(length);
-            QObject::connect(output, &QAudioOutput::stateChanged, owner, [this](QAudio::State next) {
-                if (next == QAudio::StoppedState && output && output->error() != QAudio::NoError)
-                    fail("Qt audio device stopped with error " + QString::number(output->error()) + ".");
-                else if (next == QAudio::IdleState && source && source->atEnd()) {
-                    timer.stop();
-                    status = QMediaPlayer::EndOfMedia;
-                    lastPosition = length;
-                    change(QMediaPlayer::StoppedState);
-                    emit owner->positionChanged(length);
-                }
-            });
-            if (wantPlay)
-                start();
+            attach(std::move(result.decoder));
         });
         watcher->setFuture(QtConcurrent::run([bytes] {
             OpenResult result;
@@ -217,6 +255,12 @@ void PluginAudioPlayer::setMedia(const QMediaContent &, QIODevice *stream) {
     auto *buffer = qobject_cast<QBuffer *>(stream);
     if (buffer)
         impl_->load(buffer->data());
+    else
+        impl_->clear();
+}
+void PluginAudioPlayer::setSource(ByteSource *source) {
+    if (source != nullptr)
+        impl_->load_source(source);
     else
         impl_->clear();
 }

@@ -5,6 +5,8 @@
 #include "videovault/app/music_window.hpp"
 
 #include "videovault/app/media_decoder.hpp"
+#include "videovault/app/local_audio_pipeline.hpp"
+#include "videovault/app/music_queue_edit.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
@@ -28,6 +30,8 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QSignalBlocker>
 #include <QComboBox>
 #include <QMouseEvent>
 #include <QPainter>
@@ -81,17 +85,16 @@ namespace {
 
 constexpr int kBarHeight = 48;
 constexpr int kControlHeight = 32;
-const QColor kAccent(0x33, 0x90, 0xEC);
-const QColor kIcon(0x8D, 0x98, 0xA3);
+QColor playerAccent() { return QApplication::palette().color(QPalette::Highlight); }
 // The player is chrome, not video: unlike the video overlay it follows the live
 // Light/Dark palette. These used to be dark literals (a black bar, white labels,
 // a #1c1c1e popup card), which left the whole music player dark inside a light
 // theme. Every one of them is read at paint time, so a theme switch repaints.
 QColor playerBar() {
-    return isDarkTheme() ? QColor(0, 0, 0) : QApplication::palette().color(QPalette::Window);
+    return QApplication::palette().color(QPalette::Window);
 }
 QColor playerCard() {
-    return isDarkTheme() ? QColor(28, 28, 30) : QApplication::palette().color(QPalette::Base);
+    return QApplication::palette().color(QPalette::Base);
 }
 QColor playerInk() {
     return QApplication::palette().color(QPalette::WindowText);
@@ -100,7 +103,9 @@ QColor playerSecondaryInk() {
     return QApplication::palette().color(QPalette::PlaceholderText);
 }
 QColor playerHover() {
-    return isDarkTheme() ? QColor(255, 255, 255, 18) : QColor(0, 0, 0, 18);
+    auto color = QApplication::palette().color(QPalette::WindowText);
+    color.setAlpha(18);
+    return color;
 }
 QColor playerHairline() {
     QColor color = QApplication::palette().color(QPalette::Midlight);
@@ -136,10 +141,10 @@ protected:
         const qreal fraction = span <= 0 ? 0.0 : qreal(value() - minimum()) / span;
         QRectF played = groove;
         played.setWidth(groove.width() * fraction);
-        painter.setBrush(kAccent);
+        painter.setBrush(playerAccent());
         painter.drawRoundedRect(played, 1.5, 1.5);
         const qreal radius = (underMouse() || isSliderDown()) ? 6.0 : 5.0;
-        painter.setBrush(kAccent);
+        painter.setBrush(playerAccent());
         painter.drawEllipse(QPointF(groove.left() + groove.width() * fraction, centre),
             radius, radius);
     }
@@ -372,7 +377,7 @@ public:
     explicit GlyphButton(const Glyph glyph, QWidget* parent)
         : QAbstractButton(parent), glyph_(glyph) {
         setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::NoFocus);
+        setFocusPolicy(Qt::StrongFocus);
         setAutoFillBackground(false);
         setAttribute(Qt::WA_NoSystemBackground, true);
     }
@@ -411,8 +416,8 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        if (isEnabled() && underMouse()) {
-            painter.setPen(Qt::NoPen);
+        if (isEnabled() && (underMouse() || hasFocus())) {
+            painter.setPen(hasFocus() ? QPen(playerAccent(), 1.5) : QPen(Qt::NoPen));
             painter.setBrush(playerHover());
             painter.drawEllipse(rect().center(), 13, 13);
         }
@@ -437,12 +442,12 @@ private:
             return playerSecondaryInk();
         }
         if (active_) {
-            return kAccent;
+            return playerAccent();
         }
         if (underMouse()) {
             return playerInk();
         }
-        return isDarkTheme() ? kIcon : playerSecondaryInk();
+        return playerSecondaryInk();
     }
 
     void paintGlyph(QPainter& painter, const QRect& box) const {
@@ -612,7 +617,7 @@ protected:
         const int thick = (underMouse() || dragging_) ? 4 : 2;
         const int y = height() - thick;
         const int played = isEnabled() ? width() * value_ / 1000 : 0;
-        painter.setBrush(kAccent);
+        painter.setBrush(playerAccent());
         painter.drawRect(0, y, played, thick);
         painter.setBrush(playerGroove());
         painter.drawRect(played, y, width() - played, thick);
@@ -711,13 +716,13 @@ protected:
             painter.setBrush(playerHover());
             painter.drawRoundedRect(rect().adjusted(4, 1, -4, -1), 8, 8);
         }
-        painter.setPen(marked_ ? kAccent : playerInk());
+        painter.setPen(marked_ ? playerAccent() : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
         painter.drawText(rect().adjusted(16, 0, -32, 0), Qt::AlignVCenter | Qt::AlignLeft, label_);
         if (marked_) {
-            QPen pen(kAccent, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            QPen pen(playerAccent(), 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
             painter.setPen(pen);
             const QPointF origin(width() - 22, height() / 2.0);
             painter.drawLine(origin + QPointF(-6, 0), origin + QPointF(-2, 4));
@@ -784,14 +789,14 @@ protected:
         } else {
             painter.drawPixmap(icon, paintNotePlate(icon.width()));
         }
-        painter.setPen(current_ ? kAccent : playerInk());
+        painter.setPen(current_ ? playerAccent() : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
         const int textLeft = 64;
         const QString elided = QFontMetrics(font).elidedText(title_, Qt::ElideRight, width() - textLeft - 16);
         painter.drawText(QRect(textLeft, 12, width() - textLeft - 16, 18), Qt::AlignLeft | Qt::AlignVCenter, elided);
-        painter.setPen(QColor(0x8E, 0x8E, 0x93));
+        painter.setPen(playerSecondaryInk());
         font.setPixelSize(11);
         painter.setFont(font);
         painter.drawText(QRect(textLeft, 32, width() - textLeft - 16, 16), Qt::AlignLeft | Qt::AlignVCenter, detail_);
@@ -1027,10 +1032,10 @@ protected:
         painter.setBrush(playerGroove());
         painter.drawRoundedRect(track, 2, 2);
         const int filled = track.height() * percent_ / 100;
-        painter.setBrush(kAccent);
+        painter.setBrush(playerAccent());
         painter.drawRoundedRect(QRect(track.left(), track.bottom() - filled + 1, track.width(), filled), 2, 2);
         const int handleY = track.bottom() - filled;
-        painter.setBrush(kAccent);
+        painter.setBrush(playerAccent());
         painter.drawEllipse(QPoint(track.center().x(), handleY), 6, 6);
     }
     void mousePressEvent(QMouseEvent* event) override { apply(event->pos().y()); }
@@ -1092,7 +1097,7 @@ QPixmap paintNotePlate(const int side) {
         return cover.scaled(s, s, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }
     QPixmap plate(s, s);
-    plate.fill(QColor(0x1C, 0x1C, 0x1E));
+    plate.fill(playerCard());
     return plate;
 }
 
@@ -1383,6 +1388,8 @@ struct MusicWindow::SystemMediaSession {
     bool seekHooked{false};
     bool enabled{false};
     bool playing{false};
+    bool hasNext{false};
+    bool hasPrevious{false};
     QString title;
     QString artist;
     QString album;
@@ -1477,10 +1484,10 @@ void MusicWindow::syncSystemMedia(const bool metadata) {
                             if (self->paused_.load() || self->ended_.load()) {
                                 self->togglePlay();
                             }
-                        } else if (button == Button::Pause || button == Button::Stop) {
-                            if (!self->paused_.load()) {
-                                self->togglePlay();
-                            }
+                        } else if (button == Button::Pause) {
+                            self->setPaused(true);
+                        } else if (button == Button::Stop) {
+                            self->stopPlayback();
                         } else if (button == Button::Next) {
                             self->advance(1);
                         } else if (button == Button::Previous) {
@@ -1511,7 +1518,7 @@ void MusicWindow::syncSystemMedia(const bool metadata) {
         }
 
         const bool active = !tracks_.empty() && errorText_.isEmpty();
-        const bool playing = active && !paused_.load();
+        const bool playing = active && !paused_.load() && !terminalEnded_;
         const std::int64_t id = tracks_.empty() ? 0 : tracks_[static_cast<std::size_t>(index_)].id;
         const bool haveCover = coverId_ == id && !cover_.isNull();
         const std::int64_t coverToken = haveCover ? id : 0;
@@ -1521,6 +1528,8 @@ void MusicWindow::syncSystemMedia(const bool metadata) {
             || session.album != albumText_
             || session.playing != playing
             || session.enabled != active
+            || session.hasNext != nextAvailable()
+            || session.hasPrevious != previousAvailable()
             || session.coverToken != coverToken;
         if (changed) {
             session.title = songTitle_;
@@ -1528,6 +1537,8 @@ void MusicWindow::syncSystemMedia(const bool metadata) {
             session.album = albumText_;
             session.playing = playing;
             session.enabled = active;
+            session.hasNext = nextAvailable();
+            session.hasPrevious = previousAvailable();
             session.coverToken = coverToken;
             auto& controls = session.controls;
             controls.IsEnabled(active);
@@ -1608,9 +1619,32 @@ void MusicWindow::clearSystemMedia() {
 #endif
 }
 
+namespace {
+// One slot for the process, shared by shared() and instance(): asking for the
+// instance must never construct a player that nothing asked for.
+MusicWindow*& musicWindowSlot() {
+    static MusicWindow* slot = nullptr;
+    return slot;
+}
+} // namespace
+
+MusicWindow* MusicWindow::shared(QWidget* owner) {
+    // The bar lives as long as its owner window does: the first caller decides
+    // the parent, and later callers re-parent it into their own layout.
+    auto& slot = musicWindowSlot();
+    if (slot == nullptr) {
+        slot = new MusicWindow(owner != nullptr ? owner->window() : nullptr);
+        slot->setAttribute(Qt::WA_DeleteOnClose, false);
+    }
+    return slot;
+}
+
+MusicWindow* MusicWindow::instance() {
+    return musicWindowSlot();
+}
+
 MusicWindow::MusicWindow(QWidget* parent)
     : QWidget(parent)
-    , decoder_(std::make_unique<MediaDecoder>())
     , stretch_(std::make_unique<TimeStretch>()) {
     setObjectName(QStringLiteral("musicBar"));
     setFixedHeight(kBarHeight);
@@ -1638,6 +1672,8 @@ MusicWindow::MusicWindow(QWidget* parent)
     repeatButton_->setToolTip(QStringLiteral("Repeat"));
     speedButton_->setToolTip(QStringLiteral("Playback speed"));
     closeButton_->setToolTip(QStringLiteral("Close"));
+    for (auto* button : {previousButton_, playButton_, nextButton_, volumeButton_, orderButton_, repeatButton_, speedButton_, closeButton_})
+        button->setAccessibleName(button->toolTip());
 
     nameLabel_ = new QLabel(this);
     timeLabel_ = new QLabel(QStringLiteral("0:00"), this);
@@ -1651,6 +1687,81 @@ MusicWindow::MusicWindow(QWidget* parent)
     timeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
     progress_ = new ProgressLine(this);
+    expandButton_ = new QPushButton(tr("Queue"), this);
+    expandButton_->setObjectName(QStringLiteral("musicExpandQueue"));
+    expandButton_->setCheckable(true);
+    expandButton_->setAccessibleName(tr("Expand now playing and queue"));
+    connect(expandButton_, &QPushButton::toggled, this, &MusicWindow::setExpanded);
+    expandedPanel_ = new QWidget(this);
+    expandedPanel_->setObjectName(QStringLiteral("musicNowPlayingPanel"));
+    auto* panelLayout = new QVBoxLayout(expandedPanel_);
+    panelLayout->setContentsMargins(12, 8, 12, 10);
+    panelLayout->setSpacing(6);
+    auto* songRow = new QHBoxLayout();
+    expandedCover_ = new QLabel(expandedPanel_);
+    expandedCover_->setFixedSize(64, 64);
+    expandedCover_->setAccessibleName(tr("Album cover"));
+    songRow->addWidget(expandedCover_);
+    auto* songText = new QVBoxLayout();
+    expandedTitle_ = new QLabel(expandedPanel_);
+    expandedTitle_->setObjectName(QStringLiteral("musicNowPlayingTitle"));
+    expandedTitle_->setTextFormat(Qt::PlainText);
+    expandedTitle_->setWordWrap(true);
+    expandedTitle_->setMaximumHeight(fontMetrics().height() * 2 + 4);
+    auto titleFont = font();
+    titleFont.setBold(true);
+    expandedTitle_->setFont(titleFont);
+    expandedDetail_ = new QLabel(expandedPanel_);
+    expandedDetail_->setTextFormat(Qt::PlainText);
+    expandedDetail_->setWordWrap(true);
+    expandedDetail_->setMaximumHeight(fontMetrics().height() * 2 + 4);
+    expandedDetail_->setForegroundRole(QPalette::PlaceholderText);
+    songText->addWidget(expandedTitle_);
+    songText->addWidget(expandedDetail_);
+    songRow->addLayout(songText, 1);
+    panelLayout->addLayout(songRow);
+    // On a narrow expanded bar these are the SAME transport buttons, moved to
+    // an inline row rather than silently hiding volume/order/repeat/speed.
+    expandedOptions_ = new QWidget(expandedPanel_);
+    expandedOptions_->setFixedHeight(kControlHeight);
+    panelLayout->addWidget(expandedOptions_);
+    expandedOptions_->hide();
+    queueSummary_ = new QLabel(expandedPanel_);
+    panelLayout->addWidget(queueSummary_);
+    queueList_ = new QListWidget(expandedPanel_);
+    queueList_->setObjectName(QStringLiteral("musicExpandedQueue"));
+    queueList_->setAccessibleName(tr("Playback queue. Activate a track to play it."));
+    queueList_->setIconSize(QSize(28, 28));
+    queueList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    queueList_->setTextElideMode(Qt::ElideRight);
+    panelLayout->addWidget(queueList_, 1);
+    auto* queueActions = new QHBoxLayout();
+    queueJump_ = new QPushButton(tr("Play"), expandedPanel_);
+    queueRemove_ = new QPushButton(tr("Remove"), expandedPanel_);
+    queueUp_ = new QPushButton(tr("Up"), expandedPanel_);
+    queueDown_ = new QPushButton(tr("Down"), expandedPanel_);
+    queueRemove_->setToolTip(tr("Remove from queue only; the vault file is kept"));
+    queueUp_->setAccessibleName(tr("Move selected track up"));
+    queueDown_->setAccessibleName(tr("Move selected track down"));
+    for (auto* action : {queueJump_, queueRemove_, queueUp_, queueDown_}) {
+        action->setMinimumWidth(0);
+        queueActions->addWidget(action);
+    }
+    panelLayout->addLayout(queueActions);
+    connect(queueList_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
+        playIndex(queueList_->row(item));
+    });
+    connect(queueJump_, &QPushButton::clicked, this, [this] { playIndex(queueList_->currentRow()); });
+    connect(queueRemove_, &QPushButton::clicked, this, [this] { removeQueueRow(queueList_->currentRow()); });
+    connect(queueUp_, &QPushButton::clicked, this, [this] { moveQueueRow(queueList_->currentRow(), -1); });
+    connect(queueDown_, &QPushButton::clicked, this, [this] { moveQueueRow(queueList_->currentRow(), 1); });
+    connect(queueList_, &QListWidget::currentRowChanged, this, [this](int row) {
+        queueJump_->setEnabled(row >= 0);
+        queueRemove_->setEnabled(row >= 0);
+        queueUp_->setEnabled(row > 0);
+        queueDown_->setEnabled(row >= 0 && row + 1 < queueList_->count());
+    });
+    expandedPanel_->hide();
     playlist_ = new PlaylistPopup(this);
     orderMenu_ = new OrderPopup(this);
     speedMenu_ = new SpeedPopup(this);
@@ -1673,7 +1784,10 @@ MusicWindow::MusicWindow(QWidget* parent)
     connect(playButton_, &QAbstractButton::clicked, this, [this] { togglePlay(); });
     connect(closeButton_, &QAbstractButton::clicked, this, &QWidget::close);
     connect(repeatButton_, &QAbstractButton::clicked, this, [this] {
+        invalidateNextTrack();
+        adoptPendingTrack(false);
         repeat_ = (repeat_ + 1) % 3;
+        prepareNextTrack();
         syncTransport();
         savePlayback();
     });
@@ -1793,6 +1907,15 @@ void MusicWindow::playQueue(
     const std::shared_ptr<videovault::core::Vault>& vault,
     const std::vector<MusicTrack>& tracks,
     const int index) {
+    stopWorker();
+    coverSerial_.fetch_add(1);
+    if (vault_ != vault) {
+        art_.clear();
+        tags_.clear();
+        cover_ = QImage();
+        coverId_ = 0;
+        noteProbe_ = std::make_shared<NoteProbe>();
+    }
     vault_ = vault;
     tracks_ = tracks;
     index_ = tracks_.empty() ? 0 : std::max(0, std::min(index, static_cast<int>(tracks_.size()) - 1));
@@ -1806,9 +1929,127 @@ void MusicWindow::playQueue(
     updateTray();
 }
 
+void MusicWindow::enqueue(const std::vector<MusicTrack>& tracks, const bool playNext) {
+    if (tracks.empty()) {
+        return;
+    }
+    if (tracks_.empty()) {
+        // A fresh bar has no vault context. Its owner must use playQueue(vault,
+        // tracks, 0); never display a fictitious playing queue with a null vault.
+        if (vault_ && vault_->is_unlocked()) playQueue(vault_, tracks, 0);
+        return;
+    }
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    // Insert in playback order, not merely visual order: reverse mode needs the
+    // batch before the current row (reversed), and shuffle must put it atop the
+    // bag. The current decoder and its position are never restarted by enqueue.
+    const int position = MusicQueueEdit::insert(tracks_, index_, tracks, playNext, order_);
+    history_.clear();
+    bag_.clear();
+    if (order_ == 1 || order_ == 2) {
+        refillBag();
+    }
+    if (playNext && order_ == 2)
+        MusicQueueEdit::prioritize(bag_, position, static_cast<int>(tracks.size()));
+    prepareNextTrack();
+    applySong();
+    syncTransport();
+}
+
+void MusicWindow::setExpanded(bool expanded) {
+    expanded_ = expanded;
+    const QSignalBlocker blocker(expandButton_);
+    expandButton_->setChecked(expanded);
+    expandButton_->setText(expanded ? tr("Hide") : tr("Queue"));
+    expandButton_->setAccessibleName(expanded ? tr("Collapse now playing and queue") : tr("Expand now playing and queue"));
+    hidePopups();
+    expandedPanel_->setVisible(expanded);
+    const int textExtra = std::max(0, fontMetrics().height() - 18) * 4;
+    setFixedHeight(expanded ? kBarHeight + 292 + textExtra : kBarHeight);
+    if (expanded) { syncExpandedQueue(); syncExpandedSong(); }
+    layoutControls();
+    updateGeometry();
+}
+
+void MusicWindow::syncExpandedSong() {
+    if (!expandedTitle_) return;
+    expandedTitle_->setText(errorText_.isEmpty() ? songTitle_ : errorText_);
+    expandedTitle_->setToolTip(expandedTitle_->text());
+    expandedDetail_->setText(artistText_ + ((!artistText_.isEmpty() && !albumText_.isEmpty()) ? QStringLiteral(" · ") : QString()) + albumText_);
+    const auto id = tracks_.empty() ? 0 : tracks_[static_cast<std::size_t>(index_)].id;
+    expandedCover_->setPixmap(roundedCover(coverId_ == id ? cover_ : QImage(), 64));
+}
+
+void MusicWindow::syncExpandedQueue() {
+    if (!queueList_) return;
+    const int selected = queueList_->currentRow();
+    const QSignalBlocker blocker(queueList_);
+    // Preserve row selection/scroll while transport and metadata change. Queue
+    // positions (not file IDs) identify rows, so duplicate tracks remain valid.
+    while (queueList_->count() > static_cast<int>(tracks_.size())) delete queueList_->takeItem(queueList_->count() - 1);
+    while (queueList_->count() < static_cast<int>(tracks_.size())) queueList_->addItem(QString());
+    for (int row = 0; row < queueList_->count(); ++row) {
+        auto* item = queueList_->item(row);
+        const auto song = songFor(row);
+        item->setText((row == index_ ? tr("Now · ") : QString::number(row + 1) + QStringLiteral(" · "))
+            + song.title + (song.artist.isEmpty() ? QString() : QStringLiteral(" — ") + song.artist));
+        item->setToolTip(item->text());
+        auto weight = item->font(); weight.setBold(row == index_); item->setFont(weight);
+        const auto art = art_.find(tracks_[static_cast<std::size_t>(row)].id);
+        item->setIcon(QIcon(art == art_.end() ? paintNotePlate(28) : roundedCover(art->second, 28)));
+    }
+    const int row = queueList_->count() == 0 ? -1 : std::clamp(selected < 0 ? index_ : selected, 0, queueList_->count() - 1);
+    queueList_->setCurrentRow(row);
+    queueJump_->setEnabled(row >= 0);
+    queueRemove_->setEnabled(row >= 0);
+    queueUp_->setEnabled(row > 0);
+    queueDown_->setEnabled(row >= 0 && row + 1 < queueList_->count());
+    queueSummary_->setText(tr("Queue · %1 tracks").arg(tracks_.size()));
+}
+
+void MusicWindow::removeQueueRow(int row) {
+    if (row < 0 || row >= static_cast<int>(tracks_.size())) return;
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    const bool removingCurrent = row == index_;
+    const bool wasPaused = paused_.load();
+    if (removingCurrent) stopWorker();
+    tracks_.erase(tracks_.begin() + row);
+    index_ = MusicQueueEdit::afterRemoval(index_, row, static_cast<int>(tracks_.size()), order_);
+    history_.clear(); refillBag();
+    if (tracks_.empty()) {
+        stopWorker();
+        if (output_) output_->stop();
+        sink_->clear();
+        paused_.store(true);
+        durationMs_.store(0); consumedFrames_.store(0); originMs_.store(0);
+        cover_ = QImage(); coverId_ = 0;
+        clearSystemMedia();
+    } else if (removingCurrent) {
+        showTrack(); startWorker(); setPaused(wasPaused);
+    } else prepareNextTrack();
+    applySong(); syncTransport();
+}
+
+void MusicWindow::moveQueueRow(int row, int delta) {
+    const int to = row + delta;
+    if (row < 0 || row >= static_cast<int>(tracks_.size()) || to < 0 || to >= static_cast<int>(tracks_.size())) return;
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    std::swap(tracks_[static_cast<std::size_t>(row)], tracks_[static_cast<std::size_t>(to)]);
+    index_ = MusicQueueEdit::afterMove(index_, row, to);
+    history_.clear(); refillBag();
+    prepareNextTrack();
+    applySong(); syncTransport();
+    queueList_->setCurrentRow(to);
+}
+
 void MusicWindow::showTrack() {
     errorText_.clear();
-    if (!tracks_.empty() && coverId_ != tracks_[static_cast<std::size_t>(index_)].id) {
+    terminalEnded_ = false;
+    ended_.store(false);
+    if (tracks_.empty() || coverId_ != tracks_[static_cast<std::size_t>(index_)].id) {
         cover_ = QImage();
         coverId_ = 0;
     }
@@ -1823,7 +2064,10 @@ void MusicWindow::showTrack() {
 
 void MusicWindow::startWorker() {
     stopWorker();
-    if (!vault_ || tracks_.empty()) {
+    terminalEnded_ = false;
+    if (!vault_ || !vault_->is_unlocked() || tracks_.empty()) {
+        paused_.store(true);
+        syncTransport();
         return;
     }
     stop_.store(false);
@@ -1831,152 +2075,225 @@ void MusicWindow::startWorker() {
     ended_.store(false);
     paused_.store(false);
     seekMs_.store(-1);
+    pendingSeek_ = -1;
+    scrubbing_ = false;
     originMs_.store(0);
     consumedFrames_.store(0);
     durationMs_.store(0);
-    sampleRate_.store(0);
+    sampleRate_.store(LocalAudioReader::rate);
+    channels_.store(LocalAudioReader::channels);
     {
         std::lock_guard<std::mutex> guard(errorMutex_);
         error_.clear();
     }
     stretch_->reset();
-    if (sink_ != nullptr) {
-        sink_->clear();
-    }
+    sink_->clear();
+    // Manual jumps discard both the software and hardware queues. Automatic
+    // transitions below deliberately do neither, and keep this output alive.
+    if (output_) { output_->stop(); output_->start(sink_); }
+    prefetch_ = std::make_unique<LocalAudioPrefetch>();
+    prepareNextTrack();
     const auto vault = vault_;
+    const auto generation = vault->lock_generation();
+    const auto playbackSerial = playbackSerial_.load();
     const auto id = tracks_[static_cast<std::size_t>(index_)].id;
-    const QString trackName = tracks_[static_cast<std::size_t>(index_)].title;
-    QByteArray audioHint;
-    const int dot = trackName.lastIndexOf(QLatin1Char('.'));
-    if (dot > 0 && dot + 1 < trackName.size()) {
-        audioHint = QByteArray("audio.") + trackName.mid(dot + 1).toLower().toUtf8();
-    }
-    worker_ = std::thread([this, vault, id, audioHint] {
-        QImage cover;
-        if (vault) {
-            // Read the cover before the decoder opens so the two FFmpeg
-            // contexts are not live together, and so a real cover replaces
-            // a previously stored note.
-            auto stored = vault->display_thumbnail(id, 256U);
-            const bool note = stored && (stored.value().mime == "image/x-mvp-note"
-                || stored.value().mime == "image/x-mvp-empty");
-            bool retry = !note || !stored;
-            if (note && noteProbe_) {
-                std::lock_guard<std::mutex> guard(noteProbe_->mutex);
-                retry = noteProbe_->tried.insert(id).second;
-            }
-            if (retry && (!stored || note || stored.value().bytes.empty())) {
-                auto refreshed = vault->generate_thumbnail(id, 256U);
-                if (refreshed) {
-                    stored = std::move(refreshed);
-                }
-            }
-            if (stored && stored.value().mime != "image/x-mvp-note"
-                && stored.value().mime != "image/x-mvp-empty"
-                && !stored.value().bytes.empty()) {
-                cover.loadFromData(
-                    reinterpret_cast<const uchar*>(stored.value().bytes.data()),
-                    static_cast<int>(stored.value().bytes.size()));
-            }
-        }
-        QString opened;
-        decoder_->set_stream_cache_bytes(256U << 10);
-        decoder_->prepare_for_audio();
-        if (!decoder_->open(vault, id, &opened,
-                audioHint.isEmpty() ? nullptr : audioHint.constData())
-            || !decoder_->has_audio()) {
+    const auto hint = QByteArray("audio.") + QFileInfo(tracks_[static_cast<std::size_t>(index_)].title).suffix().toLower().toUtf8();
+    worker_ = std::thread([this, vault, generation, id, hint, playbackSerial] {
+        auto reader = std::make_unique<LocalAudioReader>();
+        QString error;
+        if (!reader->open(vault, id, hint, &error)) {
             std::lock_guard<std::mutex> guard(errorMutex_);
-            error_ = opened.isEmpty()
-                ? std::string("This file has no audio stream.")
-                : opened.toStdString();
+            error_ = error.isEmpty() ? "This file has no playable audio." : error.toStdString();
             workerFinished_.store(true);
             return;
         }
-        durationMs_.store(decoder_->duration_ms());
-        sampleRate_.store(decoder_->audio_sample_rate());
-        channels_.store(std::max(1, decoder_->audio_channels()));
-        const AudioTags tags = decoder_->audio_tags();
-        if (cover.isNull()) {
-            cover = decoder_->attached_cover();
-        }
-        if (cover.width() > 256 || cover.height() > 256) {
-            cover = cover.scaled(256, 256, Qt::KeepAspectRatio, Qt::FastTransformation);
-        }
-        QMetaObject::invokeMethod(this, [this, id, tags, cover] {
-            publishTrackInfo(id, tags.title, tags.artist, tags.album, cover);
+        durationMs_.store(reader->duration());
+        auto tags = reader->tags();
+        auto cover = reader->cover();
+        QMetaObject::invokeMethod(this, [this, id, tags, cover, playbackSerial, vault, generation] {
+            if (playbackSerial_.load() == playbackSerial && vault->is_unlocked() && vault->lock_generation() == generation)
+                publishTrackInfo(id, tags.title, tags.artist, tags.album, cover);
         }, Qt::QueuedConnection);
+        std::vector<std::int16_t> samples;
         bool flushed = false;
-        while (!stop_.load()) {
+        bool eof = false;
+        while (!stop_.load() && vault->is_unlocked() && vault->lock_generation() == generation) {
             const auto seek = seekMs_.exchange(-1);
             if (seek >= 0) {
-                (void)decoder_->seek_to(seek);
+                if (!reader->seek(seek)) {
+                    std::lock_guard<std::mutex> guard(errorMutex_);
+                    error_ = "Could not seek this audio track.";
+                    break;
+                }
                 consumedFrames_.store(0);
                 originMs_.store(seek);
                 stretch_->reset();
                 flushed = false;
+                eof = false;
                 const int ticket = clearRequest_.fetch_add(1) + 1;
-                while (!stop_.load() && clearApplied_.load() != ticket) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
+                while (!stop_.load() && clearApplied_.load() != ticket)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
             if (paused_.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            const int rate = std::max(1, sampleRate_.load());
-            const int channels = std::max(1, channels_.load());
-            const auto buffered = sink_ != nullptr ? sink_->buffered_samples() : 0U;
-            if (buffered > static_cast<std::size_t>(rate)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            // Await the UI's queue-index adoption, not an EOF timer. It happens
+            // with the next track's first PCM already behind the previous tail.
+            {
+                std::lock_guard<std::mutex> guard(chainMutex_);
+                if (pendingTrack_.index >= 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+            }
+            const auto buffered = sink_->buffered_samples();
+            if (buffered > static_cast<std::size_t>(LocalAudioReader::rate * LocalAudioReader::channels / 2)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
             const double speed = std::max(0.5, speedMilli_.load() / 1000.0);
-            if (!decoder_->pump_audio(rate / 5 * channels, nullptr)) {
-                if (!flushed) {
-                    std::size_t consumed = 0;
-                    auto tail = stretch_->flush(channels, speed, &consumed);
-                    consumedFrames_.fetch_add(static_cast<std::int64_t>(consumed));
-                    if (!tail.empty() && sink_ != nullptr) {
-                        sink_->append(tail.data(), tail.size());
-                    }
-                    flushed = true;
-                }
-                if (sink_ == nullptr || sink_->buffered_samples() == 0U) {
-                    ended_.store(true);
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (!eof) eof = !reader->read(&samples);
+            if (!eof) {
+                std::size_t consumed = 0;
+                auto shaped = stretch_->process(samples.data(), samples.size(), LocalAudioReader::channels, speed, &consumed);
+                consumedFrames_.fetch_add(static_cast<std::int64_t>(consumed));
+                if (!shaped.empty()) sink_->append(shaped.data(), shaped.size());
                 continue;
             }
-            flushed = false;
-            auto samples = decoder_->take_audio_samples();
-            std::size_t consumed = 0;
-            auto shaped = stretch_->process(
-                samples.data(), samples.size(), channels, speed, &consumed);
-            consumedFrames_.fetch_add(static_cast<std::int64_t>(consumed));
-            if (!shaped.empty() && sink_ != nullptr) {
-                sink_->append(shaped.data(), shaped.size());
+            NextTrack next;
+            { std::lock_guard<std::mutex> guard(chainMutex_); next = nextTrack_; }
+            if (next.updating) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
             }
+            if (!flushed && next.index < 0) {
+                std::size_t consumed = 0;
+                auto tail = stretch_->flush(LocalAudioReader::channels, speed, &consumed);
+                consumedFrames_.fetch_add(static_cast<std::int64_t>(consumed));
+                if (!tail.empty()) sink_->append(tail.data(), tail.size());
+                flushed = true;
+            }
+            if (next.index >= 0) {
+                auto prepared = prefetch_->take(next.ticket);
+                if (!prepared) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                std::lock_guard<std::mutex> guard(chainMutex_);
+                if (nextTrack_.ticket != next.ticket) continue;
+                if (!prepared->reader) {
+                    std::lock_guard<std::mutex> errorGuard(errorMutex_);
+                    error_ = prepared->error.toStdString();
+                    break;
+                }
+                reader = std::move(prepared->reader);
+                tags = reader->tags();
+                cover = reader->cover();
+                std::size_t consumed = 0;
+                auto first = stretch_->process(prepared->samples.data(), prepared->samples.size(), LocalAudioReader::channels, speed, &consumed);
+                // positionMs subtracts the entire buffered tail, staying at zero
+                // until this track is heard. No device reset at the boundary.
+                originMs_.store(0);
+                consumedFrames_.store(static_cast<std::int64_t>(consumed));
+                if (!first.empty()) sink_->append(first.data(), first.size());
+                pendingTrack_ = {next.index, next.id, reader->duration(), tags.title, tags.artist, tags.album, cover};
+                nextTrack_.index = -1;
+                QMetaObject::invokeMethod(this, [this, playbackSerial] {
+                    if (playbackSerial_.load() == playbackSerial) adoptPendingTrack();
+                }, Qt::QueuedConnection);
+                eof = false;
+                flushed = false;
+                continue;
+            }
+            if (sink_->buffered_samples() == 0U) {
+                ended_.store(true);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        decoder_->close();
         workerFinished_.store(true);
     });
 }
 
 void MusicWindow::stopWorker() {
+    playbackSerial_.fetch_add(1);
     stop_.store(true);
-    if (!worker_.joinable()) {
-        workerFinished_.store(true);
-        stop_.store(false);
-        return;
+    // No processEvents here: re-entering playback while joining the same worker
+    // used to mutate tracks_/vault_ beneath a newly started decode thread.
+    if (worker_.joinable()) worker_.join();
+    prefetch_.reset(); // joins preparation before releasing plaintext/session
+    {
+        std::lock_guard<std::mutex> guard(chainMutex_);
+        nextTrack_ = {};
+        pendingTrack_ = {};
     }
-    while (!workerFinished_.load()) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
-    }
-    worker_.join();
     workerFinished_.store(true);
     stop_.store(false);
+}
+
+void MusicWindow::prepareNextTrack() {
+    invalidateNextTrack();
+    if (!adoptingTrack_) adoptPendingTrack(false);
+    NextTrack next;
+    next.ticket = ++nextTicket_;
+    const int count = static_cast<int>(tracks_.size());
+    if (count > 0) {
+        if (repeat_ == 1) next.index = index_;
+        else if (order_ == 2) {
+            if (bag_.empty() && repeat_ == 2) refillBag();
+            if (!bag_.empty()) next.index = bag_.back();
+            else if (repeat_ == 2) next.index = index_;
+        } else {
+            const int candidate = index_ + (order_ == 1 ? -1 : 1);
+            if (candidate >= 0 && candidate < count) next.index = candidate;
+            else if (repeat_ == 2) next.index = candidate < 0 ? count - 1 : 0;
+        }
+    }
+    if (next.index >= 0) {
+        const auto& track = tracks_[static_cast<std::size_t>(next.index)];
+        next.id = track.id;
+        next.hint = QByteArray("audio.") + QFileInfo(track.title).suffix().toLower().toUtf8();
+    }
+    { std::lock_guard<std::mutex> guard(chainMutex_); nextTrack_ = next; }
+    if (prefetch_) {
+        if (next.index >= 0) prefetch_->request(vault_, next.id, next.hint, next.ticket);
+        else prefetch_->cancel();
+    }
+}
+
+void MusicWindow::invalidateNextTrack() {
+    std::lock_guard<std::mutex> guard(chainMutex_);
+    nextTrack_.index = -1;
+    nextTrack_.updating = true;
+    nextTrack_.ticket = ++nextTicket_;
+}
+
+void MusicWindow::adoptPendingTrack(bool prepare) {
+    PendingTrack pending;
+    {
+        std::lock_guard<std::mutex> guard(chainMutex_);
+        if (pendingTrack_.index < 0) return;
+        pending = std::move(pendingTrack_);
+        pendingTrack_ = {};
+    }
+    if (pending.index >= static_cast<int>(tracks_.size())
+        || tracks_[static_cast<std::size_t>(pending.index)].id != pending.id) return;
+    adoptingTrack_ = true;
+    if (order_ == 2 && pending.index != index_) {
+        history_.push_back(index_);
+        if (!bag_.empty() && bag_.back() == pending.index) bag_.pop_back();
+    }
+    index_ = pending.index;
+    durationMs_.store(pending.duration);
+    cover_ = QImage();
+    coverId_ = 0;
+    errorText_.clear();
+    if (prepare) prepareNextTrack();
+    publishTrackInfo(pending.id, pending.title, pending.artist, pending.album, pending.cover);
+    syncTransport();
+    adoptingTrack_ = false;
 }
 
 bool MusicWindow::nextAvailable() const {
@@ -2030,12 +2347,15 @@ bool MusicWindow::advance(const int delta) {
     if (tracks_.empty() || delta == 0) {
         return false;
     }
+    invalidateNextTrack();
+    adoptPendingTrack(false);
     const int count = static_cast<int>(tracks_.size());
     int next = index_;
     if (order_ == 2) {
         if (delta > 0) {
             if (bag_.empty()) {
                 if (repeat_ != 2) {
+                    prepareNextTrack();
                     return false;
                 }
                 refillBag();
@@ -2050,6 +2370,7 @@ bool MusicWindow::advance(const int delta) {
             }
         } else {
             if (history_.empty()) {
+                prepareNextTrack();
                 return false;
             }
             bag_.push_back(index_);
@@ -2061,6 +2382,7 @@ bool MusicWindow::advance(const int delta) {
         next = index_ + step;
         if (next < 0 || next >= count) {
             if (repeat_ != 2) {
+                prepareNextTrack();
                 return false;
             }
             next = next < 0 ? count - 1 : 0;
@@ -2073,7 +2395,12 @@ bool MusicWindow::advance(const int delta) {
 }
 
 void MusicWindow::playIndex(const int index) {
-    if (index < 0 || index >= static_cast<int>(tracks_.size()) || index == index_) {
+    if (index < 0 || index >= static_cast<int>(tracks_.size())) return;
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    if (index == index_ && !workerFinished_.load()) {
+        setPaused(false);
+        prepareNextTrack();
         return;
     }
     history_.clear();
@@ -2084,10 +2411,7 @@ void MusicWindow::playIndex(const int index) {
 }
 
 void MusicWindow::pauseForVideo() {
-    if (tracks_.empty() || paused_.load()) {
-        return;
-    }
-    togglePlay();
+    if (!tracks_.empty()) setPaused(true);
 }
 
 void MusicWindow::showWhileMinimized() {
@@ -2104,12 +2428,15 @@ void MusicWindow::togglePlay() {
     if (tracks_.empty()) {
         return;
     }
-    if (ended_.load() && workerFinished_.load()) {
+    if (workerFinished_.load()) {
         showTrack();
         startWorker();
         return;
     }
-    const bool pause = !paused_.load();
+    setPaused(!paused_.load());
+}
+
+void MusicWindow::setPaused(const bool pause) {
     paused_.store(pause);
     playButton_->setGlyph(pause ? Glyph::Play : Glyph::Pause);
     playButton_->setToolTip(pause ? QStringLiteral("Play") : QStringLiteral("Pause"));
@@ -2123,17 +2450,35 @@ void MusicWindow::togglePlay() {
     }
 }
 
+void MusicWindow::stopPlayback() {
+    if (tracks_.empty()) return;
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    stopWorker();
+    if (output_) output_->stop();
+    sink_->clear();
+    consumedFrames_.store(0);
+    originMs_.store(0);
+    terminalEnded_ = true;
+    ended_.store(true);
+    setPaused(true);
+    progress_->setValue(0);
+    timeLabel_->setText(formatTime(0));
+}
+
 void MusicWindow::seekTo(const std::int64_t ms) {
+    if (tracks_.empty()) return;
+    invalidateNextTrack();
+    adoptPendingTrack(false);
+    const bool wasPaused = paused_.load();
+    if (workerFinished_.load()) {
+        startWorker();
+        setPaused(wasPaused);
+    }
     seekMs_.store(std::max<std::int64_t>(0, ms));
     ended_.store(false);
-    if (paused_.load()) {
-        paused_.store(false);
-        playButton_->setGlyph(Glyph::Pause);
-        playButton_->setToolTip(QStringLiteral("Pause"));
-        if (output_ != nullptr) {
-            output_->resume();
-        }
-    }
+    terminalEnded_ = false;
+    prepareNextTrack();
 }
 
 void MusicWindow::requestCovers() {
@@ -2142,6 +2487,7 @@ void MusicWindow::requestCovers() {
     }
     const int serial = coverSerial_.fetch_add(1) + 1;
     const auto vault = vault_;
+    const auto generation = vault->lock_generation();
     const auto probe = noteProbe_;
     std::vector<std::int64_t> ids;
     for (const auto& track : tracks_) {
@@ -2154,15 +2500,14 @@ void MusicWindow::requestCovers() {
     }
     probe->inflight.fetch_add(1);
     QPointer<MusicWindow> self(this);
-    QtConcurrent::run([self, serial, vault, probe, ids] {
+    QtConcurrent::run([self, serial, vault, generation, probe, ids] {
         struct Leave {
             std::atomic<int>* inflight;
             ~Leave() { inflight->fetch_sub(1); }
         } leave{&probe->inflight};
         for (const auto id : ids) {
-            if (!probe || probe->inflight.load() < 0) {
-                return;
-            }
+            if (self.isNull() || self->coverSerial_.load() != serial || !vault->is_unlocked()
+                || vault->lock_generation() != generation) return;
             if (self.isNull()) {
                 return;
             }
@@ -2193,11 +2538,19 @@ void MusicWindow::requestCovers() {
                 continue;
             }
             image = image.scaled(80, 80, Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
-            QMetaObject::invokeMethod(self.data(), [self, serial, id, image] {
-                if (self.isNull() || self->coverSerial_.load() != serial) {
+            QMetaObject::invokeMethod(self.data(), [self, serial, id, image, vault, generation] {
+                if (self.isNull() || self->coverSerial_.load() != serial || !vault->is_unlocked()
+                    || vault->lock_generation() != generation) {
                     return;
                 }
                 self->art_[id] = image;
+                if (!self->tracks_.empty() && self->tracks_[static_cast<std::size_t>(self->index_)].id == id) {
+                    self->cover_ = image;
+                    self->coverId_ = id;
+                    self->syncExpandedSong();
+                    self->updateTray();
+                }
+                self->syncExpandedQueue();
                 if (self->playlist_ != nullptr) {
                     self->playlist_->setArt(id, QPixmap::fromImage(image));
                 }
@@ -2293,12 +2646,31 @@ std::int64_t MusicWindow::positionMs() const {
     const auto buffered = sink_ == nullptr
         ? 0
         : static_cast<std::int64_t>(sink_->buffered_samples() / static_cast<std::size_t>(channels));
+    const auto hardwareFrames = output_ && output_->state() != QAudio::StoppedState
+        ? std::max(0, output_->bufferSize() - output_->bytesFree()) / (channels * 2) : 0;
     const auto heard = consumedFrames_.load()
-        - static_cast<std::int64_t>(std::llround(static_cast<double>(buffered) * speed));
+        - static_cast<std::int64_t>(std::llround(static_cast<double>(buffered + hardwareFrames) * speed));
     return std::max<std::int64_t>(0, originMs_.load() + heard * 1000 / rate);
 }
 
 void MusicWindow::refreshClock() {
+    if (vault_ && !vault_->is_unlocked()) {
+        stopWorker();
+        if (output_) output_->stop();
+        sink_->clear();
+        tracks_.clear(); art_.clear(); tags_.clear();
+        cover_ = QImage(); coverId_ = 0;
+        paused_.store(true); sampleRate_.store(0);
+        durationMs_.store(0); consumedFrames_.store(0); originMs_.store(0);
+        coverSerial_.fetch_add(1);
+        vault_.reset();
+        clearSystemMedia();
+        if (trayCard_) trayCard_->hide();
+        if (tray_) tray_->hide();
+        applySong(); syncTransport();
+        return;
+    }
+    adoptPendingTrack();
     ensureOutput();
     applySeekClear();
     if (output_ != nullptr && !paused_.load() && sink_ != nullptr
@@ -2323,13 +2695,18 @@ void MusicWindow::refreshClock() {
             error = error_;
         }
         if (!error.empty()) {
-            if (errorText_.isEmpty()) {
+            if (errorText_.isEmpty() && sink_->buffered_samples() == 0U
+                && (!output_ || output_->state() == QAudio::IdleState || output_->state() == QAudio::StoppedState)) {
                 errorText_ = QString::fromStdString(error);
+                setPaused(true);
                 applyName();
+                syncExpandedSong();
                 playButton_->setGlyph(Glyph::Play);
                 playButton_->setToolTip(QStringLiteral("Play"));
             }
-        } else if (ended_.exchange(false)) {
+        } else if (ended_.load() && !terminalEnded_
+                   && (!output_ || output_->state() == QAudio::IdleState || output_->state() == QAudio::StoppedState)) {
+            ended_.store(false);
             onTrackEnded();
             return;
         }
@@ -2347,7 +2724,8 @@ void MusicWindow::refreshClock() {
             trayCard_->setTimeline(value);
         }
     }
-    const QString text = formatTime(position);
+    const QString text = expanded_ && duration > 0
+        ? formatTime(position) + QStringLiteral(" / ") + formatTime(duration) : formatTime(position);
     if (timeLabel_->text() != text) {
         timeLabel_->setText(text);
         layoutControls();
@@ -2356,12 +2734,10 @@ void MusicWindow::refreshClock() {
 }
 
 void MusicWindow::onTrackEnded() {
-    if (repeat_ == 1) {
-        showTrack();
-        startWorker();
-        return;
-    }
-    if (!advance(1)) {
+    // The decode worker already chains successors before the sink drains.
+    // This is a terminal EOF, not a timer-driven restart of the next track.
+    terminalEnded_ = true;
+    {
         paused_.store(true);
         playButton_->setGlyph(Glyph::Play);
         playButton_->setToolTip(QStringLiteral("Play"));
@@ -2378,14 +2754,25 @@ void MusicWindow::onTrackEnded() {
 }
 
 void MusicWindow::layoutControls() {
-    const bool wide = width() >= 460 || barOver_ || cursorOnChrome();
+    const bool wide = width() >= 500;
+    const bool inlineOptions = expanded_ && !wide;
+    expandedOptions_->setVisible(inlineOptions);
+    int optionX = 0;
+    for (auto* button : {volumeButton_, orderButton_, repeatButton_, speedButton_}) {
+        QWidget* owner = inlineOptions ? expandedOptions_ : this;
+        if (button->parentWidget() != owner) button->setParent(owner);
+        if (inlineOptions) {
+            button->setGeometry(optionX, 0, 40, kControlHeight);
+            optionX += 44;
+        }
+    }
     const bool skip = previousAvailable() || nextAvailable();
     previousButton_->setVisible(skip);
     nextButton_->setVisible(skip);
-    volumeButton_->setVisible(wide);
-    orderButton_->setVisible(wide);
-    repeatButton_->setVisible(wide);
-    speedButton_->setVisible(wide);
+    volumeButton_->setVisible(wide || expanded_);
+    orderButton_->setVisible(wide || expanded_);
+    repeatButton_->setVisible(wide || expanded_);
+    speedButton_->setVisible(wide || expanded_);
 
     int x = 9;
     if (skip) {
@@ -2405,6 +2792,9 @@ void MusicWindow::layoutControls() {
     int right = width();
     closeButton_->setGeometry(right - 39, 0, 39, kControlHeight);
     right -= 39;
+    const int expandWidth = std::max(54, expandButton_->fontMetrics().horizontalAdvance(expandButton_->text()) + 20);
+    expandButton_->setGeometry(right - expandWidth, 1, expandWidth, kControlHeight - 2);
+    right -= expandWidth;
     if (wide) {
         speedButton_->setGeometry(right - 30, 0, 30, kControlHeight);
         right -= 30;
@@ -2423,6 +2813,7 @@ void MusicWindow::layoutControls() {
     nameRect_ = nameLabel_->geometry();
     progress_->setGeometry(0, kBarHeight - 16, width(), 16);
     progress_->raise();
+    expandedPanel_->setGeometry(0, kBarHeight, width(), std::max(0, height() - kBarHeight));
     applyName();
 }
 
@@ -2441,6 +2832,10 @@ void MusicWindow::applyName() {
 }
 
 void MusicWindow::syncTransport() {
+    const bool playing = !tracks_.empty() && !paused_.load() && !terminalEnded_ && errorText_.isEmpty();
+    playButton_->setEnabled(!tracks_.empty());
+    playButton_->setGlyph(playing ? Glyph::Pause : Glyph::Play);
+    playButton_->setToolTip(playing ? tr("Pause") : tr("Play"));
     const bool skip = previousAvailable() || nextAvailable();
     previousButton_->setVisible(skip);
     nextButton_->setVisible(skip);
@@ -2505,6 +2900,8 @@ void MusicWindow::toggleSpeed() {
 }
 
 void MusicWindow::setOrder(const int order) {
+    invalidateNextTrack();
+    adoptPendingTrack(false);
     order_ = order;
     history_.clear();
     if (order_ == 2) {
@@ -2512,6 +2909,7 @@ void MusicWindow::setOrder(const int order) {
     } else {
         bag_.clear();
     }
+    prepareNextTrack();
     syncTransport();
     if (orderMenu_ != nullptr && orderMenu_->isVisible()) {
         orderMenu_->sync(order_);
@@ -2634,11 +3032,7 @@ void MusicWindow::paintEvent(QPaintEvent*) {
 
 void MusicWindow::mouseDoubleClickEvent(QMouseEvent* event) {
     if (nameRect_.contains(event->pos())) {
-        if (trayCard_ != nullptr && trayCard_->isVisible()) {
-            trayCard_->hide();
-        } else {
-            showTrayCard();
-        }
+        setExpanded(!expanded_);
         event->accept();
         return;
     }
@@ -2647,7 +3041,7 @@ void MusicWindow::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void MusicWindow::mouseMoveEvent(QMouseEvent* event) {
     QWidget::mouseMoveEvent(event);
-    if (nameRect_.contains(event->pos())) {
+    if (!expanded_ && nameRect_.contains(event->pos())) {
         showOnly(playlist_, nameLabel_, false);
     }
 }
@@ -2670,6 +3064,21 @@ void MusicWindow::leaveEvent(QEvent* event) {
 }
 
 bool MusicWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::KeyPress && !tracks_.empty()) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        switch (key->key()) {
+        case Qt::Key_MediaPlay: case Qt::Key_MediaTogglePlayPause:
+        case Qt::Key_MediaPause: case Qt::Key_MediaStop:
+        case Qt::Key_MediaNext: case Qt::Key_MediaPrevious:
+            keyPressEvent(key);
+            return true;
+        default: break;
+        }
+    }
+    if (watched == this && event->type() == QEvent::PaletteChange) {
+        syncExpandedSong();
+        syncExpandedQueue();
+    }
     if (!isVisible()) {
         return QWidget::eventFilter(watched, event);
     }
@@ -2687,7 +3096,8 @@ bool MusicWindow::eventFilter(QObject* watched, QEvent* event) {
             return QWidget::eventFilter(watched, event);
         }
         auto* key = static_cast<QKeyEvent*>(event);
-        if (key->key() == Qt::Key_Space && !key->isAutoRepeat()) {
+        if (key->key() == Qt::Key_Space && !key->isAutoRepeat()
+            && qobject_cast<QAbstractButton*>(focus) == nullptr) {
             togglePlay();
             return true;
         }
@@ -2762,6 +3172,8 @@ void MusicWindow::applySong() {
             : artistText_ + QStringLiteral(" — ") + songTitle_;
     }
     applyName();
+    syncExpandedSong();
+    syncExpandedQueue();
     if (playlist_ != nullptr) {
         playlist_->sync(tracks_, index_);
         for (const auto& entry : art_) {
@@ -2871,15 +3283,53 @@ void MusicWindow::closeEvent(QCloseEvent* event) {
     if (tray_ != nullptr) {
         tray_->hide();
     }
-    qApp->removeEventFilter(this);
     stopWorker();
-    if (output_ != nullptr) {
-        output_->stop();
-    }
+    coverSerial_.fetch_add(1);
+    if (output_) output_->stop();
+    sink_->clear();
+    paused_.store(true);
+    tracks_.clear(); art_.clear(); tags_.clear();
+    vault_.reset(); cover_ = QImage(); coverId_ = 0;
+    durationMs_.store(0); consumedFrames_.store(0); originMs_.store(0);
+    applySong(); syncTransport();
+    clearSystemMedia();
     QWidget::closeEvent(event);
 }
 
 void MusicWindow::keyPressEvent(QKeyEvent* event) {
+    if (tracks_.empty() || event->isAutoRepeat()) { event->ignore(); return; }
+    // Keyboard media keys: the bar is often the only visible transport, so the
+    // hardware keys must drive it even when the window is not focused.
+    switch (event->key()) {
+    case Qt::Key_MediaPlay:
+        if (workerFinished_.load()) { showTrack(); startWorker(); }
+        else setPaused(false);
+        event->accept();
+        return;
+    case Qt::Key_MediaTogglePlayPause:
+        togglePlay();
+        event->accept();
+        return;
+    case Qt::Key_MediaPause:
+        setPaused(true);
+        event->accept();
+        return;
+    case Qt::Key_MediaStop: {
+        stopPlayback();
+        event->accept();
+        return;
+    }
+    case Qt::Key_MediaNext:
+        advance(1);
+        event->accept();
+        return;
+    case Qt::Key_MediaPrevious:
+        advance(-1);
+        event->accept();
+        return;
+    default:
+        break;
+    }
     if (event->key() == Qt::Key_Space) {
         togglePlay();
         event->accept();

@@ -8,21 +8,27 @@ interface PluginProviderAdapter {
     fun cataloguePath(query: String?, item: PluginItem?): String
     fun normalize(payload: JSONObject, detail: String?): List<PluginItem>
     fun audioPath(item: PluginItem): String
+    fun resolve(http: PluginHttp, item: PluginItem, clientId: String, download: Boolean): ProviderStream =
+        ProviderStream(http.absolute(audioPath(item)), "flac", "audio/flac", true)
 }
+data class ProviderStream(val url: String, val codec: String, val mime: String, val downloadable: Boolean,
+    val sourceUrl: String = "", val hls: Boolean = false)
 data class PluginProtocol(val id: String, val permissions: Set<String>, val music: Boolean)
 object PluginProviderRegistry {
     private val definitions = mapOf(
         "monochrome-tracks-v1" to PluginProtocol("monochrome-tracks-v1",setOf("network","audio-playback","vault-import"),true),
+        "soundcloud-tracks-v1" to PluginProtocol("soundcloud-tracks-v1",setOf("network","audio-playback","vault-import"),true),
         "megavault-actions-v1" to PluginProtocol("megavault-actions-v1",emptySet(),false),
     )
     fun protocol(id: String): PluginProtocol = definitions[id] ?: error("Unsupported extension protocol")
     fun adapter(id: String): PluginProviderAdapter = when (id) {
+        "soundcloud-tracks-v1" -> SoundCloudTracksProvider()
         "monochrome-tracks-v1" -> MonochromeTracksProvider()
         else -> error("This extension is not a music provider")
     }
 }
 object BundledPluginRegistry {
-    val assets = listOf("monochrome/plugin.json", "text-tools/plugin.json")
+    val assets = listOf("monochrome/plugin.json", "soundcloud/plugin.json", "text-tools/plugin.json")
 }
 class MonochromeTracksProvider : PluginProviderAdapter {
     override fun cataloguePath(query: String?, item: PluginItem?): String = when(item?.kind) {

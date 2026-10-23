@@ -74,7 +74,7 @@ import kotlin.math.abs
 
 /**
  * Shared now-playing page. Vault audio lives in [MusicPlaybackService]; provider
- * audio stays in its caller-owned RAM-only session, including after Back.
+ * audio uses a caller-owned progressive session (or its local encrypted copy), including after Back.
  */
 @Composable
 fun MusicScreen(
@@ -277,7 +277,7 @@ fun MusicScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (pluginSession != null) pluginSession.selected?.subtitle?.ifBlank { "Provider audio · RAM only" } ?: "Provider audio"
+                    if (pluginSession != null) pluginSession.selected?.subtitle?.ifBlank { if (pluginSession.localPlayback) "Offline vault audio" else "Progressive provider audio" } ?: "Provider audio"
                     else shownName.substringAfterLast('.', "Audio").uppercase(),
                     color = Mvp.description,
                     fontSize = 13.sp,
@@ -322,12 +322,17 @@ fun MusicScreen(
                 androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
                 Text("Loading provider audio…", color = Mvp.description, modifier = Modifier.padding(horizontal = 20.dp))
             }
+            if (pluginSession.saveBusy) {
+                Text("Cancel offline copy", color = Mvp.accent,
+                    modifier = Modifier.clickable { pluginSession.cancelDownload() }.padding(horizontal = 20.dp, vertical = 8.dp))
+            }
             val canDownload = pluginSession.canDownload
             Text(
                 when {
                     pluginSession.saveBusy -> "Saving to encrypted vault…"
                     pluginSession.saved -> "Saved to encrypted vault"
-                    else -> "Download to vault"
+                    !pluginSession.downloadAllowed -> "Streaming only · download not authorized"
+                    else -> "Download to vault (restarts from beginning)"
                 },
                 color = if (canDownload) Mvp.accent else Mvp.description,
                 modifier = Modifier.clickable(enabled = canDownload) { pluginSession.download() }

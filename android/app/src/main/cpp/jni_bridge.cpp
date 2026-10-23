@@ -40,6 +40,13 @@ namespace {
 std::mutex g_mutex;
 std::shared_ptr<Vault> g_vault;
 std::string g_vault_root;
+struct AndroidStreamImport {
+    // Member order ensures the borrowed vault outlives its StreamImport.
+    std::shared_ptr<Vault> vault;
+    StreamImport stream;
+};
+std::unordered_map<jlong, AndroidStreamImport> g_stream_imports;
+jlong g_next_stream_import = 1;
 // 0..1 while a package is being written or read. -1 when idle.
 std::atomic<double> g_package_progress{-1.0};
 
@@ -934,6 +941,8 @@ JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring jpassw
         static_cast<std::uint32_t>(parallelism)};
     auto result = Vault::create(r, *password, params);
     if (!result) return to_jstring(env, err_json(result.error()));
+    g_stream_imports.clear();
+    if (g_vault) g_vault->lock();
     g_vault = std::make_shared<Vault>(std::move(result.value()));
     g_vault_root = r;
     return to_jstring(env, ok_json());
@@ -948,6 +957,8 @@ JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring jpasswor
     }
     auto result = Vault::open(r, *password);
     if (!result) return to_jstring(env, err_json(result.error()));
+    g_stream_imports.clear();
+    if (g_vault) g_vault->lock();
     g_vault = std::make_shared<Vault>(std::move(result.value()));
     g_vault_root = r;
     return to_jstring(env, ok_json());
@@ -961,6 +972,7 @@ JNIEXPORT jboolean JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeIsUnlo
 
 JNI_METHOD(nativeLock)(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_stream_imports.clear();
     clear_plain();
     if (g_vault) g_vault->lock();
     return to_jstring(env, ok_json());
@@ -1035,6 +1047,66 @@ JNI_METHOD(nativeImportBytesForVault)(JNIEnv* env, jobject, jbyteArray data, jst
     jlong folder_id, jstring expected_root) {
     if (expected_root == nullptr) return to_jstring(env, err_msg("Missing destination vault"));
     return import_bytes_for_vault(env, data, name, folder_id, expected_root);
+}
+
+JNI_METHOD(nativeFindProviderTrack)(JNIEnv* env, jobject, jstring provider, jstring track, jstring root) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault || !g_vault->is_unlocked() || jstring_to_string(env, root) != g_vault_root)
+        return to_jstring(env, err_msg("Destination vault changed or locked"));
+    auto found = g_vault->find_video_by_provenance(jstring_to_string(env, provider), jstring_to_string(env, track));
+    if (!found) return to_jstring(env, err_json(found.error()));
+    return to_jstring(env, ok_json("\"id\":" + std::to_string(found.value().value_or(0))));
+}
+
+JNI_METHOD(nativeBeginStreamImport)(JNIEnv* env, jobject, jstring name, jlong size, jlong folder,
+    jstring root, jstring provider, jstring track, jstring source, jstring title, jstring artist, jstring codec) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (size <= 0 || folder < 0 || g_stream_imports.size() >= 3 || !g_vault || !g_vault->is_unlocked()
+        || jstring_to_string(env, root) != g_vault_root)
+        return to_jstring(env, err_msg("Invalid import or destination vault changed or locked"));
+    TrackProvenance provenance;
+    provenance.provider_id = jstring_to_string(env, provider);
+    provenance.provider_track_id = jstring_to_string(env, track);
+    provenance.source_url = jstring_to_string(env, source);
+    provenance.title = jstring_to_string(env, title);
+    provenance.artist = jstring_to_string(env, artist);
+    provenance.codec = jstring_to_string(env, codec);
+    auto started = g_vault->begin_stream_import(jstring_to_string(env, name), static_cast<std::uint64_t>(size), folder, &provenance);
+    if (!started) return to_jstring(env, err_json(started.error()));
+    const auto id = g_next_stream_import++;
+    g_stream_imports.emplace(id, AndroidStreamImport{g_vault, std::move(started.value())});
+    return to_jstring(env, ok_json("\"id\":" + std::to_string(id)));
+}
+
+JNI_METHOD(nativeAppendStreamImport)(JNIEnv* env, jobject, jlong handle, jbyteArray bytes, jint offset, jint length) {
+    if (!bytes || offset < 0 || length <= 0 || length > 65536 || offset > env->GetArrayLength(bytes) - length)
+        return to_jstring(env, err_msg("Invalid stream chunk"));
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_stream_imports.find(handle);
+    if (it == g_stream_imports.end()) return to_jstring(env, err_msg("Import cancelled or vault locked"));
+    std::array<unsigned char, 65536> chunk{};
+    env->GetByteArrayRegion(bytes, offset, length, reinterpret_cast<jbyte*>(chunk.data()));
+    if (env->ExceptionCheck()) { sodium_memzero(chunk.data(), chunk.size()); return nullptr; }
+    auto result = it->second.stream.append(std::span<const unsigned char>(chunk.data(), static_cast<std::size_t>(length)));
+    sodium_memzero(chunk.data(), chunk.size());
+    if (!result) { g_stream_imports.erase(it); return to_jstring(env, err_json(result.error())); }
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeCommitStreamImport)(JNIEnv* env, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_stream_imports.find(handle);
+    if (it == g_stream_imports.end()) return to_jstring(env, err_msg("Import cancelled or vault locked"));
+    auto result = it->second.stream.commit();
+    g_stream_imports.erase(it);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json("\"id\":" + std::to_string(result.value())));
+}
+
+JNI_METHOD(nativeAbortStreamImport)(JNIEnv* env, jobject, jlong handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_stream_imports.erase(handle);
+    return to_jstring(env, ok_json());
 }
 
 JNI_METHOD(nativeRemoveVideo)(JNIEnv* env, jobject, jlong id) {
@@ -1281,6 +1353,7 @@ JNI_METHOD(nativeImportInto)(JNIEnv* env, jobject, jstring path, jlong folder_id
 
 JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_stream_imports.clear();
     clear_plain();
     if (g_vault) g_vault->lock();
     g_vault.reset();

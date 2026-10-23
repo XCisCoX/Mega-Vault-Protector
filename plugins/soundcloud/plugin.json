@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "org.megavault.soundcloud",
+  "name": "SoundCloud",
+  "version": "1.0.0",
+  "description": "Browse SoundCloud tracks, artists and playlists; play progressive files or finite HLS audio in memory; import only artist-authorized original downloads. HLS offline import is not supported.",
+  "protocol": "soundcloud-tracks-v1",
+  "platforms": ["windows", "linux", "android"],
+  "permissions": ["network", "audio-playback", "vault-import"],
+  "network": {
+    "baseUrl": "https://api-v2.soundcloud.com",
+    "allowedHosts": [
+      "api-v2.soundcloud.com",
+      "api.soundcloud.com",
+      "*.sndcdn.com"
+    ]
+  },
+  "sourceNotice": "Requires your own authorized SoundCloud application client identity and service access. This adapter never scrapes web-player credentials or bypasses subscription, preview, region, encryption or artist download restrictions. Only artist-enabled original downloads may be imported into encrypted staging; HLS plays in memory but offline HLS remux/import and seeking are not supported. Current live API access has not been verified without an approved identity."
+}

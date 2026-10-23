@@ -1,5 +1,8 @@
 #include "videovault/app/media_decoder.hpp"
 
+#include "videovault/core/ffmpeg_compat.hpp"
+
+#include "videovault/app/byte_source.hpp"
 #include "videovault/core/vault.hpp"
 
 extern "C" {
@@ -250,7 +253,7 @@ private:
 // Random-access plaintext source over the encrypted package. Reads are served
 // from the read-ahead window cache; each window load authenticates every
 // touched chunk through Vault::read_video_range exactly once.
-class VaultSource {
+class VaultSource final : public ByteSource {
 public:
     VaultSource(
         std::shared_ptr<videovault::core::Vault> vault,
@@ -258,9 +261,9 @@ public:
         const std::uint64_t cache_budget)
         : vault_(std::move(vault)), video_id_(video_id), cache_(cache_budget) {}
 
-    int read(unsigned char* buffer, const int size) {
+    int read(unsigned char* buffer, const int size) override {
         if (position_ >= plaintext_size_) {
-            return AVERROR_EOF;
+            return 0; // end of stream
         }
         if (!memory_.isEmpty()) {
             const auto count = std::min<std::uint64_t>(static_cast<std::uint64_t>(size), plaintext_size_ - position_);
@@ -273,18 +276,26 @@ public:
             static_cast<std::size_t>(size), plaintext_size_);
         if (got < 0) {
             qWarning() << "vault read failed while buffering the video stream";
-            return AVERROR(EIO);
+            return -1;
         }
         if (got == 0) {
-            return AVERROR_EOF;
+            return 0;
         }
         position_ += static_cast<std::uint64_t>(got);
         return static_cast<int>(got);
     }
 
+    void set_buffer_budget(const std::size_t budget) override {
+        cache_.set_budget(budget);
+    }
+
+    std::int64_t size() const override {
+        return static_cast<std::int64_t>(plaintext_size_);
+    }
+
     void set_cache_budget(const std::uint64_t budget) { cache_.set_budget(budget); }
 
-    std::int64_t seek(const std::int64_t offset, const int whence) {
+    std::int64_t seek(const std::int64_t offset, const int whence) override {
         std::int64_t target = 0;
         switch (whence) {
         case AVSEEK_SIZE:
@@ -321,17 +332,23 @@ private:
 };
 
 int source_read_packet(void* opaque, unsigned char* buffer, const int size) {
-    return static_cast<VaultSource*>(opaque)->read(buffer, size);
+    const int got = static_cast<ByteSource*>(opaque)->read(buffer, size);
+    // The ByteSource contract reports end-of-stream as 0; AVIO wants AVERROR_EOF.
+    return got == 0 ? AVERROR_EOF : got;
 }
 
 std::int64_t source_seek(void* opaque, const std::int64_t offset, const int whence) {
-    return static_cast<VaultSource*>(opaque)->seek(offset, whence);
+    return static_cast<ByteSource*>(opaque)->seek(offset, whence);
 }
 
 // Owns the format context and the AVIO/source it reads from. The format
 // context must die before the AVIO it references.
 struct FormatHandle {
-    VaultSource source;
+    // Vault/RAM sources are owned here; a live provider stream is owned by the
+    // player (its QNetworkAccessManager must outlive the decoder, and it is
+    // destroyed on the UI thread).
+    std::unique_ptr<ByteSource> owned;
+    ByteSource* source{nullptr};
     AvIoPtr io;
     AvFormatPtr format;
 };
@@ -383,10 +400,45 @@ public:
         plaintext_size = size.value();
         }
 
-        handle_ = std::make_unique<FormatHandle>(
-            FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});
-        handle_->source.set_plaintext_size(plaintext_size);
-        if (memory) handle_->source.set_memory(*memory);
+        auto source = std::make_unique<VaultSource>(vault, video_id, cache_budget_);
+        source->set_plaintext_size(plaintext_size);
+        if (memory) source->set_memory(*memory);
+        return open_common(std::move(source), error, name_hint);
+    }
+
+    // Opens any byte source, which the caller keeps alive for as long as this
+    // decoder is open. Progressive sources block inside read() until the bytes
+    // they need arrive, so avformat_open_input() and the demuxer simply wait for
+    // the network instead of the player preloading the track.
+    bool open_source(
+        ByteSource* source,
+        QString* error,
+        const char* name_hint) {
+        if (source == nullptr) {
+            if (error != nullptr) {
+                *error = QStringLiteral("No media stream was supplied.");
+            }
+            return false;
+        }
+        close();
+        handle_ = std::make_unique<FormatHandle>();
+        handle_->source = source;
+        return open_avio(error, name_hint);
+    }
+
+    bool open_common(
+        std::unique_ptr<ByteSource> owned,
+        QString* error,
+        const char* name_hint) {
+        handle_ = std::make_unique<FormatHandle>();
+        handle_->source = owned.get();
+        handle_->owned = std::move(owned);
+        return open_avio(error, name_hint);
+    }
+
+    // Builds the AVIO context and the format context over the source the handle
+    // already points at.
+    bool open_avio(QString* error, const char* name_hint) {
 
         // Each attempt gets a fresh AVIO. A failed avformat_open_input() has
         // already consumed the previous buffer, and it frees the format
@@ -395,13 +447,13 @@ public:
         auto open_input = [&](const char* name_hint) -> int {
             handle_->format.reset();
             handle_->io.reset();
-            handle_->source.seek(0, SEEK_SET);
+            handle_->source->seek(0, SEEK_SET);
             auto* buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
             if (buffer == nullptr) {
                 return AVERROR(ENOMEM);
             }
             AVIOContext* raw_io = avio_alloc_context(
-                buffer, static_cast<int>(kAvioBufferSize), 0, &handle_->source,
+                buffer, static_cast<int>(kAvioBufferSize), 0, handle_->source,
                 source_read_packet, nullptr, source_seek);
             if (raw_io == nullptr) {
                 av_free(buffer);
@@ -523,25 +575,18 @@ public:
                     audio_stream_ = -1;
                     continue;
                 }
-                if (audio_codec_->ch_layout.nb_channels <= 0) {
-                    const int channels = stream->codecpar->ch_layout.nb_channels > 0
-                        ? stream->codecpar->ch_layout.nb_channels
-                        : 2;
-                    av_channel_layout_default(&audio_codec_->ch_layout, channels);
+                if (core::ffmpeg_compat::channels(audio_codec_.get()) <= 0) {
+                    core::ffmpeg_compat::default_channels(
+                        audio_codec_.get(), core::ffmpeg_compat::channels(stream->codecpar));
                 }
                 if (audio_codec_->sample_rate <= 0) {
                     audio_codec_.reset();
                     audio_stream_ = -1;
                     continue;
                 }
-                AVChannelLayout stereo_layout{};
-                av_channel_layout_default(&stereo_layout, 2);
                 SwrContext* raw_swr = nullptr;
-                const auto swr_status = swr_alloc_set_opts2(
-                    &raw_swr, &stereo_layout, AV_SAMPLE_FMT_S16,
-                    audio_codec_->sample_rate, &audio_codec_->ch_layout,
-                    audio_codec_->sample_fmt, audio_codec_->sample_rate, 0, nullptr);
-                av_channel_layout_uninit(&stereo_layout);
+                const auto swr_status = core::ffmpeg_compat::make_stereo_resampler(
+                    &raw_swr, audio_codec_->sample_rate, audio_codec_.get());
                 if (swr_status < 0 || swr_init(raw_swr) < 0) {
                     if (raw_swr != nullptr) {
                         swr_free(&raw_swr);
@@ -853,7 +898,7 @@ public:
     void set_stream_cache_bytes(const std::size_t bytes) {
         cache_budget_ = std::max<std::size_t>(bytes, std::size_t{1U << 20});
         if (handle_) {
-            handle_->source.set_cache_budget(cache_budget_);
+            handle_->source->set_buffer_budget(cache_budget_);
         }
     }
 
@@ -1046,6 +1091,11 @@ bool MediaDecoder::open(
 bool MediaDecoder::open_memory(const QByteArray& bytes, QString* error) {
     prepare_for_audio();
     return impl_->open({}, 0, error, "music.flac", &bytes);
+}
+
+bool MediaDecoder::open_source(
+    ByteSource* source, QString* error, const char* name_hint) {
+    return impl_->open_source(source, error, name_hint);
 }
 
 bool MediaDecoder::is_open() const { return impl_->is_open(); }

@@ -4,7 +4,9 @@
 #include "internal/metadata.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -221,6 +223,15 @@ public:
     [[nodiscard]] Result<bool> set_video_folder(
         std::int64_t video_id,
         std::int64_t folder_id);
+
+    [[nodiscard]] Result<std::vector<MusicPlaylist>> list_music_playlists() const;
+    [[nodiscard]] Result<std::int64_t> create_music_playlist(const std::string& name);
+    [[nodiscard]] Result<bool> rename_music_playlist(
+        std::int64_t playlist_id, const std::string& name);
+    [[nodiscard]] Result<bool> delete_music_playlist(std::int64_t playlist_id);
+    [[nodiscard]] Result<bool> set_music_playlist_tracks(
+        std::int64_t playlist_id, std::span<const std::int64_t> track_ids,
+        const std::function<Result<bool>()>& validate_tracks);
 
     void close() noexcept;
     [[nodiscard]] bool is_open() const noexcept { return database_ != nullptr; }

@@ -208,19 +208,9 @@ private fun PluginSettingsDialog(name: String, initial: PluginOptions, onDismiss
                 color = Mvp.accent, fontSize = 13.sp,
             )
         }
-        Text("Audio RAM limit (default 32 MiB)", color = Mvp.text, fontSize = 13.sp)
-        Row {
-            listOf(32, 64, 128).forEach { limit ->
-                FilterChip(
-                    selected = settings.memoryMiB == limit,
-                    onClick = { settings = settings.copy(memoryMiB = limit) },
-                    label = { Text("$limit MiB") },
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-            }
-        }
+        Text("Progressive playback · 8 MiB target buffer", color = Mvp.text, fontSize = 13.sp)
         Text(
-            "One track at a time. Decoder/JVM/native overhead is additional; higher limits can exhaust low-memory devices.",
+            "Audio is not retained as a complete file. Encrypted imports use 64 KiB chunks; decoder/JVM/native overhead is additional. A manual offline copy restarts playback from the beginning. Only authorized, known-length audio can be saved.",
             color = Mvp.description, fontSize = 12.sp, lineHeight = 18.sp,
         )
         if (error.isNotEmpty()) Text(error, color = Mvp.errorText, fontSize = 12.sp)
@@ -247,6 +237,7 @@ private fun ColumnScope.PluginBrowser(session: PluginSession) {
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("All") }
     val images = remember(session) { Semaphore(2) }
+    ProviderIdentitySettings(session) { if (query.isNotBlank()) session.browse(query = query) }
     OutlinedTextField(query,onValueChange={query=it.take(240)},label={Text("Songs, artists or albums")},singleLine=true,modifier=Modifier.fillMaxWidth())
     Button(onClick={ if(query.isNotBlank()) session.browse(query=query) },enabled=query.isNotBlank()) { Text("Search ${session.manifest.name}") }
     Row { listOf("All","Songs","Artists","Albums").forEach { mode ->
