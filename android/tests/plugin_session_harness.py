@@ -216,26 +216,17 @@ fun main() {
 }
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--tools', type=Path, required=True)
-    parser.add_argument('--scratch', type=Path, required=True)
-    args = parser.parse_args()
-    args.scratch.mkdir(parents=True, exist_ok=True)
-    test_jar = args.scratch / 'kotlinx-coroutines-test-jvm-1.8.0.jar'
-    if not test_jar.exists():
-        urllib.request.urlretrieve('https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-test-jvm/1.8.0/kotlinx-coroutines-test-jvm-1.8.0.jar', test_jar)
-    sources = []
-    for name, text in STUBS.items():
-        path = args.scratch / name
-        path.write_text(text, encoding='utf-8')
-        sources.append(str(path))
-    production = Path(__file__).resolve().parents[1] / 'app/src/main/java/org/megavideoprotect/app/PluginSession.kt'
-    java = next(args.tools.glob('*/bin/java.exe'))
-    compiler_cp = os.pathsep.join(str(p) for p in args.tools.glob('*.jar'))
-    runtime_cp = os.pathsep.join(str(p) for p in [args.tools/'kotlin-stdlib.jar', args.tools/'coroutines.jar', args.tools/'annotations.jar', test_jar])
-    out = args.scratch / 'classes'
-    subprocess.run([str(java), '-cp', compiler_cp, 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler', '-no-stdlib', '-no-reflect', '-jvm-target', '17', '-classpath', runtime_cp, '-d', str(out), *sources, str(production)], check=True)
-    subprocess.run([str(java), '-cp', str(out)+os.pathsep+runtime_cp, 'org.megavideoprotect.app.HarnessKt'], check=True, timeout=60)
+    """Compatibility entry point; progressive tests supersede the RAM-only fixture."""
+    import sys
+    import provider_stream_harness
+    values = sys.argv[1:]
+    if '--tools' in values:
+        at = values.index('--tools')
+        tools = Path(values[at + 1])
+        java = next(tools.glob('*/bin/java.exe'))
+        values[at:at + 2] = ['--java', str(java)]
+    sys.argv = [sys.argv[0], *values]
+    provider_stream_harness.main()
 
 if __name__ == '__main__':
     main()

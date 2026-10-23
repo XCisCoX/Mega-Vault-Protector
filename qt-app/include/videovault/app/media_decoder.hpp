@@ -13,6 +13,8 @@ class Vault;
 
 namespace videovault::app {
 
+class ByteSource;
+
 // A decoded video frame with its presentation time (ms).
 struct DecodedFrame {
     QImage image;
@@ -54,6 +56,15 @@ public:
     // Plugin-only RAM source. Shares Qt's immutable byte storage; never stages
     // plaintext in a file or imports into a vault merely to start playback.
     bool open_memory(const QByteArray& bytes, QString* error);
+
+    // Opens any random-access byte source: an encrypted package, a RAM buffer,
+    // or a live provider stream. The caller owns `source` and must keep it alive
+    // until close() (the decoder does not take ownership, because a network
+    // source belongs to the UI thread that created it). A progressive source
+    // blocks inside read() until the bytes it needs have arrived, which is what
+    // makes playback start before the whole track exists locally.
+    bool open_source(ByteSource* source, QString* error,
+        const char* name_hint = nullptr);
 
     bool is_open() const;
     std::int64_t duration_ms() const;

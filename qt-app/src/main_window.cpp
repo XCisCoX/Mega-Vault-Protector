@@ -7,6 +7,7 @@
 
 #include "videovault/app/icons.hpp"
 #include "videovault/app/music_window.hpp"
+#include "videovault/app/soundcloud_page.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
 #include "videovault/app/in_window_sheet.hpp"
@@ -2296,7 +2297,7 @@ void MainWindow::buildInterface() {
     connect(pluginHost_, &PluginHost::changed, this, [this] {
         bool music = false, tools = false;
         for (const auto& manifest : pluginHost_->manifests()) {
-            music |= manifest.protocol=="monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+            music |= pluginProtocolIsMusic(manifest.protocol) && pluginHost_->enabled(manifest.id);
             tools |= manifest.protocol=="megavault-actions-v1" && pluginHost_->enabled(manifest.id);
         }
         // The Music entry belongs to the vault's own library and stays visible
@@ -2316,7 +2317,9 @@ void MainWindow::buildInterface() {
     });
     connect(pluginHost_, &PluginHost::openRequested, this, [this](const QString& id) {
         for(const auto& m:pluginHost_->manifests())if(m.id==id) {
-            if(m.protocol=="monochrome-tracks-v1")openPluginMusic();else openExtensionTools(id);
+            if(m.protocol=="monochrome-tracks-v1")openPluginMusic();
+            else if(m.protocol=="soundcloud-tracks-v1")openSoundCloud();
+            else openExtensionTools(id);
             return;
         }
     });
@@ -4358,6 +4361,31 @@ void MainWindow::openPluginMusic(const QString& query) {
     }
 }
 
+void MainWindow::openSoundCloud(const QString& query) {
+    if (!vault_ || !vault_->is_unlocked() || contentStack_ == nullptr) return;
+    bool enabled = false;
+    for (const auto& manifest : pluginHost_->manifests())
+        enabled |= manifest.protocol == "soundcloud-tracks-v1" && pluginHost_->enabled(manifest.id);
+    if (!enabled) return;
+    if (soundCloud_ == nullptr) {
+        soundCloud_ = new SoundCloudPage(pluginHost_, contentStack_);
+        contentStack_->addWidget(soundCloud_);
+        connect(soundCloud_, &SoundCloudPage::closed, this, [this] {
+            // Same rule as the other provider: back to the music library when
+            // that is where the user came from.
+            if (musicLibrary_ != nullptr && contentStack_->indexOf(musicLibrary_) >= 0) {
+                fadeStack(contentStack_, musicLibrary_);
+                return;
+            }
+            contentStack_->setCurrentWidget(pages_);
+        });
+        connect(soundCloud_, &SoundCloudPage::imported, this, [this] { refreshGallery(); });
+    }
+    soundCloud_->setVault(vault_);
+    contentStack_->setCurrentWidget(soundCloud_);
+    if (!query.isEmpty()) soundCloud_->searchFor(query);
+}
+
 void MainWindow::openMusicLibrary() {
     if (!vault_ || !vault_->is_unlocked() || contentStack_ == nullptr) {
         return;
@@ -4373,12 +4401,23 @@ void MainWindow::openMusicLibrary() {
             fadeStack(contentStack_, pages_);
             QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
         });
-        connect(musicLibrary_, &MusicLibraryPage::providerRequested, this,
-            [this] { openPluginMusic(); });
+        connect(musicLibrary_, &MusicLibraryPage::providerRequested, this, [this] {
+            // A declarative provider keeps the first slot; when it is the only
+            // enabled provider SoundCloud takes the entry point instead of
+            // leaving the button dead.
+            bool monochrome = false, soundcloud = false;
+            for (const auto& manifest : pluginHost_->manifests()) {
+                if (!pluginHost_->enabled(manifest.id)) continue;
+                monochrome |= manifest.protocol == "monochrome-tracks-v1";
+                soundcloud |= manifest.protocol == "soundcloud-tracks-v1";
+            }
+            if (monochrome) openPluginMusic();
+            else if (soundcloud) openSoundCloud();
+        });
     }
     bool provider = false;
     for (const auto& manifest : pluginHost_->manifests()) {
-        provider |= manifest.protocol == "monochrome-tracks-v1" && pluginHost_->enabled(manifest.id);
+        provider |= pluginProtocolIsMusic(manifest.protocol) && pluginHost_->enabled(manifest.id);
     }
     musicLibrary_->setProviderAvailable(provider);
     musicLibrary_->setVault(vault_);
@@ -8521,30 +8560,23 @@ void MainWindow::beginMusic(const std::int64_t video_id) {
     if (queue.empty()) {
         queue.push_back(MusicTrack{video_id, QStringLiteral("Audio")});
     }
-    if (musicWindow_ != nullptr) {
-        const bool arriving = !musicWindow_->isVisible();
-        musicWindow_->playQueue(vault_, queue, start);
-        musicWindow_->show();
-        if (arriving) {
-            slideInBar(musicWindow_);
-        }
-        return;
+    // One shared bar: whichever page asks first creates it, later callers take it
+    // over. `arriving` is captured before it is shown so the slide-in only runs
+    // when the bar was actually hidden.
+    auto* const window = MusicWindow::shared(centralWidget());
+    const bool arriving = !window->isVisible();
+    if (window->parentWidget() != centralWidget()) {
+        window->setParent(centralWidget());
     }
-    auto* window = new MusicWindow(centralWidget());
-    window->setAttribute(Qt::WA_DeleteOnClose);
-    connect(window, &QObject::destroyed, this, [this, window] {
-        if (musicWindow_ == window) {
-            musicWindow_ = nullptr;
-        }
-        QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
-    });
     if (auto* layout = qobject_cast<QVBoxLayout*>(centralWidget()->layout())) {
         layout->addWidget(window);
     }
     musicWindow_ = window;
     window->playQueue(vault_, queue, start);
     window->show();
-    slideInBar(window);
+    if (arriving) {
+        slideInBar(window);
+    }
 }
 
 void MainWindow::stepPlayback(const int delta) {
@@ -9733,6 +9765,8 @@ void MainWindow::lockVault() {
     }
     closeSync(); // A hidden-but-shared vault must not keep desktop sync running.
     if (pluginMusic_) { pluginMusic_->setVault({}); contentStack_->setCurrentWidget(pages_); }
+    if (soundCloud_) { soundCloud_->setVault({}); contentStack_->setCurrentWidget(pages_); }
+    if (musicLibrary_) { musicLibrary_->setVault({}); contentStack_->setCurrentWidget(pages_); }
     if (extensionTools_) { extensionTools_->stopAndClear(); contentStack_->setCurrentWidget(pages_); }
     syncKeys_.wipe(); // The derived sync keys die with the unlock.
     finishPeerApproval(false);
@@ -9747,9 +9781,12 @@ void MainWindow::lockVault() {
         dying->close();
     }
     if (musicWindow_ != nullptr) {
-        auto* dying = musicWindow_;
+        // The bar is a process-wide singleton now: a hard lock stops it and
+        // clears its queue, but the widget itself survives for the next unlock.
         musicWindow_ = nullptr;
-        dying->close();
+        if (auto* bar = MusicWindow::instance(); bar != nullptr) {
+            bar->close();
+        }
     }
     // A record window shows decrypted values, so it must not outlive the vault.
     if (recordWindow_ != nullptr) {

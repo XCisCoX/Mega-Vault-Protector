@@ -3,6 +3,7 @@
 #include <QObject>
 #include <memory>
 namespace videovault::app {
+class ByteSource;
 // Uses the app's in-process FFmpeg decoder + Qt PCM output, not the OS FLAC
 // file/URL decoder (Windows DirectShow cannot reliably consume a QBuffer).
 class PluginAudioPlayer final : public QObject {
@@ -11,6 +12,9 @@ class PluginAudioPlayer final : public QObject {
     explicit PluginAudioPlayer(QObject *parent = nullptr);
     ~PluginAudioPlayer() override;
     void setMedia(const QMediaContent &, QIODevice *stream = nullptr);
+    // Progressive source: decoded while the bytes are still arriving. The caller
+    // owns it and must keep it alive until stop()/the next setSource().
+    void setSource(ByteSource *source);
     void play();
     void pause();
     void stop();

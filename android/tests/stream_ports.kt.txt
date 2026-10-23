@@ -1,0 +1,101 @@
+package org.megavideoprotect.app
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import javax.net.ssl.HttpsURLConnection
+import java.net.URL
+
+class ExtensionActionSession { fun close() {} }
+data class PluginManifest(val protocol: String="fixture", val name: String="Fixture", val id: String="fixture.provider")
+data class PluginOptions(val enabled: Boolean=true, val memoryMiB: Int=32, val autoSave: Boolean=false, val folderId: Long=0)
+data class PluginItem(val kind: String, val id: String, val title: String=id, val subtitle: String="", val playable: Boolean=true)
+data class ProviderStream(val url: String, val codec: String="flac", val mime: String="audio/flac", val downloadable: Boolean=true, val sourceUrl: String="", val hls: Boolean=false)
+class Gate(val result: String, val fail: Boolean=false) { val started=CountDownLatch(1); val release=CountDownLatch(1); @Volatile var closed=false }
+object Fixtures {
+ val gates=ConcurrentHashMap<String,Gate>()
+ val payload = "fLaC".toByteArray() + ByteArray(400000) { (it % 251).toByte() }
+ var networkReads=0; var connections=0; var maxRead=0
+ var unknown=false; var truncated=false
+ fun request(path: String): String {
+  val g=gates[path] ?: return path.substringAfterLast('/')
+  g.started.countDown(); check(g.release.await(30,TimeUnit.SECONDS)); if(g.fail) error("Fixture failure"); return g.result
+ }
+}
+class PluginHttp(m: PluginManifest) {
+ var gate: Gate?=null; var closed=false
+ fun absolute(path: String)=path
+ fun jsonUrl(path: String): String {gate=Fixtures.gates[path]; return Fixtures.request(path)}
+ fun image(url: String)=byteArrayOf(1)
+ fun text(url: String): String=error("No playlist fixture")
+ fun contentSize(url: String)=Fixtures.payload.size.toLong()
+ fun stream(path: String, position: Long): HttpsURLConnection {
+  check(!closed); Fixtures.connections++
+  return object: HttpsURLConnection(URL("https://fixture.example")) {
+   override fun connect() {}; override fun disconnect() {}; override fun usingProxy()=false
+   override fun getCipherSuite()="fixture"; override fun getLocalCertificates(): Array<java.security.cert.Certificate>?=null
+   override fun getServerCertificates(): Array<java.security.cert.Certificate> = emptyArray()
+   override fun getContentLengthLong()=if(Fixtures.unknown) -1L else Fixtures.payload.size.toLong()-position
+   override fun getContentType()="audio/flac"
+   override fun getInputStream(): java.io.InputStream {
+    val end=Fixtures.payload.size-(if(Fixtures.truncated) 17 else 0)
+    val body=ByteArrayInputStream(Fixtures.payload,position.toInt(),end-position.toInt())
+    return object: java.io.InputStream() {
+     override fun read()=body.read()
+     override fun read(b: ByteArray,o: Int,n: Int): Int {
+      check(!closed); Fixtures.maxRead=maxOf(Fixtures.maxRead,n)
+      return body.read(b,o,n).also { if(it>0) Fixtures.networkReads+=it }
+     }
+    }
+   }
+  }
+ }
+ fun close() {closed=true; gate?.closed=true}
+}
+class FakeProvider {
+ fun cataloguePath(q: String?, i: PluginItem?)="catalogue/"+(i?.id ?: q)
+ fun normalize(data: String, kind: String?)=data.split(',').map {PluginItem("track",it)}
+ fun resolve(h: PluginHttp,i: PluginItem,k: String,d: Boolean): ProviderStream {h.jsonUrl("audio/"+i.id); return ProviderStream("audio/"+i.id)}
+}
+object PluginProviderRegistry { fun adapter(id: String)=FakeProvider() }
+object SoundCloudTracksProvider {fun withClientId(url: String,key: String)=url}
+object MusicHub {const val active=false}
+class MusicPlaybackService {companion object {const val ACTION_STOP="stop"}}
+object RemoteVault {fun connected()=false}
+object PluginAudio {
+ fun fileName(a: String,b: String)=a+".flac"
+ fun isFlac(mime: String,b: ByteArray)=b.size>=4 && b.copyOfRange(0,4).contentEquals("fLaC".toByteArray())
+}
+object GalleryCache {fun clear() {}}
+object SyncV4Auto {fun markDirty() {}}
+class VaultDataSource: androidx.media3.datasource.BaseDataSource(false) {
+ override fun open(s: androidx.media3.datasource.DataSpec)=0L
+ override fun read(b: ByteArray,o: Int,n: Int)=-1
+ override fun close() {}; override fun getUri(): android.net.Uri?=null
+ class Factory: androidx.media3.datasource.DataSource.Factory {override fun createDataSource()=VaultDataSource()}
+ companion object {fun uriFor(id: Long)=android.net.Uri.parse("vault://$id")}
+}
+object CoreBridge {
+ data class Import(val expected: Long,val track: String,val bytes: ByteArrayOutputStream=ByteArrayOutputStream())
+ var imports=0; var aborts=0; var maxChunk=0; var unlocked=true; var next=1L
+ val handles=mutableMapOf<Long,Import>(); val local=mutableMapOf<String,Long>(); var last=byteArrayOf()
+ fun nativeIsUnlocked()=unlocked
+ fun nativeFindProviderTrack(p: String,t: String,r: String)=if(unlocked) "true|${local[t]?:0}" else "false|0"
+ fun nativeBeginStreamImport(n: String,size: Long,f: Long,r: String,p: String,t: String,s: String,title: String,a: String,c: String): String {
+  if(!unlocked) return "false|0"
+  val id=next++; handles[id]=Import(size,t); return "true|$id"
+ }
+ fun nativeAppendStreamImport(h: Long,b: ByteArray,o: Int,n: Int): String {
+  maxChunk=maxOf(maxChunk,n); val i=handles[h] ?: return "false|0"
+  check(n<=65536); i.bytes.write(b,o,n); return "true|0"
+ }
+ fun nativeCommitStreamImport(h: Long): String {
+  val i=handles.remove(h) ?: return "false|0"
+  check(i.bytes.size().toLong()==i.expected); last=i.bytes.toByteArray(); imports++; local[i.track]=imports.toLong(); return "true|$imports"
+ }
+ fun nativeAbortStreamImport(h: Long): String {if(handles.remove(h)!=null) aborts++; return "true|0"}
+ class Result(val ok: Boolean,val id: Long,val error: String="Fixture JNI denied") {
+  companion object {fun parse(raw: String)=raw.split('|').let { Result(it[0]=="true",it[1].toLong()) }}
+ }
+}

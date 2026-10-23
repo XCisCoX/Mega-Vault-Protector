@@ -28,6 +28,12 @@ object CoreBridge {
     external fun nativeMoveVideo(id: Long, folderId: Long): String
     external fun nativeImportBytes(data: ByteArray, name: String, folderId: Long): String
     external fun nativeImportBytesForVault(data: ByteArray, name: String, folderId: Long, expectedRoot: String): String
+    external fun nativeFindProviderTrack(provider: String, track: String, expectedRoot: String): String
+    external fun nativeBeginStreamImport(name: String, size: Long, folder: Long, expectedRoot: String,
+        provider: String, track: String, source: String, title: String, artist: String, codec: String): String
+    external fun nativeAppendStreamImport(handle: Long, bytes: ByteArray, offset: Int, length: Int): String
+    external fun nativeCommitStreamImport(handle: Long): String
+    external fun nativeAbortStreamImport(handle: Long): String
     external fun nativeImportFile(path: String): String
     external fun nativeImportInto(path: String, folderId: Long): String
     external fun nativeRemoveVideo(id: Long): String

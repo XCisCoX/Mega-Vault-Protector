@@ -1,6 +1,7 @@
 // Headless playback test: exercises MediaDecoder (the same engine the player
 // window uses) against an imported encrypted video — frame decoding, audio
 // samples, and seeking — with no GUI involved.
+#include "videovault/core/ffmpeg_compat.hpp"
 #include "videovault/app/media_decoder.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/core/vault.hpp"
@@ -196,7 +197,7 @@ bool writeFixture(const std::filesystem::path& path) {
     apar->codec_id = AV_CODEC_ID_PCM_S16LE;
     apar->format = AV_SAMPLE_FMT_S16;
     apar->sample_rate = kAudioRate;
-    av_channel_layout_default(&apar->ch_layout, kAudioChannels);
+    videovault::core::ffmpeg_compat::default_channels(apar, kAudioChannels);
     apar->bits_per_coded_sample = 16;
     apar->block_align = kAudioChannels * 2;
     apar->bit_rate = kAudioRate * kAudioChannels * 16;
@@ -310,7 +311,7 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
     AVCodecContext* acodec = avcodec_alloc_context3(aenc);
     acodec->sample_rate = kAudioRate;
     acodec->bit_rate = 128000;
-    av_channel_layout_default(&acodec->ch_layout, kAudioChannels);
+    videovault::core::ffmpeg_compat::default_channels(acodec, kAudioChannels);
     acodec->sample_fmt = AV_SAMPLE_FMT_FLTP;
     if (avcodec_open2(acodec, aenc, nullptr) < 0) {
         avcodec_free_context(&vcodec);
@@ -333,7 +334,7 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
     AVFrame* aframe = av_frame_alloc();
     aframe->format = AV_SAMPLE_FMT_FLTP;
     aframe->sample_rate = kAudioRate;
-    av_channel_layout_copy(&aframe->ch_layout, &acodec->ch_layout);
+    videovault::core::ffmpeg_compat::copy_layout_to_frame(aframe, acodec);
     aframe->nb_samples = kAacSamples;
     av_frame_get_buffer(aframe, 0);
 

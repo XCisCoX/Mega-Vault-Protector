@@ -14,9 +14,15 @@ data class PluginManifest(val id: String, val name: String, val version: String,
     val baseUrl: String, val allowedHosts: Set<String>, val sourceNotice: String,
     val protocol: String = "", val commands: List<PluginCommand> = emptyList(), val script: String = "",
     val settings: List<ExtensionBooleanSetting> = emptyList()) {
+    fun allowsHost(host: String): Boolean = allowedHosts.any { approved ->
+        if (!approved.startsWith("*.")) host == approved else {
+            val suffix = approved.substring(1)
+            host.endsWith(suffix) && host.removeSuffix(suffix).let { it.isNotEmpty() && '.' !in it }
+        }
+    }
     fun checkUrl(value: String): URI {
         val uri = URI(value)
-        require(uri.scheme == "https" && uri.host in allowedHosts && uri.rawUserInfo == null &&
+        require(uri.scheme == "https" && uri.host != null && allowsHost(uri.host) && uri.rawUserInfo == null &&
             uri.port in listOf(-1, 443) && uri.fragment == null) { "Only HTTPS URLs on approved plugin hosts are allowed" }
         return uri
     }
@@ -48,7 +54,7 @@ data class PluginManifest(val id: String, val name: String, val version: String,
                 val network = o.getJSONObject("network")
                 hosts = network.getJSONArray("allowedHosts").strings()
                 require(hosts.isNotEmpty() && hosts.size <= 16 && hosts.distinct().size == hosts.size)
-                require(hosts.all { it.length <= 253 && Regex("[a-z0-9]+(?:[.-][a-z0-9]+)*\\.[a-z]{2,}").matches(it) }) { "Invalid approved host" }
+                require(hosts.all { it.length <= 253 && Regex("[a-z0-9]+(?:[.-][a-z0-9]+)*\\.[a-z]{2,}").matches(it.removePrefix("*.")) }) { "Invalid approved host" }
                 baseUrl = network.getString("baseUrl")
                 commands = emptyList(); script = ""
             } else {
@@ -81,7 +87,7 @@ data class PluginManifest(val id: String, val name: String, val version: String,
             val result = PluginManifest(id,field("name",100),version,field("description",2000),baseUrl,hosts.toSet(),notice,protocol,commands,script,settings)
             if (definition.music) {
                 val base = result.checkUrl(result.baseUrl)
-                require(base.rawQuery == null && base.rawPath in listOf("", "/")) { "Provider base URL must be an origin" }
+                require(base.host in result.allowedHosts && base.rawQuery == null && base.rawPath in listOf("", "/")) { "Provider base URL must be an origin" }
             }
             return result
         }

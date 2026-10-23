@@ -48,7 +48,7 @@ object PluginLibrary {
     }
     /** An album opens as a folder of its tracks, exactly like a vault folder. */
     fun openAlbum(item: PluginItem) {
-        require(item.kind == "album")
+        require(item.kind in setOf("album", "artist"))
         val current = target ?: return
         trail.add(PluginLibraryTarget(current.query, item = item))
         reload()
@@ -145,10 +145,11 @@ internal fun PluginLibraryView(viewMode: Int, padding: PaddingValues, onPlay: (P
         ) {
             item(key = "provider-back") { PluginBackRow("Back", { PluginLibrary.back() }) }
             item(key = "provider-state", span = { GridItemSpan(3) }) {
+                ProviderIdentitySettings(session) { PluginLibrary.reload() }
                 ProviderStatus(status, session.catalogueBusy && !deadline, onRetry = { PluginLibrary.reload() }, showRetry = !session.catalogueBusy || deadline)
             }
             items(rows, key = { "${it.kind}:${it.id}" }) { item ->
-                if (item.kind == "album") {
+                if (item.kind == "album" || item.kind == "artist") {
                     FolderTile(item.title, { openAlbum(item) }, null, { false }, place = item.subtitle.ifBlank { "Album" })
                 } else {
                     ProviderTrackTile(session, item, images, onPlay = { playTrack(item) }, onDownload = { session.downloadTrack(item) })
@@ -159,10 +160,11 @@ internal fun PluginLibraryView(viewMode: Int, padding: PaddingValues, onPlay: (P
         LazyColumn(contentPadding = padding, modifier = Modifier.fillMaxSize().background(Mvp.window)) {
             item(key = "provider-back") { PluginBackRow("Back", { PluginLibrary.back() }) }
             item(key = "provider-state") {
+                ProviderIdentitySettings(session) { PluginLibrary.reload() }
                 ProviderStatus(status, session.catalogueBusy && !deadline, onRetry = { PluginLibrary.reload() }, showRetry = !session.catalogueBusy || deadline)
             }
             items(rows, key = { "${it.kind}:${it.id}" }) { item ->
-                if (item.kind == "album") {
+                if (item.kind == "album" || item.kind == "artist") {
                     if (viewMode == 0) FolderDetailRow(item.title, item.subtitle.ifBlank { "Album" }, { openAlbum(item) }, null, { false })
                     else FolderListRow(item.title, item.subtitle.ifBlank { "Album" }, { openAlbum(item) }, null, { false })
                 } else {
@@ -188,10 +190,11 @@ private fun ProviderStatus(message: String, loading: Boolean, onRetry: () -> Uni
 @Composable
 private fun DownloadControl(state: String?, onDownload: () -> Unit) {
     when (state) {
-        "downloading", "saving" -> Row(verticalAlignment = Alignment.CenterVertically) {
+        "downloading", "saving" -> Row(verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clickable(onClick = onDownload).padding(6.dp)) {
             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Mvp.accent)
             Text(
-                if (state == "saving") " Saving…" else " Downloading…",
+                if (state == "saving") " Saving… · Cancel" else " Downloading… · Cancel",
                 color = Mvp.description, fontSize = 12.sp, maxLines = 1,
             )
         }

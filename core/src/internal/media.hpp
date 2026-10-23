@@ -16,6 +16,7 @@ struct MediaProbeResult {
     std::string codec_name;
     std::string title;
     std::string artist;
+    std::string album;
 };
 
 // Probes container metadata through FFmpeg, reading the plaintext stream from
@@ -25,7 +26,8 @@ struct MediaProbeResult {
 // Header-only probe for a song. Does not scan the file to estimate duration.
 [[nodiscard]] Result<MediaProbeResult> probe_audio_media(
     PackageReader& reader,
-    const char* name_hint);
+    const char* name_hint,
+    bool require_audio_only = false);
 
 // Decodes a representative frame, scales it to fit `max_dimension` (keeping
 // the aspect ratio; no upscaling), and encodes it as JPEG. Returns the JPEG

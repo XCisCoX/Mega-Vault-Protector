@@ -48,6 +48,29 @@ int main(int argc, char **argv) {
     CHECK(pluginArtistNames(QJsonObject{{"artists", QJsonArray{QJsonObject{{"name", "Composer"}},
                                                                QJsonObject{{"displayName", "Pianist"}}}}}) ==
           "Composer, Pianist");
+
+    // The bundled SoundCloud provider is a music provider whose CDN is reached
+    // through a single-label wildcard.
+    QFile soundcloud_file(":/plugins/soundcloud.json");
+    CHECK(soundcloud_file.open(QIODevice::ReadOnly));
+    const auto soundcloud_bytes = soundcloud_file.readAll();
+    PluginManifest soundcloud;
+    CHECK(PluginManifest::parse(soundcloud_bytes, &soundcloud, &error));
+    CHECK(soundcloud.protocol == "soundcloud-tracks-v1");
+    CHECK(pluginProtocolIsMusic(soundcloud.protocol));
+    CHECK(soundcloud.allows(QUrl("https://api-v2.soundcloud.com/search/tracks?q=x")));
+    CHECK(soundcloud.allows(QUrl("https://cf-media.sndcdn.com/abc.mp3")));
+    // Exactly one label: a nested host and the bare domain are both refused.
+    CHECK(!soundcloud.allows(QUrl("https://a.b.sndcdn.com/abc.mp3")));
+    CHECK(!soundcloud.allows(QUrl("https://sndcdn.com/abc.mp3")));
+    CHECK(!soundcloud.allows(QUrl("https://sndcdn.com.evil.test/abc.mp3")));
+    // A wildcard is not accepted as the API root itself.
+    auto wildcard_base = QJsonDocument::fromJson(soundcloud_bytes).object();
+    wildcard_base["network"] = QJsonObject{{"baseUrl", "https://*.sndcdn.com"},
+                                           {"allowedHosts", QJsonArray{"*.sndcdn.com"}}};
+    PluginManifest wildcard_rejected;
+    CHECK(!PluginManifest::parse(
+        QJsonDocument(wildcard_base).toJson(), &wildcard_rejected, &error));
     CHECK(pluginArtistNames(QJsonObject{{"artistNames", QJsonArray{"Metadata artist"}}}) ==
           "Metadata artist");
     auto tool = QJsonDocument::fromJson(bytes).object();

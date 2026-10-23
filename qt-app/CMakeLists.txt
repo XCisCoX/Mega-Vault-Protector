@@ -57,6 +57,7 @@ set(MVP_APP_SOURCES
     src/app_update.cpp
     src/main_window.cpp
     src/media_decoder.cpp
+    src/local_audio_pipeline.cpp
     src/player_window.cpp
     ${MVP_APP_WINRT_SOURCES}
     ${MVP_APP_FALLBACK_SOURCES}
@@ -108,7 +109,18 @@ elseif(APPLE)
 endif()
 
 add_library(MegaVaultPlugins STATIC src/plugin_host.cpp src/plugin_audio.cpp src/plugin_tools.cpp src/media_decoder.cpp
-    include/videovault/app/plugin_audio.hpp include/videovault/app/plugin_tools.hpp include/videovault/app/plugin_host.hpp resources/plugins.qrc)
+    src/remote_stream_source.cpp
+    src/soundcloud_provider.cpp
+    src/soundcloud_transport.cpp
+    src/soundcloud_hls_source.cpp
+    src/soundcloud_page.cpp
+    src/music_resolver.cpp
+    include/videovault/app/music_resolver.hpp
+    include/videovault/app/soundcloud_provider.hpp
+    include/videovault/app/soundcloud_page.hpp
+    include/videovault/app/plugin_audio.hpp include/videovault/app/plugin_tools.hpp include/videovault/app/plugin_host.hpp
+    include/videovault/app/byte_source.hpp include/videovault/app/remote_stream_source.hpp
+    resources/plugins.qrc)
 target_include_directories(MegaVaultPlugins PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(MegaVaultPlugins PUBLIC cxx_std_20)
 set_target_properties(MegaVaultPlugins PROPERTIES AUTOMOC ON AUTORCC ON)
@@ -260,6 +272,26 @@ endif()
 # same MediaDecoder the player window uses, without any GUI.
 if(MVP_BUILD_TESTS)
     enable_testing()
+    # QCoreApplication-only tests. Compile the real MusicWindow translation unit
+    # too, but never instantiate widgets or open an audio device in this test.
+    add_executable(VideoVaultLocalAudioTests
+        tests/local_audio_pipeline.cpp src/local_audio_pipeline.cpp src/media_decoder.cpp
+        src/music_window.cpp src/player_window.cpp src/icons.cpp src/theme.cpp
+        include/videovault/app/music_window.hpp include/videovault/app/player_window.hpp)
+    target_include_directories(VideoVaultLocalAudioTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultLocalAudioTests PRIVATE VideoVault::Core Qt5::Core Qt5::Gui
+        Qt5::Widgets Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
+    if(WIN32)
+        target_include_directories(VideoVaultLocalAudioTests PRIVATE "${MVP_VCPKG_PREFIX}/include" "${_mvp_cppwinrt}")
+        target_link_libraries(VideoVaultLocalAudioTests PRIVATE windowsapp)
+    elseif(ANDROID)
+        target_include_directories(VideoVaultLocalAudioTests PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    endif()
+    target_compile_features(VideoVaultLocalAudioTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultLocalAudioTests PROPERTIES AUTOMOC ON FOLDER "Tests")
+    add_test(NAME local_audio_pipeline COMMAND VideoVaultLocalAudioTests)
+    set_tests_properties(local_audio_pipeline PROPERTIES TIMEOUT 90)
+    mvp_copy_runtime_dlls(VideoVaultLocalAudioTests)
     add_executable(VideoVaultProxyTests tests/proxy_settings.cpp src/app_update.cpp)
     target_link_libraries(VideoVaultProxyTests PRIVATE MegaVaultNetwork MegaVaultSync MegaVaultPlugins)
     if(WIN32 OR MINGW)
@@ -336,6 +368,34 @@ if(MVP_BUILD_TESTS)
     add_test(NAME plugin_live COMMAND VideoVaultPluginLiveTests)
     set_tests_properties(plugin_live PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
     mvp_copy_runtime_dlls(VideoVaultPluginLiveTests)
+
+    # Progressive provider streaming: a loopback mock HTTP server drives the
+    # production RemoteStreamSource (Range, pacing, truncation, cancellation) and
+    # the same bytes are encrypted into a real vault while they arrive.
+    add_executable(VideoVaultMusicResolverTests tests/music_resolver.cpp)
+    target_link_libraries(VideoVaultMusicResolverTests PRIVATE MegaVaultPlugins VideoVault::Core)
+    add_test(NAME music_resolver COMMAND VideoVaultMusicResolverTests)
+    set_tests_properties(music_resolver PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
+    mvp_copy_runtime_dlls(VideoVaultMusicResolverTests)
+
+    add_executable(VideoVaultSoundCloudTests tests/soundcloud_provider.cpp
+        src/soundcloud_provider.cpp src/soundcloud_transport.cpp src/soundcloud_hls_source.cpp src/media_decoder.cpp)
+    target_include_directories(VideoVaultSoundCloudTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultSoundCloudTests PRIVATE MegaVaultNetwork VideoVault::Core Qt5::Core Qt5::Gui ${MVP_FFMPEG_LIBS})
+    target_compile_features(VideoVaultSoundCloudTests PRIVATE cxx_std_20)
+    if(WIN32 OR MINGW)
+        target_include_directories(VideoVaultSoundCloudTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+        target_link_libraries(VideoVaultSoundCloudTests PRIVATE winhttp)
+    endif()
+    add_test(NAME soundcloud_provider COMMAND VideoVaultSoundCloudTests)
+    set_tests_properties(soundcloud_provider PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+    mvp_copy_runtime_dlls(VideoVaultSoundCloudTests)
+
+    add_executable(VideoVaultProgressiveStreamTests tests/progressive_stream.cpp)
+    target_link_libraries(VideoVaultProgressiveStreamTests PRIVATE MegaVaultPlugins VideoVault::Core)
+    add_test(NAME progressive_stream COMMAND VideoVaultProgressiveStreamTests)
+    set_tests_properties(progressive_stream PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 180)
+    mvp_copy_runtime_dlls(VideoVaultProgressiveStreamTests)
     add_test(NAME plugin_navigation COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(plugin_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_PLUGIN_NAVIGATION_TEST=1" TIMEOUT 60)
     add_test(NAME plugin_folder COMMAND VideoVaultGalleryPerformanceTests)
