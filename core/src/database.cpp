@@ -644,6 +644,56 @@ Result<bool> migrate_to_version_7(sqlite3* database) {
     return true;
 }
 
+// Playlist metadata and membership never leave the keyed SQLCipher database.
+// This transaction also makes a failed migration safely retryable on open.
+Result<bool> migrate_to_version_8(sqlite3* database) {
+    auto begun = run(database, "BEGIN IMMEDIATE;");
+    if (!begun) return begun.error();
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read schema version for playlists", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    if (sqlite3_column_int(current.get(), 0) < 8) {
+        constexpr const char* statements[] = {
+            "CREATE TABLE music_playlists ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,"
+            "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+            "CREATE TABLE music_playlist_tracks ("
+            "playlist_id INTEGER NOT NULL REFERENCES music_playlists(id) ON DELETE CASCADE,"
+            "video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,"
+            "position INTEGER NOT NULL CHECK(position >= 0),"
+            "PRIMARY KEY(playlist_id, video_id), UNIQUE(playlist_id, position));",
+            "CREATE INDEX music_playlist_tracks_video ON music_playlist_tracks(video_id);",
+            "CREATE TRIGGER music_playlist_track_removed AFTER DELETE ON music_playlist_tracks"
+            " BEGIN UPDATE music_playlists SET updated_at = CAST(strftime('%s','now') AS INTEGER)"
+            " WHERE id = OLD.playlist_id; END;",
+            // Replacing opaque item bytes invalidates its previously validated
+            // music identity. Renaming/moving/tagging does not detach it.
+            "CREATE TRIGGER music_playlist_content_replaced AFTER UPDATE OF package_sha256 ON videos"
+            " BEGIN DELETE FROM music_playlist_tracks WHERE video_id = NEW.id; END;",
+            "INSERT INTO schema_migrations(version, applied_at)"
+            " VALUES(8, CAST(strftime('%s','now') AS INTEGER));"
+        };
+        for (const auto* sql : statements) {
+            auto result = run(database, sql);
+            if (!result) {
+                rollback();
+                return result.error();
+            }
+        }
+    }
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
 VideoRow row_from_statement(sqlite3_stmt* statement) {
     VideoRow row;
     row.id = sqlite3_column_int64(statement, 0);
@@ -749,6 +799,10 @@ Result<Database> Database::create(
     if (!migrated_v7) {
         return migrated_v7.error();
     }
+    auto migrated_v8 = migrate_to_version_8(database.value().database_);
+    if (!migrated_v8) {
+        return migrated_v8.error();
+    }
     return std::move(database.value());
 }
 
@@ -788,6 +842,10 @@ Result<Database> Database::open(
     auto migrated_v7 = migrate_to_version_7(database.value().database_);
     if (!migrated_v7) {
         return migrated_v7.error();
+    }
+    auto migrated_v8 = migrate_to_version_8(database.value().database_);
+    if (!migrated_v8) {
+        return migrated_v8.error();
     }
     return std::move(database.value());
 }
@@ -2096,6 +2154,154 @@ Result<bool> Database::set_video_folder(
     if (sqlite3_changes(database_) == 0) {
         return VaultError{VaultErrorCode::InvalidArgument, "unknown video"};
     }
+    return true;
+}
+
+Result<std::vector<MusicPlaylist>> Database::list_music_playlists() const {
+    if (!database_) return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    // A single statement gives metadata and ordered membership one snapshot.
+    Statement query(database_,
+        "SELECT p.id, p.name, p.created_at, p.updated_at, t.video_id"
+        " FROM music_playlists p LEFT JOIN music_playlist_tracks t ON t.playlist_id = p.id"
+        " ORDER BY p.id, t.position;");
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare music playlist listing", query.status());
+    }
+    std::vector<MusicPlaylist> result;
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+        const auto id = sqlite3_column_int64(query.get(), 0);
+        if (result.empty() || result.back().id != id) {
+            MusicPlaylist playlist;
+            playlist.id = id;
+            const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1));
+            if (text) playlist.name.assign(text, static_cast<std::size_t>(sqlite3_column_bytes(query.get(), 1)));
+            playlist.created_at = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 2));
+            playlist.updated_at = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 3));
+            result.push_back(std::move(playlist));
+        }
+        if (sqlite3_column_type(query.get(), 4) != SQLITE_NULL) {
+            result.back().track_ids.push_back(sqlite3_column_int64(query.get(), 4));
+        }
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "list music playlists", status);
+    }
+    return result;
+}
+
+Result<std::int64_t> Database::create_music_playlist(const std::string& name) {
+    if (!database_) return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    Statement insert(database_,
+        "INSERT INTO music_playlists(name, created_at, updated_at)"
+        " VALUES(?1, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER));");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_text(insert.get(), 1, name.data(), static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "create music playlist", sqlite3_extended_errcode(database_));
+    }
+    return sqlite3_last_insert_rowid(database_);
+}
+
+Result<bool> Database::rename_music_playlist(const std::int64_t playlist_id, const std::string& name) {
+    if (!database_) return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    Statement update(database_,
+        "UPDATE music_playlists SET name = ?2, updated_at = CAST(strftime('%s','now') AS INTEGER)"
+        " WHERE id = ?1;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 1, playlist_id) != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 2, name.data(), static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "rename music playlist", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown music playlist"};
+    }
+    return true;
+}
+
+Result<bool> Database::delete_music_playlist(const std::int64_t playlist_id) {
+    if (!database_) return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    Statement remove(database_, "DELETE FROM music_playlists WHERE id = ?1;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, playlist_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "delete music playlist", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown music playlist"};
+    }
+    return true;
+}
+
+Result<bool> Database::set_music_playlist_tracks(
+    const std::int64_t playlist_id, const std::span<const std::int64_t> track_ids,
+    const std::function<Result<bool>()>& validate_tracks) {
+    if (!database_) return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    if (track_ids.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return VaultError{VaultErrorCode::InvalidArgument, "too many music playlist tracks"};
+    }
+    auto begun = run(database_, "BEGIN IMMEDIATE;");
+    if (!begun) return begun.error();
+    // Covers every error, including allocation exceptions while constructing
+    // error details. No failed edit can strand an active transaction.
+    struct Rollback {
+        sqlite3* db;
+        ~Rollback() { if (db) (void)run(db, "ROLLBACK;"); }
+    } rollback{database_};
+    // Reserve the database writer before probing, so another open handle
+    // cannot replace/delete a validated package between validation and commit.
+    auto validated = validate_tracks();
+    if (!validated) return validated.error();
+    Statement update(database_,
+        "UPDATE music_playlists SET updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?1;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 1, playlist_id) != SQLITE_OK
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "update music playlist", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown music playlist"};
+    }
+    Statement remove(database_, "DELETE FROM music_playlist_tracks WHERE playlist_id = ?1;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, playlist_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "clear music playlist tracks", sqlite3_extended_errcode(database_));
+    }
+    Statement insert(database_,
+        "INSERT INTO music_playlist_tracks(playlist_id, video_id, position) VALUES(?1, ?2, ?3);");
+    if (insert.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare music playlist track", insert.status());
+    }
+    for (std::size_t i = 0; i < track_ids.size(); ++i) {
+        if (sqlite3_reset(insert.get()) != SQLITE_OK
+            || sqlite3_bind_int64(insert.get(), 1, playlist_id) != SQLITE_OK
+            || sqlite3_bind_int64(insert.get(), 2, track_ids[i]) != SQLITE_OK
+            || sqlite3_bind_int64(insert.get(), 3, static_cast<std::int64_t>(i)) != SQLITE_OK) {
+            return database_error(database_, VaultErrorCode::DatabaseFailure,
+                "bind music playlist track", sqlite3_extended_errcode(database_));
+        }
+        const int status = sqlite3_step(insert.get());
+        if ((status & 0xff) == SQLITE_CONSTRAINT) {
+            return VaultError{VaultErrorCode::InvalidArgument, "invalid or duplicate music playlist track"};
+        }
+        if (status != SQLITE_DONE) {
+            return database_error(database_, VaultErrorCode::DatabaseFailure,
+                "insert music playlist track", status);
+        }
+    }
+    auto committed = run(database_, "COMMIT;");
+    if (!committed) return committed.error();
+    rollback.db = nullptr;
     return true;
 }
 

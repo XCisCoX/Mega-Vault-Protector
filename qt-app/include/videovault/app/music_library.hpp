@@ -3,14 +3,17 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QTimer;
 
 namespace videovault::core {
 class Vault;
@@ -44,12 +47,44 @@ private:
         QString title;
         QString artist;
         qint64 size{0};
+        // Import time, so "Recently added" is a real ordering rather than an
+        // alphabetical accident.
+        qint64 added{0};
+        // Set when the item came from a music provider: the provider's display
+        // name, its album and the fact that this is the offline copy of a remote
+        // track. Empty for items imported as plain files.
+        QString provider;
+        QString album;
+        QString remoteId;
     };
 
+    // The page is sectioned the way a music app is: everything, by artist, by
+    // import time, and the provider-backed offline copies.
+    enum Section { SongsSection = 0, ArtistsSection = 1, RecentSection = 2,
+        OfflineSection = 3, AlbumsSection = 4, PlaylistsSection = 5 };
+
+    struct Playlist {
+        std::int64_t id{0};
+        QString name;
+        std::vector<std::int64_t> trackIds;
+    };
+    // Playlist editing works the way the core API does: read the playlist, submit
+    // the complete new track sequence. Every mutation reloads and says what
+    // happened, so a refused edit is never silent.
+    void createPlaylist(std::int64_t initialTrack = 0);
+    void renamePlaylist(const Playlist& playlist);
+    void deletePlaylist(const Playlist& playlist);
+    void changePlaylistTracks(std::int64_t id, std::vector<std::int64_t> ids);
+    [[nodiscard]] const Playlist* playlistById(std::int64_t id) const;
+    void openPlaylist(std::int64_t id);
     void rebuild();
     void applyFilter(const QString& text);
     void playRow(int row);
     void ensurePlayer();
+    // Album art is decrypted one row at a time so a large library never pays for
+    // N package opens just to paint a list.
+    void startCoverLoads();
+    void loadNextCover();
     [[nodiscard]] std::vector<Track> playableOrder() const;
 
     std::shared_ptr<videovault::core::Vault> vault_;
@@ -62,6 +97,14 @@ private:
     QLabel* empty_{nullptr};
     QPushButton* playAll_{nullptr};
     QPushButton* provider_{nullptr};
+    QComboBox* section_{nullptr};
+    QComboBox* group_{nullptr};
+    void rebuildGroups();
+    QTimer* coverPump_{nullptr};
+    int coverCursor_{0};
+    int coverGeneration_{0};
+    bool coverBusy_{false};
+    int currentSection_{SongsSection};
     MusicWindow* player_{nullptr};
 };
 

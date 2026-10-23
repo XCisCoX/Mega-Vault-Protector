@@ -17,10 +17,12 @@ class PluginBoundaries(unittest.TestCase):
   self.assertTrue((root/'PluginManager.kt').exists(), 'Data-only plugin manager is missing')
   self.assertTrue((root/'PluginSession.kt').exists(), 'Memory player session is missing')
   s=(root/'PluginSession.kt').read_text()
-  self.assertIn('ByteArrayDataSource',s)
+  self.assertIn('ProviderDataSource',s)
+  self.assertNotIn('ByteArrayDataSource',s)
   self.assertIn('onIsPlayingChanged',s)
   self.assertIn('eraseColor',s)
-  self.assertIn('retired?.fill(0)',s)
+  self.assertIn('importSink?.close()',s)
+  self.assertIn('setTargetBufferBytes',s)
   self.assertNotIn('cacheDir',s)
  def test_registry_separates_provider_from_manager(self):
   root=A/'java/org/megavideoprotect/app'

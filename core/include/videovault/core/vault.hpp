@@ -106,6 +106,16 @@ struct TagInfo {
     std::int64_t video_count{0};
 };
 
+// Local music collection, stored only in this vault's encrypted SQLCipher
+// database. track_ids are vault item ids in playback order (no duplicates).
+struct MusicPlaylist {
+    std::int64_t id{0};
+    std::string name;
+    std::uint64_t created_at{0U};
+    std::uint64_t updated_at{0U};
+    std::vector<std::int64_t> track_ids;
+};
+
 // Phase 5: container metadata probed through FFmpeg.
 struct MediaInfo {
     std::int64_t video_id{0};
@@ -117,6 +127,7 @@ struct MediaInfo {
     // Empty when the container has no tag. The gallery then uses the file name.
     std::string title;
     std::string artist;
+    std::string album;
 };
 
 // A decrypted JPEG thumbnail ready for display.
@@ -327,6 +338,26 @@ public:
     [[nodiscard]] Result<std::vector<TrackProvenance>> list_video_provenance() const;
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
+
+    // Encrypted, vault-local playlists. Names use the trimmed 1-120 byte
+    // library-entry naming rule; duplicate names are allowed. Listings are
+    // ordered by id and read database rows only (no per-track media probes).
+    // All calls reject a locked vault. These collections are not yet part of
+    // the record/package sync protocols; see core/MUSIC_PLAYLISTS.md.
+    [[nodiscard]] Result<std::vector<MusicPlaylist>> list_music_playlists() const;
+    [[nodiscard]] Result<std::int64_t> create_music_playlist(std::string_view name);
+    [[nodiscard]] Result<bool> rename_music_playlist(
+        std::int64_t playlist_id, std::string_view name);
+    [[nodiscard]] Result<bool> delete_music_playlist(std::int64_t playlist_id);
+
+    // Atomically replaces membership and order. Every id must belong to this
+    // vault and contain audio, with no video stream except attached cover art.
+    // Missing ids, duplicate ids and non-audio items return InvalidArgument;
+    // failure leaves the previous playlist unchanged. An empty list clears it.
+    // Add/remove/reorder are expressed by editing track_ids from a listing
+    // and submitting the complete desired sequence here.
+    [[nodiscard]] Result<bool> set_music_playlist_tracks(
+        std::int64_t playlist_id, std::span<const std::int64_t> track_ids);
 
     // Plaintext byte length for one id. Playback must never list/probe the
     // whole library just to implement AVSEEK_SIZE for the selected item.

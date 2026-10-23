@@ -1,0 +1,76 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class, kotlinx.coroutines.DelicateCoroutinesApi::class)
+package org.megavideoprotect.app
+import kotlinx.coroutines.*
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
+import androidx.media3.common.Player
+import androidx.media3.datasource.DataSpec
+import android.net.Uri
+
+suspend fun until(label: String, test: () -> Boolean) { withTimeout(3000) {while(!test()) delay(5)} }
+fun track(id: String)=PluginItem("track",id)
+fun session(autoSave: Boolean=false)=PluginSession(android.content.Context(),PluginManifest(),"vault",PluginOptions(autoSave=autoSave))
+suspend fun loaded(s: PluginSession) {until("ready") {!s.playbackBusy}; check(s.player.currentMediaItem != null) {s.playbackMessage}}
+fun consume(s: PluginSession, firstOnly: Boolean=false): androidx.media3.datasource.DataSource {
+ val source=s.player.source!!.factory.createDataSource(); source.open(DataSpec(Uri.parse("provider://test")))
+ val bytes=ByteArray(130001)
+ if(firstOnly) {check(source.read(bytes,0,bytes.size)>0); return source}
+ try {while(source.read(bytes,0,bytes.size)>=0) {bytes.fill(0)}} finally {bytes.fill(0); source.close()}
+ return source
+}
+fun main() {
+ val main=newSingleThreadContext("session-main"); Dispatchers.setMain(main)
+ try {runBlocking(main) {
+  val a=track("a"); val b=track("b"); val c=track("c"); val s=session()
+  s.play(a,listOf(a,PluginItem("album","folder"),b,b,PluginItem("track","bad",playable=false),c)); loaded(s)
+  check(s.playableRows==listOf(a,b,c)); check(s.canDownload)
+  check(Fixtures.networkReads==0) // resolution does not download the audio body
+  s.next(); loaded(s); check(s.selected==b)
+  s.previous(); loaded(s); check(s.selected==a)
+  s.previous(); check(s.selected==a)
+  s.setRepeat(Player.REPEAT_MODE_ALL); s.previous(); loaded(s); check(s.selected==c)
+  s.next(); loaded(s); check(s.selected==a)
+  s.setRepeat(Player.REPEAT_MODE_ONE); check(s.player.repeatMode==Player.REPEAT_MODE_ONE)
+  s.setRepeat(Player.REPEAT_MODE_OFF); s.player.end(); loaded(s); check(s.selected==b)
+  s.setShuffle(true); val visited=mutableSetOf(s.selected!!.id)
+  repeat(2) {s.next(); loaded(s); check(visited.add(s.selected!!.id))}; check(visited==setOf("a","b","c"))
+  s.reversePlaylist(); check(s.playableRows==listOf(c,b,a)); s.setShuffle(false)
+  s.download(); loaded(s); check(s.saveBusy)
+  val source=consume(s,firstOnly=true)
+  check(Fixtures.networkReads < Fixtures.payload.size); check(CoreBridge.handles.values.single().bytes.size()>0); check(CoreBridge.imports==0)
+  val chunk=ByteArray(131072)
+  while(source.read(chunk,0,chunk.size)>=0) {chunk.fill(0)}; source.close(); delay(10)
+  check(s.saved && CoreBridge.imports==1 && CoreBridge.last.contentEquals(Fixtures.payload)); check(CoreBridge.maxChunk<=65536 && Fixtures.maxRead<=65536)
+  val offline=s.selected!!; val before=Fixtures.connections
+  s.play(offline,s.playableRows); loaded(s); consume(s); check(s.localPlayback && s.saved && Fixtures.connections==before)
+  s.browse("ready"); until("catalogue") {!s.catalogueBusy}; check(s.rows.single().id=="ready" && s.playableRows==listOf(c,b,a))
+  val old=Gate("old",fail=true); Fixtures.gates["catalogue/old"]=old
+  s.browse("old"); until("old start") {old.started.count==0L}; check(s.rows.isEmpty())
+  val fresh=Gate("fresh"); Fixtures.gates["catalogue/fresh"]=fresh
+  s.browse("fresh"); until("fresh start") {fresh.started.count==0L}; old.release.countDown(); delay(20)
+  check(s.catalogueBusy && s.catalogueMessage.isEmpty()); fresh.release.countDown(); until("done") {!s.catalogueBusy}; check(s.rows.single().id=="fresh")
+  val late=Gate("late"); Fixtures.gates["catalogue/timeout"]=late
+  val slow=Gate("slow"); Fixtures.gates["audio/slow"]=slow
+  s.browse("timeout"); s.play(track("slow")); until("started") {late.started.count==0L && slow.started.count==0L}
+  delay(15100); check(!s.catalogueBusy && s.catalogueMessage.contains("15 seconds") && late.closed && !slow.closed)
+  late.release.countDown(); slow.release.countDown(); loaded(s); check(s.rows.isEmpty())
+  s.download(); loaded(s); val partial=consume(s,true); val aborted=CoreBridge.aborts
+  s.cancelDownload(); delay(10); check(!s.saveBusy && CoreBridge.aborts==aborted+1 && CoreBridge.handles.isEmpty()); partial.close()
+  s.play(track("unknown")); loaded(s); s.download(); loaded(s); Fixtures.unknown=true
+  consume(s); Fixtures.unknown=false; delay(10); check(!s.saved && s.playbackMessage.contains("Unknown stream length"))
+  s.play(track("truncated")); loaded(s); s.download(); loaded(s); Fixtures.truncated=true
+  check(runCatching {consume(s)}.isFailure); Fixtures.truncated=false; delay(10); check(!s.saved && CoreBridge.handles.isEmpty())
+  s.play(track("locked")); loaded(s); s.download(); loaded(s); val locked=consume(s,true)
+  CoreBridge.unlocked=false; check(runCatching {locked.read(chunk,0,chunk.size)}.isFailure); locked.close(); CoreBridge.unlocked=true
+  check(CoreBridge.handles.isEmpty())
+  s.close(); check(s.selected==null && s.clientId.isEmpty()); s.next(); s.toggle(); s.browse("closed"); check(!s.busy)
+  val auto=session(true); auto.play(track("auto")); loaded(auto); auto.player.pause(); auto.player.play(); loaded(auto)
+  check(auto.saveBusy); consume(auto); delay(10); check(auto.saved); auto.close()
+  val playlist="#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n"
+  check(ProviderHls.parseMedia("https://cdn.example/dir/list.m3u8",playlist)==listOf("https://cdn.example/dir/a.ts","https://cdn.example/dir/b.ts"))
+  for(bad in listOf(playlist.replace("#EXT-X-ENDLIST", ""), playlist.replace("#EXTINF:1,", "#EXT-X-KEY:METHOD=AES-128\n#EXTINF:1,"),playlist.replace("a.ts", "#EXT-X-BYTERANGE:32\na.ts"))) {
+   check(runCatching {ProviderHls.parseMedia("https://cdn.example/list",bad)}.isFailure)
+  }
+  println("PASS production PluginSession + ProviderDataSource: progressive first read before complete body; bounded identical tee; offline-first; queue/repeat/shuffle/reverse; independent/stale/deadline catalogue; unknown/truncated/cancel/lock; auto-save; clear finite HLS policy")
+ }} finally {Dispatchers.resetMain(); main.close()}
+}

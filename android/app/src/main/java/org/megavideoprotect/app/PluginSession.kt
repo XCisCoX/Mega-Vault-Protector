@@ -12,7 +12,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
-import androidx.media3.datasource.ByteArrayDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -39,14 +39,20 @@ class PluginSession(
     private val catalogueRequests = ConcurrentHashMap.newKeySet<PluginHttp>()
     private val playbackRequests = ConcurrentHashMap.newKeySet<PluginHttp>()
     private val artworkBitmaps = ConcurrentHashMap.newKeySet<android.graphics.Bitmap>()
-    private var generation = 0L
+    @Volatile private var generation = 0L
     private var catalogueGeneration = 0L
     @Volatile private var closed = false
     private var loading: Job? = null
     private var catalogueLoading: Job? = null
     private var saving = false
-    private var bytes: ByteArray? = null
-    private var retired: ByteArray? = null
+    private val autoSaveAttempted = mutableSetOf<String>()
+    private var importSink: ProviderImport? = null
+    private var remoteReady = false
+    var localPlayback by mutableStateOf(false); private set
+    var downloadAllowed by mutableStateOf(false); private set
+    var clientId by mutableStateOf(""); private set
+    fun updateClientId(value: String) { clientId = value.take(256) }
+    private fun active(token: Long): Boolean = !closed && token == generation && CoreBridge.nativeIsUnlocked() && !RemoteVault.connected()
     private var playOrder = emptyList<PluginItem>()
     var rows by mutableStateOf<List<PluginItem>>(emptyList()); private set
     var heading by mutableStateOf("Search songs, artists or albums"); private set
@@ -70,15 +76,20 @@ class PluginSession(
      */
     var downloadStates by mutableStateOf<Map<String, String>>(emptyMap()); private set
     private val downloadPermits = kotlinx.coroutines.sync.Semaphore(2)
-    val canDownload: Boolean get() = !closed && !playbackBusy && !saveBusy && !saved && selected != null && bytes != null
-    val player = ExoPlayer.Builder(context).build().apply {
+    private val downloadJobs = mutableMapOf<String, Job>()
+    private val downloadClients = ConcurrentHashMap<String, MutableSet<PluginHttp>>()
+    val canDownload: Boolean get() = !closed && !playbackBusy && !saveBusy && !saved && selected != null && remoteReady && downloadAllowed
+    val player = ExoPlayer.Builder(context).setLoadControl(DefaultLoadControl.Builder()
+        .setTargetBufferBytes(8 * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build()).build().apply {
         setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
         setHandleAudioBecomingNoisy(true)
         addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playing = isPlaying
                 // Readiness or track selection is NOT playback.
-                if (isPlaying && options.autoSave && !saved && !saving) download()
+                if (isPlaying && options.autoSave && !saved && !saving && canDownload && selected?.id !in autoSaveAttempted) {
+                    selected?.id?.let { autoSaveAttempted.add(it) }; download()
+                }
             }
             override fun onPlayerError(error: PlaybackException) {
                 if (!closed) playbackMessage = "Audio playback failed. Try loading the track again."
@@ -117,6 +128,10 @@ class PluginSession(
     /** Clear stale rows immediately; failure/timeout leaves an empty, retryable catalogue. */
     fun browse(query: String? = null, item: PluginItem? = null) {
         if (closed) return
+        if (manifest.protocol == "soundcloud-tracks-v1" && clientId.isBlank()) {
+            catalogueMessage = "Enter your own SoundCloud API client ID below, then Retry. No API identity is bundled or scraped."
+            return
+        }
         val token = ++catalogueGeneration
         catalogueLoading?.cancel(); catalogueRequests.forEach { it.close() }
         rows = emptyList(); heading = item?.title ?: "Results · ${manifest.name}"
@@ -136,7 +151,9 @@ class PluginSession(
             }
             try {
                 val path = provider.cataloguePath(query, item)
-                val data = network(catalogueRequests) { it.json(path) }
+                val data = network(catalogueRequests) {
+                    it.jsonUrl(if (manifest.protocol == "soundcloud-tracks-v1") SoundCloudTracksProvider.withClientId(it.absolute(path), clientId) else path)
+                }
                 ensureActive()
                 if (token == catalogueGeneration && !closed) {
                     rows = provider.normalize(data, item?.kind)
@@ -162,35 +179,64 @@ class PluginSession(
         }
         loadTrack(item)
     }
-    private fun loadTrack(item: PluginItem) {
+    private fun loadTrack(item: PluginItem, store: Boolean = false) {
         if (closed) return
         val token = ++generation
-        loading?.cancel(); playbackRequests.forEach { it.close() }
-        player.stop(); player.clearMediaItems(); bytes?.fill(0); bytes = null
-        selected = item; saved = false; playbackBusy = true; playbackMessage = ""
+        loading?.cancel(); playbackRequests.forEach { it.close() }; importSink?.close(); importSink = null
+        player.stop(); player.clearMediaItems(); remoteReady = false
+        selected = item; saved = false; localPlayback = false; downloadAllowed = false
+        saving = store; saveBusy = store; playbackBusy = true; playbackMessage = ""
+        val identity = clientId
         loading = scope.launch {
-            var loaded: ByteArray? = null
             try {
-                // Keep ownership even if withContext's prompt cancellation discards its result.
-                network(playbackRequests) { loaded = it.audio(provider.audioPath(item), options.memoryMiB * 1024 * 1024) }
+                // A persisted identity lookup happens BEFORE any API/CDN request, including rights resolution.
+                val found = withContext(Dispatchers.IO) { CoreBridge.Result.parse(CoreBridge.nativeFindProviderTrack(manifest.id, item.id, vaultRoot)) }
+                check(found.ok) { "Vault changed or locked" }
                 ensureActive()
-                if (token != generation || closed) return@launch
+                if (!active(token)) return@launch
                 if (MusicHub.active) context.startService(Intent(context, MusicPlaybackService::class.java).setAction(MusicPlaybackService.ACTION_STOP))
-                val audio = checkNotNull(loaded)
-                bytes = audio; loaded = null
-                val source = ProgressiveMediaSource.Factory(DataSource.Factory { ByteArrayDataSource(audio) })
-                    .createMediaSource(MediaItem.Builder().setMediaId(item.id)
-                        .setUri(Uri.parse("memory://plugin/${item.id}")).setMimeType("audio/flac")
-                        .setMediaMetadata(MediaMetadata.Builder().setTitle(item.title).setArtist(item.subtitle).build()).build())
-                player.setMediaSource(source); player.prepare(); player.play()
+                val media = MediaItem.Builder().setMediaId(item.id)
+                    .setMediaMetadata(MediaMetadata.Builder().setTitle(item.title).setArtist(item.subtitle).build())
+                if (found.id > 0) {
+                    localPlayback = true; saved = true; saving = false; saveBusy = false
+                    player.setMediaSource(ProgressiveMediaSource.Factory(VaultDataSource.Factory())
+                        .createMediaSource(media.setUri(VaultDataSource.uriFor(found.id)).build()))
+                    playbackMessage = "Offline · playing the encrypted vault copy."
+                } else {
+                    val plan = network(playbackRequests) { http -> ProviderHls.plan(http, provider.resolve(http, item, identity, store), measureParts = store) }
+                    ensureActive()
+                    if (!active(token)) return@launch
+                    downloadAllowed = plan.stream.downloadable
+                    val sink = if (store) newImport(item, plan.stream, token) else null
+                    importSink = sink
+                    val factory = DataSource.Factory { ProviderDataSource(manifest, plan, sink, { active(token) }) { client, add ->
+                        if (add) { requests.add(client); playbackRequests.add(client); if (!active(token)) client.close() }
+                        else { requests.remove(client); playbackRequests.remove(client) }
+                    } }
+                    player.setMediaSource(ProgressiveMediaSource.Factory(factory)
+                        .createMediaSource(media.setUri(Uri.parse("provider://track/${item.id}")).build()))
+                    remoteReady = true
+                    if (!downloadAllowed) playbackMessage = "Streaming only · the artist has not authorized offline storage."
+                }
+                player.prepare(); player.play()
             } catch (_: CancellationException) { }
-            catch (e: PluginLimitException) {
-                if (token == generation && !closed) playbackMessage = e.message.orEmpty()
-            } catch (_: Exception) {
-                if (token == generation && !closed) playbackMessage = "Audio could not be loaded or was not verified FLAC. Nothing was cached or saved."
-            } finally { loaded?.fill(0); if (token == generation && !closed) playbackBusy = false }
+            catch (e: Exception) {
+                if (token == generation && !closed) {
+                    playbackMessage = if (e is IllegalArgumentException || e is IllegalStateException) e.message.orEmpty().take(240) else "Provider audio failed. Check API access and connection."
+                    saving = false; saveBusy = false
+                }
+            } finally { if (token == generation && !closed) playbackBusy = false }
         }
     }
+    private fun newImport(item: PluginItem, stream: ProviderStream, token: Long): ProviderImport =
+        ProviderImport(manifest, item, vaultRoot, options.folderId, stream) { ok, text ->
+            scope.launch {
+                if (!closed && token == generation) {
+                    saving = false; saveBusy = false; saved = ok; playbackMessage = text
+                    if (ok) { GalleryCache.clear(); SyncV4Auto.markDirty() }
+                }
+            }
+        }
     private fun rebuildOrder(anchor: PluginItem? = selected) {
         playOrder = if (shuffleEnabled) {
             val rest = playableRows.filter { it.id != anchor?.id }.shuffled()
@@ -205,7 +251,7 @@ class PluginSession(
         require(mode in setOf(Player.REPEAT_MODE_OFF, Player.REPEAT_MODE_ONE, Player.REPEAT_MODE_ALL))
         if (closed) return
         repeatMode = mode
-        // One RAM track in ExoPlayer; list repeat is implemented by advance().
+        // One progressive or local track in ExoPlayer; list repeat is implemented by advance().
         player.repeatMode = if (mode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     }
     fun reversePlaylist() {
@@ -233,46 +279,60 @@ class PluginSession(
     fun toggle() {
         if (closed || playbackBusy) return
         if (player.isPlaying) player.pause()
-        else if (player.playerError != null || bytes == null) selected?.let { loadTrack(it) }
+        else if (player.playerError != null || (!remoteReady && !localPlayback)) selected?.let { loadTrack(it) }
         else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L); player.play() }
     }
-    /**
-     * Downloads one row's track without playing it: RAM only, verified FLAC,
-     * straight into the encrypted vault. At most two rows download at once.
-     */
+    /** Two bounded sequential import workers; they never buffer an entire track. */
     fun downloadTrack(item: PluginItem) {
         if (closed || item.kind != "track" || !item.playable) return
-        val state = downloadStates[item.id]
-        if (state == "downloading" || state == "saving" || state == "saved") return
+        if (downloadStates[item.id] in setOf("downloading", "saving")) {
+            downloadClients[item.id]?.forEach { it.close() }; downloadJobs[item.id]?.cancel()
+            return
+        }
+        if (downloadStates[item.id] == "saved") return
+        val group = ConcurrentHashMap.newKeySet<PluginHttp>()
+        downloadClients[item.id] = group
         setDownload(item.id, "downloading")
-        scope.launch {
-            var audio: ByteArray? = null
+        downloadJobs[item.id] = scope.launch {
             try {
                 downloadPermits.withPermit {
-                    network { audio = it.audio(provider.audioPath(item), options.memoryMiB * 1024 * 1024) }
-                    val bytes = checkNotNull(audio)
-                    if (closed) return@withPermit
-                    setDownload(item.id, "saving")
-                    val result = withContext(Dispatchers.IO + NonCancellable) {
-                        require(!RemoteVault.connected() && CoreBridge.nativeIsUnlocked())
-                        require((VaultLocation.saved(context) ?: context.filesDir.absolutePath) == vaultRoot)
-                        val folders = Json.folders(CoreBridge.nativeListFolders())
-                        require(options.folderId == 0L || folders.any { it.id == options.folderId }) { "Destination folder was removed" }
-                        CoreBridge.Result.parse(CoreBridge.nativeImportBytesForVault(
-                            bytes, PluginAudio.fileName(item.title, item.subtitle), options.folderId, vaultRoot))
-                    }
-                    if (!closed) {
-                        GalleryCache.clear()
-                        setDownload(item.id, if (result.ok) "saved" else result.error.ifBlank { "failed" }.take(120))
+                    withContext(Dispatchers.IO) {
+                        val found = CoreBridge.Result.parse(CoreBridge.nativeFindProviderTrack(manifest.id, item.id, vaultRoot))
+                        check(found.ok)
+                        if (found.id > 0) {
+                            withContext(Dispatchers.Main) { if (!closed) setDownload(item.id, "saved") }
+                            return@withContext
+                        }
+                        val plan = network(group) { http -> ProviderHls.plan(http, provider.resolve(http, item, clientId, true), measureParts = true) }
+                        var succeeded = false
+                        var outcome = "Offline copy failed"
+                        val sink = ProviderImport(manifest, item, vaultRoot, options.folderId, plan.stream) { ok, text -> succeeded = ok; outcome = text }
+                        val job = currentCoroutineContext()[Job]
+                        val source = ProviderDataSource(manifest, plan, sink,
+                            { !closed && job?.isActive != false && CoreBridge.nativeIsUnlocked() && !RemoteVault.connected() }) { client, add ->
+                            if (add) { requests.add(client); group.add(client); if (closed || job?.isActive == false) client.close() }
+                            else { requests.remove(client); group.remove(client) }
+                        }
+                        val chunk = ByteArray(65536)
+                        try {
+                            source.open(androidx.media3.datasource.DataSpec(Uri.parse("provider://download/${item.id}")))
+                            while (true) {
+                                ensureActive()
+                                if (source.read(chunk, 0, chunk.size) < 0) break
+                                chunk.fill(0)
+                            }
+                        } finally { chunk.fill(0); source.close(); sink.close() }
+                        withContext(Dispatchers.Main) {
+                            if (!closed) {
+                                setDownload(item.id, if (succeeded) "saved" else outcome.take(120))
+                                if (succeeded) { GalleryCache.clear(); SyncV4Auto.markDirty() }
+                            }
+                        }
                     }
                 }
-            } catch (e: PluginLimitException) {
-                if (!closed) setDownload(item.id, e.message.orEmpty().ifBlank { "too large" }.take(120))
-            } catch (_: CancellationException) {
-                if (!closed) setDownload(item.id, "")
-            } catch (_: Exception) {
-                if (!closed) setDownload(item.id, "failed")
-            } finally { audio?.fill(0) }
+            } catch (_: CancellationException) { if (!closed) setDownload(item.id, "") }
+            catch (_: Exception) { if (!closed) setDownload(item.id, "Download failed or not authorized") }
+            finally { downloadClients.remove(item.id, group); downloadJobs.remove(item.id) }
         }
     }
     private fun setDownload(id: String, value: String) {
@@ -283,42 +343,26 @@ class PluginSession(
         generation++
         loading?.cancel(); playbackRequests.forEach { it.close() }
         player.stop(); player.clearMediaItems()
-        // An import in flight still owns these bytes; it erases them when it returns.
-        if (saving) retired = bytes else bytes?.fill(0)
-        bytes = null; selected = null; saved = false
+        importSink?.close(); importSink = null; saving = false; saveBusy = false
+        remoteReady = false; localPlayback = false; selected = null; saved = false
         playableRows = emptyList(); playOrder = emptyList()
         playbackBusy = false; playbackMessage = ""
     }
     fun download() {
-        val audio = bytes ?: return
         val track = selected ?: return
-        if (saving || saved || closed) return
-        val token = generation
-        val folder = options.folderId
-        saving = true; saveBusy = true
-        scope.launch {
-            try {
-                val result = withContext(Dispatchers.IO + NonCancellable) {
-                    // Pin plugin, vault root, folder and bytes from the selected playback.
-                    require(!closed && !RemoteVault.connected() && CoreBridge.nativeIsUnlocked())
-                    require((VaultLocation.saved(context) ?: context.filesDir.absolutePath) == vaultRoot)
-                    val folders = Json.folders(CoreBridge.nativeListFolders())
-                    require(folder == 0L || folders.any { it.id == folder }) { "Destination folder was removed" }
-                    val name = PluginAudio.fileName(track.title, track.subtitle)
-                    CoreBridge.Result.parse(CoreBridge.nativeImportBytesForVault(audio, name, folder, vaultRoot))
-                }
-                if (!closed && token == generation) {
-                    saved = result.ok
-                    playbackMessage = if (result.ok) "Saved to the encrypted vault." else "Vault import failed: ${result.error}"
-                    if (result.ok) GalleryCache.clear()
-                }
-            } catch (_: Exception) { if (!closed && token == generation) playbackMessage = "Cannot import: vault or destination changed, or encrypted import failed." }
-            finally {
-                saving = false; saveBusy = false
-                retired?.fill(0); retired = null
-                if (!closed && player.playbackState == Player.STATE_ENDED) advance(1)
-            }
+        if (!canDownload) return
+        // No retained plaintext history: re-open from byte zero, then tee those SAME
+        // incoming authorized bytes to playback and the encrypted core writer.
+        loadTrack(track, store = true)
+    }
+    fun cancelDownload() {
+        if (saving && importSink == null) {
+            // Cancellation during URL/rights resolution must prevent a later sink.
+            generation++; loading?.cancel(); playbackRequests.forEach { it.close() }
+            playbackBusy = false; remoteReady = false
         }
+        importSink?.close(); importSink = null; saving = false; saveBusy = false
+        playbackMessage = "Offline copy cancelled; streaming can continue."
     }
     fun close() {
         if (closed) return
@@ -327,8 +371,8 @@ class PluginSession(
         player.stop(); player.clearMediaItems(); player.release()
         artworkBitmaps.forEach { runCatching { it.eraseColor(android.graphics.Color.TRANSPARENT) } }
         artworkBitmaps.clear()
-        if (saving) retired = bytes else bytes?.fill(0)
-        bytes = null; selected = null; rows = emptyList(); playableRows = emptyList(); playOrder = emptyList()
+        importSink?.close(); importSink = null; saving = false; saveBusy = false; clientId = ""
+        remoteReady = false; selected = null; rows = emptyList(); playableRows = emptyList(); playOrder = emptyList()
         heading = ""; catalogueMessage = ""; playbackMessage = ""; catalogueBusy = false; playbackBusy = false; playing = false
     }
 }

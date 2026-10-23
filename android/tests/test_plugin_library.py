@@ -11,7 +11,7 @@ class ProviderLibraryIntegration(unittest.TestCase):
         # No Songs/Albums/Artists category level: songs are rows, albums folders.
         self.assertNotIn('PluginLibrary.category(', source)
         self.assertNotIn('"Artists"', source)
-        self.assertIn('if (item.kind == "album")', source)
+        self.assertIn('if (item.kind == "album" || item.kind == "artist")', source)
         self.assertIn('fun openAlbum(item: PluginItem)', source)
         self.assertIn('openAlbum(item)', source)
         self.assertIn('ProviderTrackRow(', source)
@@ -23,7 +23,8 @@ class ProviderLibraryIntegration(unittest.TestCase):
         self.assertIn('"Saved"', source)
         session = (ROOT / 'PluginSession.kt').read_text(encoding='utf-8')
         self.assertIn('fun downloadTrack(item: PluginItem)', session)
-        self.assertIn('nativeImportBytesForVault', session)
+        self.assertIn('ProviderImport(manifest', session)
+        self.assertNotIn('nativeImportBytesForVault', session)
         self.assertIn('downloadPermits.withPermit', session)
 
     def test_discovery_uses_each_existing_gallery_view(self):

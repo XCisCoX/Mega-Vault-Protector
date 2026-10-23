@@ -1,27 +1,37 @@
 #include "videovault/app/music_library.hpp"
 
 #include "videovault/app/icons.hpp"
+#include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/music_window.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
 
 #include <QApplication>
+#include <QComboBox>
+#include <QFutureWatcher>
+#include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
+#include <QThread>
 #include <QFrame>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QListWidget>
 #include <QPainter>
 #include <QPalette>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollBar>
+#include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <map>
 
 namespace videovault::app {
 namespace {
@@ -118,12 +128,24 @@ public:
         }
 
         const QRectF tile(row.left() + 8, row.center().y() - 21.0, 42, 42);
-        QColor tint = palette.color(QPalette::Highlight);
-        tint.setAlpha(isDarkTheme() ? 46 : 34);
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(tint);
-        painter->drawRoundedRect(tile, 12, 12);
-        paintNote(*painter, tile.adjusted(9, 9, -9, -9), palette.color(QPalette::WindowText));
+        const auto cover = index.data(Qt::DecorationRole).value<QIcon>();
+        if (!cover.isNull() && !cover.pixmap(42, 42).isNull()) {
+            // Album art when the vault has a decrypted picture for this item;
+            // the drawn note stays as the fallback cover.
+            QPainterPath clip;
+            clip.addRoundedRect(tile, 10, 10);
+            painter->save();
+            painter->setClipPath(clip);
+            painter->drawPixmap(tile.toRect(), cover.pixmap(tile.size().toSize()));
+            painter->restore();
+        } else {
+            QColor tint = palette.color(QPalette::Highlight);
+            tint.setAlpha(isDarkTheme() ? 46 : 34);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(tint);
+            painter->drawRoundedRect(tile, 12, 12);
+            paintNote(*painter, tile.adjusted(9, 9, -9, -9), palette.color(QPalette::WindowText));
+        }
 
         const QString title = index.data(Qt::UserRole + 1).toString();
         const QString detail = index.data(Qt::UserRole + 2).toString();
@@ -180,8 +202,21 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     search_->setObjectName(QStringLiteral("musicSearchField"));
     search_->setPlaceholderText(QStringLiteral("Search your music"));
     search_->setClearButtonEnabled(true);
-    search_->setMinimumWidth(220);
-    search_->setMaximumWidth(340);
+    search_->setMinimumWidth(100);
+    search_->setMaximumWidth(480);
+    section_ = new QComboBox(header);
+    section_->setObjectName(QStringLiteral("musicSectionSelect"));
+    section_->addItem(QStringLiteral("Songs"));
+    section_->addItem(QStringLiteral("Artists"));
+    section_->addItem(QStringLiteral("Recently added"));
+    section_->addItem(QStringLiteral("Offline music"));
+    section_->addItem(QStringLiteral("Albums"));
+    section_->setToolTip(QStringLiteral("Choose what this list shows"));
+    group_ = new QComboBox(this);
+    group_->setObjectName(QStringLiteral("musicGroupSelect"));
+    group_->setMinimumContentsLength(18);
+    group_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    group_->hide();
     provider_ = new QPushButton(QStringLiteral("Monochrome"), header);
     provider_->setObjectName(QStringLiteral("musicProviderButton"));
     icons::withText(provider_, QStringLiteral("wifi"));
@@ -205,10 +240,16 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     headerLayout->addWidget(title);
     headerLayout->addWidget(count_);
     headerLayout->addStretch(1);
-    headerLayout->addWidget(search_);
     headerLayout->addWidget(provider_);
     headerLayout->addWidget(playAll_);
     root->addWidget(header);
+    auto* filters = new QWidget(this);
+    auto* filterLayout = new QHBoxLayout(filters);
+    filterLayout->setContentsMargins(16, 8, 16, 8);
+    filterLayout->addWidget(section_);
+    filterLayout->addWidget(search_, 1);
+    root->addWidget(filters);
+    root->addWidget(group_);
 
     list_ = new QListWidget(this);
     list_->setObjectName(QStringLiteral("musicTracks"));
@@ -220,6 +261,8 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     list_->setItemDelegate(new TrackRowDelegate(list_));
     list_->setStyleSheet(QStringLiteral("QListWidget#musicTracks { outline: none; }"));
     root->addWidget(list_, 1);
+    connect(list_->verticalScrollBar(), &QScrollBar::valueChanged, this,
+        [this] { startCoverLoads(); });
 
     empty_ = new QLabel(this);
     empty_->setAlignment(Qt::AlignCenter);
@@ -230,6 +273,14 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     root->addWidget(empty_, 1);
 
     connect(back, &QPushButton::clicked, this, &MusicLibraryPage::closed);
+    connect(section_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        [this](int index) {
+            currentSection_ = index;
+            rebuildGroups();
+            applyFilter(search_ != nullptr ? search_->text() : QString());
+        });
+    connect(group_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        [this] { applyFilter(search_->text()); });
     connect(search_, &QLineEdit::textChanged, this,
         [this](const QString& text) { applyFilter(text); });
     connect(playAll_, &QPushButton::clicked, this, [this] { playRow(0); });
@@ -238,6 +289,61 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
         [this](QListWidgetItem* item) { playRow(list_->row(item)); });
     connect(list_, &QListWidget::itemClicked, this,
         [this](QListWidgetItem* item) { playRow(list_->row(item)); });
+    // Row actions: queue management belongs next to the list, not in a dialog.
+    list_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(list_, &QListWidget::customContextMenuRequested, this, [this](const QPoint& point) {
+        auto* item = list_->itemAt(point);
+        if (item == nullptr) {
+            return;
+        }
+        const int row = list_->row(item);
+        if (row < 0 || row >= static_cast<int>(shown_.size())) {
+            return;
+        }
+        const auto& track = shown_[static_cast<std::size_t>(row)];
+        MusicTrack queued;
+        queued.id = track.id;
+        queued.title = track.title;
+        QMenu menu(list_);
+        auto* play = menu.addAction(QStringLiteral("Play"));
+        auto* next = menu.addAction(QStringLiteral("Play next"));
+        auto* append = menu.addAction(QStringLiteral("Add to queue"));
+        menu.addSeparator();
+        auto* reveal = menu.addAction(QStringLiteral("Details"));
+        auto* chosen = menu.exec(list_->mapToGlobal(point));
+        if (chosen == nullptr) {
+            return;
+        }
+        if (chosen == play) {
+            playRow(row);
+            return;
+        }
+        ensurePlayer();
+        if (chosen == next || chosen == append) {
+            if (player_->queueSize() == 0) {
+                player_->playQueue(vault_, {queued}, 0);
+            } else {
+                player_->enqueue({queued}, chosen == next);
+            }
+        } else if (chosen == reveal) {
+            const auto detail = QStringLiteral("%1\n%2\n%3")
+                                    .arg(track.title,
+                                        track.artist.isEmpty() ? QStringLiteral("Unknown artist")
+                                                               : track.artist,
+                                        track.provider.isEmpty()
+                                            ? QStringLiteral("Imported file")
+                                            : QStringLiteral("Saved from %1").arg(track.provider));
+            InWindowSheet sheet(this);
+            sheet.setTitle(QStringLiteral("Track details"));
+            sheet.setMessage(detail);
+            sheet.addButton(QStringLiteral("Close"), 0, false);
+            sheet.run();
+        }
+        if (chosen == next || chosen == append) {
+            // The bar is created on demand, so make it visible after queueing.
+            player_->setVisible(true);
+        }
+    });
 
     auto refreshPalette = [this] {
         const QColor ink = palette().color(QPalette::WindowText);
@@ -272,6 +378,21 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
 }
 
 void MusicLibraryPage::setVault(const std::shared_ptr<videovault::core::Vault>& vault) {
+    if (vault_ != vault) {
+        ++coverGeneration_;
+        if (coverPump_ != nullptr) {
+            coverPump_->stop();
+        }
+        // Closing the shared bar stops its worker and clears the queue; it is
+        // not deleted, because the gallery and other pages still use it.
+        if (player_ != nullptr) {
+            player_->close();
+            player_ = nullptr;
+        }
+        list_->clear();
+        tracks_.clear();
+        shown_.clear();
+    }
     vault_ = vault;
     rebuild();
 }
@@ -288,6 +409,17 @@ void MusicLibraryPage::refresh() {
 
 void MusicLibraryPage::rebuild() {
     tracks_.clear();
+    // Provider provenance is read once per rebuild: it is what turns a vault item
+    // into "the offline copy of a remote track" and gives the offline section
+    // something to show.
+    std::map<std::int64_t, videovault::core::TrackProvenance> provenance;
+    if (vault_ != nullptr && vault_->is_unlocked()) {
+        if (const auto listed = vault_->list_video_provenance(); listed) {
+            for (const auto& row : listed.value()) {
+                provenance[row.video_id] = row;
+            }
+        }
+    }
     if (vault_ != nullptr && vault_->is_unlocked()) {
         if (const auto listed = vault_->list_videos(); listed) {
             for (const auto& video : listed.value()) {
@@ -298,15 +430,27 @@ void MusicLibraryPage::rebuild() {
                 Track track;
                 track.id = video.id;
                 track.size = static_cast<qint64>(video.original_size);
+                track.added = static_cast<qint64>(video.imported_at);
+                if (const auto found = provenance.find(video.id); found != provenance.end()) {
+                    track.provider = QString::fromStdString(found->second.provider_id);
+                    track.album = QString::fromStdString(found->second.album);
+                    track.remoteId = QString::fromStdString(found->second.provider_track_id);
+                    if (!found->second.title.empty()) {
+                        track.title = QString::fromStdString(found->second.title);
+                    }
+                    if (!found->second.artist.empty()) {
+                        track.artist = QString::fromStdString(found->second.artist);
+                    }
+                }
                 // "Artist - Title.ext" is the convention a music file carries;
                 // anything else keeps its name and an empty artist line.
                 QString stem = withoutExtension(name).trimmed();
                 const int dash = stem.indexOf(QStringLiteral(" - "));
-                if (dash > 0) {
+                if (track.title.isEmpty()) {
+                    track.title = dash > 0 ? stem.mid(dash + 3).trimmed() : stem;
+                }
+                if (track.artist.isEmpty() && dash > 0) {
                     track.artist = stem.left(dash).trimmed();
-                    track.title = stem.mid(dash + 3).trimmed();
-                } else {
-                    track.title = stem;
                 }
                 tracks_.push_back(std::move(track));
             }
@@ -316,26 +460,129 @@ void MusicLibraryPage::rebuild() {
         const int byTitle = QString::compare(left.title, right.title, Qt::CaseInsensitive);
         return byTitle != 0 ? byTitle < 0 : left.id < right.id;
     });
+    rebuildGroups();
     applyFilter(search_ != nullptr ? search_->text() : QString());
+}
+
+void MusicLibraryPage::rebuildGroups() {
+    const QSignalBlocker block(group_);
+    const auto previous = group_->currentData();
+    group_->clear();
+    const bool albums = currentSection_ == AlbumsSection;
+    const bool artists = currentSection_ == ArtistsSection;
+    group_->setVisible(albums || artists);
+    if (!albums && !artists) {
+        return;
+    }
+    group_->addItem(albums ? QStringLiteral("All albums") : QStringLiteral("All artists"));
+    std::map<QString, QStringList> groups;
+    for (const auto& track : tracks_) {
+        const auto artist = track.artist.isEmpty() ? QStringLiteral("Unknown artist") : track.artist;
+        const auto album = track.album.isEmpty() ? QStringLiteral("Unknown album") : track.album;
+        const auto label = albums ? album + QStringLiteral(" — ") + artist : artist;
+        groups[label] = albums ? QStringList{track.artist, track.album} : QStringList{track.artist};
+    }
+    for (const auto& entry : groups) {
+        group_->addItem(entry.first, entry.second);
+    }
+    const auto index = group_->findData(previous);
+    group_->setCurrentIndex(index < 0 ? 0 : index);
 }
 
 void MusicLibraryPage::applyFilter(const QString& text) {
     shown_.clear();
     const QString needle = text.trimmed();
     for (const auto& track : tracks_) {
+        if ((currentSection_ == ArtistsSection || currentSection_ == AlbumsSection)
+            && group_->currentIndex() > 0) {
+            const auto keys = group_->currentData().toStringList();
+            if (keys.isEmpty() || track.artist != keys[0]
+                || (currentSection_ == AlbumsSection && (keys.size() != 2 || track.album != keys[1]))) {
+                continue;
+            }
+        }
+        // Every item here is an encrypted local item, including user-imported
+        // files; a provider identity is not a prerequisite for offline playback.
         if (needle.isEmpty() || track.title.contains(needle, Qt::CaseInsensitive)
-            || track.artist.contains(needle, Qt::CaseInsensitive)) {
+            || track.artist.contains(needle, Qt::CaseInsensitive)
+            || track.album.contains(needle, Qt::CaseInsensitive)
+            || track.provider.contains(needle, Qt::CaseInsensitive)) {
             shown_.push_back(track);
         }
+    }
+    switch (currentSection_) {
+    case ArtistsSection:
+        // Browsing by artist: the artist is the primary key, the title breaks
+        // ties, so one artist's tracks stay together.
+        std::sort(shown_.begin(), shown_.end(), [](const Track& left, const Track& right) {
+            const int byArtist = QString::compare(
+                left.artist.isEmpty() ? QStringLiteral("Unknown artist") : left.artist,
+                right.artist.isEmpty() ? QStringLiteral("Unknown artist") : right.artist,
+                Qt::CaseInsensitive);
+            if (byArtist != 0) {
+                return byArtist < 0;
+            }
+            const int byTitle = QString::compare(left.title, right.title, Qt::CaseInsensitive);
+            return byTitle != 0 ? byTitle < 0 : left.id < right.id;
+        });
+        break;
+    case AlbumsSection:
+        std::sort(shown_.begin(), shown_.end(), [](const Track& left, const Track& right) {
+            const auto byAlbum = QString::compare(left.album, right.album, Qt::CaseInsensitive);
+            if (byAlbum != 0) return byAlbum < 0;
+            const auto byArtist = QString::compare(left.artist, right.artist, Qt::CaseInsensitive);
+            if (byArtist != 0) return byArtist < 0;
+            const auto byTitle = QString::compare(left.title, right.title, Qt::CaseInsensitive);
+            return byTitle != 0 ? byTitle < 0 : left.id < right.id;
+        });
+        break;
+    case RecentSection:
+        std::sort(shown_.begin(), shown_.end(), [](const Track& left, const Track& right) {
+            if (left.added != right.added) {
+                return left.added > right.added; // newest first
+            }
+            return left.id > right.id;
+        });
+        break;
+    default:
+        std::sort(shown_.begin(), shown_.end(), [](const Track& left, const Track& right) {
+            const int byTitle = QString::compare(left.title, right.title, Qt::CaseInsensitive);
+            return byTitle != 0 ? byTitle < 0 : left.id < right.id;
+        });
+        break;
     }
     list_->clear();
     for (const auto& track : shown_) {
         auto* item = new QListWidgetItem(list_);
         item->setData(Qt::UserRole, static_cast<qlonglong>(track.id));
         item->setData(Qt::UserRole + 1, track.title);
-        item->setData(Qt::UserRole + 2, track.artist.isEmpty()
-            ? compactSize(track.size)
-            : QStringLiteral("%1 · %2").arg(track.artist, compactSize(track.size)));
+        // Second line: artist, provider and size, adapted to the section so the
+        // list reads the way the section promises (by artist, offline copy, …).
+        QString detail;
+        if (!track.artist.isEmpty()) {
+            detail = track.artist;
+        }
+        if (!track.provider.isEmpty()) {
+            const auto provider = track.provider.section(QLatin1Char('.'), -1);
+            QString label = provider;
+            if (label.startsWith(QStringLiteral("megavault"), Qt::CaseInsensitive)) {
+                label = label.mid(9);
+            }
+            if (!label.isEmpty()) {
+                label[0] = label[0].toUpper();
+            }
+            if (detail.isEmpty()) {
+                detail = label + QStringLiteral(" · offline copy");
+            } else if (currentSection_ == OfflineSection) {
+                detail = detail + QStringLiteral(" · ") + label;
+            }
+        }
+        if (detail.isEmpty()) {
+            detail = compactSize(track.size);
+        } else {
+            detail = detail + QStringLiteral(" · ") + compactSize(track.size);
+        }
+        item->setData(Qt::UserRole + 2, detail);
         item->setToolTip(track.title);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     }
@@ -343,13 +590,42 @@ void MusicLibraryPage::applyFilter(const QString& text) {
     list_->setVisible(any);
     empty_->setVisible(!any);
     if (count_ != nullptr) {
-        count_->setText(tracks_.empty() ? QString()
-            : QStringLiteral("%1 track%2").arg(tracks_.size())
-                  .arg(tracks_.size() == 1 ? QString() : QStringLiteral("s")));
+        QStringList artists;
+        for (const auto& track : shown_) {
+            const auto name = track.artist.isEmpty() ? QStringLiteral("Unknown artist")
+                                                     : track.artist;
+            if (!artists.contains(name)) {
+                artists.append(name);
+            }
+        }
+        const auto plural = [](const int n) { return n == 1 ? QString() : QStringLiteral("s"); };
+        switch (currentSection_) {
+        case ArtistsSection:
+            count_->setText(shown_.empty() ? QString()
+                : QStringLiteral("%1 artist%2 · %3 track%4")
+                      .arg(artists.size()).arg(plural(artists.size()))
+                      .arg(shown_.size()).arg(plural(shown_.size())));
+            break;
+        case RecentSection:
+            count_->setText(shown_.empty() ? QString()
+                : QStringLiteral("%1 recently added").arg(shown_.size()));
+            break;
+        case OfflineSection:
+            count_->setText(shown_.empty() ? QString()
+                : QStringLiteral("%1 offline track%2")
+                      .arg(shown_.size()).arg(plural(shown_.size())));
+            break;
+        default:
+            count_->setText(tracks_.empty() ? QString()
+                : QStringLiteral("%1 track%2")
+                      .arg(tracks_.size()).arg(plural(tracks_.size())));
+            break;
+        }
     }
     if (playAll_ != nullptr) {
         playAll_->setEnabled(any);
     }
+    startCoverLoads();
     if (!any) {
         empty_->setText(tracks_.empty()
             ? QStringLiteral("No music yet.\nImport MP3, FLAC, WAV, M4A or OGG files "
@@ -362,13 +638,101 @@ std::vector<MusicLibraryPage::Track> MusicLibraryPage::playableOrder() const {
     return shown_;
 }
 
-void MusicLibraryPage::ensurePlayer() {
-    if (player_ != nullptr) {
+
+void MusicLibraryPage::startCoverLoads() {
+    ++coverGeneration_;
+    coverCursor_ = std::max(0, list_->indexAt(QPoint(4, 4)).row());
+    const auto visible = list_->viewport()->rect().adjusted(0, -120, 0, 120);
+    // Keep cover pixels only around the viewport, not one icon for every track
+    // ever scrolled past. Metadata stays cheap; decrypted images stay bounded.
+    for (int row = 0; row < list_->count(); ++row) {
+        auto* item = list_->item(row);
+        if (!list_->visualItemRect(item).intersects(visible)) {
+            item->setData(Qt::DecorationRole, QVariant());
+        }
+    }
+    if (vault_ == nullptr || !vault_->is_unlocked() || shown_.empty()) {
+        if (coverPump_ != nullptr) {
+            coverPump_->stop();
+        }
         return;
     }
-    player_ = new MusicWindow(this);
-    player_->setVisible(false);
-    // At the bottom of the page, exactly where the library's own bar sits.
+    if (coverPump_ == nullptr) {
+        coverPump_ = new QTimer(this);
+        coverPump_->setSingleShot(true);
+        coverPump_->setInterval(0);
+        connect(coverPump_, &QTimer::timeout, this, [this] { loadNextCover(); });
+    }
+    coverPump_->start();
+}
+
+void MusicLibraryPage::loadNextCover() {
+    if (coverBusy_ || coverCursor_ >= static_cast<int>(shown_.size()) || vault_ == nullptr
+        || !vault_->is_unlocked()) {
+        return;
+    }
+    while (coverCursor_ < list_->count()) {
+        auto* item = list_->item(coverCursor_);
+        if (list_->visualItemRect(item).top() > list_->viewport()->height() + 120) {
+            return;
+        }
+        if (item->data(Qt::DecorationRole).isNull()) {
+            break;
+        }
+        ++coverCursor_;
+    }
+    if (coverCursor_ >= list_->count()) {
+        return;
+    }
+    coverBusy_ = true;
+    const auto row = coverCursor_++;
+    const auto generation = coverGeneration_;
+    const auto id = shown_[static_cast<std::size_t>(row)].id;
+    auto vault = vault_;
+    auto* watcher = new QFutureWatcher<QImage>(this);
+    connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, generation, row] {
+        const auto image = watcher->result();
+        watcher->deleteLater();
+        coverBusy_ = false;
+        if (generation != coverGeneration_ || row >= list_->count()
+            || vault_ == nullptr || !vault_->is_unlocked()) {
+            if (coverPump_ != nullptr && vault_ != nullptr && vault_->is_unlocked()) {
+                coverPump_->start(10);
+            }
+            return;
+        }
+        if (!image.isNull()) {
+            auto* item = list_->item(row);
+            if (item != nullptr) {
+                item->setData(Qt::DecorationRole,
+                    QIcon(QPixmap::fromImage(image.scaled(84, 84, Qt::KeepAspectRatio,
+                        Qt::SmoothTransformation))));
+            }
+        }
+        if (coverPump_ != nullptr) {
+            coverPump_->start(10);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([vault, id] {
+        QImage cover;
+        // The stored thumbnail is a decrypted JPEG; audio imports get one from
+        // their embedded picture, so a failed probe simply leaves the note tile.
+        const auto thumbnail = vault->display_thumbnail(id);
+        if (thumbnail) {
+            cover.loadFromData(thumbnail.value().bytes.data(),
+                static_cast<int>(thumbnail.value().bytes.size()));
+        }
+        return cover;
+    }));
+}
+
+void MusicLibraryPage::ensurePlayer() {
+    // The bar is one per process: this page borrows the same player the gallery
+    // uses, so a track started here keeps playing when the page changes.
+    player_ = MusicWindow::shared(this);
+    if (player_->parentWidget() != this) {
+        player_->setParent(this);
+    }
     if (auto* column = qobject_cast<QVBoxLayout*>(layout()); column != nullptr) {
         column->addWidget(player_);
     }

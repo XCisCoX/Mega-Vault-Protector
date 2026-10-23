@@ -11,6 +11,7 @@
 #include <QVector>
 #include <QWidget>
 #include <atomic>
+#include "videovault/core/provenance.hpp"
 #include <functional>
 #include <memory>
 class QNetworkAccessManager;
@@ -29,6 +30,9 @@ class Vault;
 }
 namespace videovault::app {
 class PluginAudioPlayer;
+class ByteSource;
+class RemoteStreamSource;
+class RemoteStreamImport;
 struct PluginCommand { QString id, title, inputLabel; };
 struct PluginSetting { QString id, title; bool defaultValue=false; };
 struct PluginManifest {
@@ -43,6 +47,10 @@ struct PluginManifest {
     bool allows(const QUrl &) const;
 };
 QString pluginArtistNames(const QJsonObject &);
+// True for every music-provider protocol the host implements. Keeping the test
+// in one place is what lets a second provider (SoundCloud) reuse the host's
+// network, playback and import pipeline without touching each call site.
+bool pluginProtocolIsMusic(const QString &protocol);
 bool pluginFlac(const QByteArray &);
 class PluginHost final : public QObject {
     Q_OBJECT
@@ -115,7 +123,9 @@ class MusicPluginPage final : public QWidget {
     std::shared_ptr<core::Vault> vault_, pinnedVault_;
     QNetworkAccessManager *network_;
     PluginAudioPlayer *player_;
-    QBuffer *buffer_;
+    std::unique_ptr<ByteSource> playbackSource_;
+    std::unique_ptr<RemoteStreamImport> streamImport_;
+    core::TrackProvenance pinnedProvenance_;
     QComboBox *providers_;
     QLineEdit *query_;
     QListWidget *results_;
@@ -143,17 +153,15 @@ class MusicPluginPage final : public QWidget {
     bool thumbnailBusy_ = false;
     QHash<QNetworkReply *, std::shared_ptr<QByteArray>> requestBuffers_;
 };
-// One row's download in the provider folder: fetch the track into RAM, verify
-// it really is FLAC, then encrypt it straight into the vault at the folder the
-// plugin's settings picked. Nothing is written to disk in the clear and no
-// temporary file is created. Two tracks run at a time so a click on several
-// rows never fans out into one connection per row.
+// Progressive row downloads: bounded network/import queues, encrypted staging
+// only, provenance resolution before any network request, two jobs at a time.
 class PluginTrackDownloader final : public QObject {
     Q_OBJECT
   public:
     // Row states, mirrored by the library's row buttons.
     enum State { Idle = 0, Queued = 1, Fetching = 2, Encrypting = 3, Saved = 4, Failed = 5 };
     explicit PluginTrackDownloader(PluginHost *, QObject *parent = nullptr);
+    ~PluginTrackDownloader() override;
     void setVault(std::shared_ptr<core::Vault>);
     // Queues one catalogue track (needs _id/trackId and a title).
     void enqueue(const QJsonObject &track);
@@ -177,6 +185,7 @@ class PluginTrackDownloader final : public QObject {
         QString id;
         QString name;
         QJsonObject item;
+        PluginManifest provider;
     };
     void pump();
     void start(const Job &);
@@ -188,6 +197,9 @@ class PluginTrackDownloader final : public QObject {
     QHash<QString, int> states_;
     QHash<QString, int> percent_;
     Fetcher fetcher_;
+    struct ActiveDownload;
+    QVector<std::shared_ptr<ActiveDownload>> downloads_;
+    quint64 generation_{0};
     int active_{0};
 };
 } // namespace videovault::app

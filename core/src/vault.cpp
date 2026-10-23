@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1317,6 +1318,64 @@ Result<bool> Vault::replace_video_content(
     return true;
 }
 
+Result<std::vector<MusicPlaylist>> Vault::list_music_playlists() const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    return impl_->database_.list_music_playlists();
+}
+
+Result<std::int64_t> Vault::create_music_playlist(const std::string_view name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    const auto normalized = normalize_entry_name(name);
+    if (normalized.empty()) return name_rejected();
+    return impl_->database_.create_music_playlist(normalized);
+}
+
+Result<bool> Vault::rename_music_playlist(const std::int64_t playlist_id, const std::string_view name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    const auto normalized = normalize_entry_name(name);
+    if (normalized.empty()) return name_rejected();
+    return impl_->database_.rename_music_playlist(playlist_id, normalized);
+}
+
+Result<bool> Vault::delete_music_playlist(const std::int64_t playlist_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    return impl_->database_.delete_music_playlist(playlist_id);
+}
+
+Result<bool> Vault::set_music_playlist_tracks(
+    const std::int64_t playlist_id, const std::span<const std::int64_t> track_ids) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) return locked_error();
+    // Validate the complete request before any writes, inside the database's
+    // reserved writer transaction. Do not trust extensions or provenance:
+    // opaque imports can be renamed, even by another open vault handle.
+    const auto validate_tracks = [&]() -> Result<bool> {
+        std::unordered_set<std::int64_t> seen;
+        for (const auto id : track_ids) {
+            if (id <= 0 || !seen.insert(id).second) {
+                return VaultError{VaultErrorCode::InvalidArgument, "invalid or duplicate music playlist track"};
+            }
+            auto row = impl_->database_.query_video(id);
+            if (!row) return row.error();
+            auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, impl_->session_, id);
+            if (!reader) return reader.error();
+            auto probed = internal::probe_audio_media(reader.value(), row.value().display_name.c_str(), true);
+            if (!probed) {
+                if (probed.error().code == VaultErrorCode::UnsupportedVideoFormat) {
+                    return VaultError{VaultErrorCode::InvalidArgument, "music playlist items must contain audio only"};
+                }
+                return probed.error();
+            }
+        }
+        return true;
+    };
+    return impl_->database_.set_music_playlist_tracks(playlist_id, track_ids, validate_tracks);
+}
+
 Result<std::vector<VideoInfo>> Vault::list_videos() const {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {
@@ -1469,6 +1528,7 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
     info.codec_name = probe.value().codec_name;
     info.title = probe.value().title;
     info.artist = probe.value().artist;
+    info.album = probe.value().album;
     return info;
 }
 

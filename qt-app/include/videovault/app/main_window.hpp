@@ -73,6 +73,7 @@ class TagFilterButton;
 class SettingsDialog;
 class PluginHost;
 class MusicPluginPage;
+class SoundCloudPage;
 class MusicLibraryPage;
 class PluginTrackDownloader;
 class ExtensionToolsPage;
@@ -190,6 +191,9 @@ private:
     void finishChangePassword();
     void openSettings();
     void openPluginMusic(const QString& query = QString());
+    // The SoundCloud provider owns its page: its API, paging and rights rules
+    // differ from the declarative provider, so it is not forced into it.
+    void openSoundCloud(const QString& query = QString());
     // The library's own music page: audio items, not a provider search.
     void openMusicLibrary();
     void offerPluginSearchRow();
@@ -236,6 +240,7 @@ private:
     void openExtensionTools(const QString& id = {});
     PluginHost* pluginHost_{nullptr};
     MusicPluginPage* pluginMusic_{nullptr};
+    SoundCloudPage* soundCloud_{nullptr};
     MusicLibraryPage* musicLibrary_{nullptr};
     PluginTrackDownloader* pluginDownloads_{nullptr};
     QPushButton* pluginMusicButton_{nullptr};

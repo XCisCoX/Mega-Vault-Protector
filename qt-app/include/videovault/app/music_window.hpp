@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QImage>
 #include <QString>
 #include <QWidget>
@@ -19,6 +20,8 @@ class QCloseEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
+class QListWidget;
+class QPushButton;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -34,6 +37,8 @@ namespace videovault::app {
 class AudioSink;
 class GlyphButton;
 class MediaDecoder;
+class LocalAudioReader;
+class LocalAudioPrefetch;
 class OrderPopup;
 class PlaylistPopup;
 class ProgressLine;
@@ -62,10 +67,25 @@ public:
     explicit MusicWindow(QWidget* parent = nullptr);
     ~MusicWindow() override;
 
+    // One player per process. Every page that offers playback borrows this bar
+    // and re-parents it into its own layout, so starting a second track never
+    // creates a second audio device, a second queue or a second tray icon.
+    static MusicWindow* shared(QWidget* owner);
+    [[nodiscard]] static MusicWindow* instance();
+
     void playQueue(
         const std::shared_ptr<videovault::core::Vault>& vault,
         const std::vector<MusicTrack>& tracks,
         int index);
+    // Queue management for the page that owns the bar. `playNext` inserts in
+    // playback order (also reverse/shuffle), otherwise tracks go to the end.
+    // An empty bar needs playQueue(vault, tracks, 0) to establish its vault.
+    void enqueue(const std::vector<MusicTrack>& tracks, bool playNext);
+    // Tracks currently in the queue, for a queue view or a test.
+    [[nodiscard]] std::size_t queueSize() const { return tracks_.size(); }
+    [[nodiscard]] bool isPlaying() const { return !tracks_.empty() && !paused_.load() && !ended_.load() && errorText_.isEmpty(); }
+    void setExpanded(bool expanded);
+    [[nodiscard]] bool isExpanded() const { return expanded_; }
     // Leave the bar up and the position where it is. A video should not
     // tear the player down.
     void pauseForVideo();
@@ -129,6 +149,15 @@ private:
     QString formatTime(std::int64_t ms) const;
     void seekBy(std::int64_t deltaMs);
     void requestCovers();
+    void syncExpandedQueue();
+    void syncExpandedSong();
+    void removeQueueRow(int row);
+    void moveQueueRow(int row, int delta);
+    void setPaused(bool paused);
+    void stopPlayback();
+    void prepareNextTrack();
+    void invalidateNextTrack();
+    void adoptPendingTrack(bool prepare = true);
 
     std::shared_ptr<videovault::core::Vault> vault_;
     std::vector<MusicTrack> tracks_;
@@ -143,7 +172,27 @@ private:
     std::vector<int> history_;
     std::vector<int> bag_;
 
-    std::unique_ptr<MediaDecoder> decoder_;
+    std::unique_ptr<LocalAudioPrefetch> prefetch_;
+    struct NextTrack {
+        std::uint64_t ticket{0};
+        bool updating{false};
+        int index{-1};
+        std::int64_t id{0};
+        QByteArray hint;
+    };
+    struct PendingTrack {
+        int index{-1};
+        std::int64_t id{0};
+        std::int64_t duration{0};
+        QString title, artist, album;
+        QImage cover;
+    };
+    std::mutex chainMutex_;
+    NextTrack nextTrack_;
+    PendingTrack pendingTrack_;
+    std::uint64_t nextTicket_{0};
+    bool adoptingTrack_{false};
+    bool terminalEnded_{false};
     std::unique_ptr<TimeStretch> stretch_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
@@ -177,6 +226,19 @@ private:
     GlyphButton* repeatButton_{nullptr};
     GlyphButton* speedButton_{nullptr};
     GlyphButton* closeButton_{nullptr};
+    QPushButton* expandButton_{nullptr};
+    QWidget* expandedPanel_{nullptr};
+    QWidget* expandedOptions_{nullptr};
+    QLabel* expandedCover_{nullptr};
+    QLabel* expandedTitle_{nullptr};
+    QLabel* expandedDetail_{nullptr};
+    QLabel* queueSummary_{nullptr};
+    QListWidget* queueList_{nullptr};
+    QPushButton* queueJump_{nullptr};
+    QPushButton* queueRemove_{nullptr};
+    QPushButton* queueUp_{nullptr};
+    QPushButton* queueDown_{nullptr};
+    bool expanded_{false};
     QLabel* nameLabel_{nullptr};
     QLabel* timeLabel_{nullptr};
     ProgressLine* progress_{nullptr};
@@ -208,6 +270,7 @@ private:
     };
     std::shared_ptr<NoteProbe> noteProbe_{std::make_shared<NoteProbe>()};
     std::atomic<int> coverSerial_{0};
+    std::atomic<std::uint64_t> playbackSerial_{0};
     std::unordered_map<std::int64_t, SongTags> tags_;
 };
 

@@ -1273,7 +1273,8 @@ Result<MediaProbeResult> probe_media(PackageReader& reader) {
     return result;
 }
 
-Result<MediaProbeResult> probe_audio_media(PackageReader& reader, const char* name_hint) {
+Result<MediaProbeResult> probe_audio_media(
+    PackageReader& reader, const char* name_hint, const bool require_audio_only) {
     const char* hint = (name_hint != nullptr && name_hint[0] != '\0') ? name_hint : "audio.mp3";
     auto handle = try_open_format(reader, hint);
     if (!handle) {
@@ -1295,6 +1296,16 @@ Result<MediaProbeResult> probe_audio_media(PackageReader& reader, const char* na
         return VaultError{VaultErrorCode::UnsupportedVideoFormat,
             "the media container has no audio stream"};
     }
+    if (require_audio_only) {
+        for (unsigned int i = 0; i < format->nb_streams; ++i) {
+            const auto* stream = format->streams[i];
+            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO
+                && (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0) {
+                return VaultError{VaultErrorCode::InvalidArgument,
+                    "music playlists cannot contain video items"};
+            }
+        }
+    }
     MediaProbeResult result;
     result.duration_ms = duration_milliseconds(format, audio);
     result.codec_name = avcodec_get_name(audio->codecpar->codec_id);
@@ -1313,13 +1324,18 @@ Result<MediaProbeResult> probe_audio_media(PackageReader& reader, const char* na
     static const char* const kTitle[] = {"title", "TIT2", nullptr};
     static const char* const kArtist[] = {
         "artist", "album_artist", "performer", "TPE1", "TPE2", nullptr};
+    static const char* const kAlbum[] = {"album", "TALB", nullptr};
     result.title = read_tag(format->metadata, kTitle);
     result.artist = read_tag(format->metadata, kArtist);
+    result.album = read_tag(format->metadata, kAlbum);
     if (result.title.empty()) {
         result.title = read_tag(audio->metadata, kTitle);
     }
     if (result.artist.empty()) {
         result.artist = read_tag(audio->metadata, kArtist);
+    }
+    if (result.album.empty()) {
+        result.album = read_tag(audio->metadata, kAlbum);
     }
     return result;
 }

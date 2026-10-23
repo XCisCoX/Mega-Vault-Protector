@@ -17,7 +17,7 @@ class PluginHttp(private val manifest: PluginManifest) : Closeable {
     private val tls = SSLContext.getInstance("TLS").apply { init(null, null, null) }.socketFactory
     override fun close() { cancelled = true; connection?.disconnect() }
     private fun checkActive() { if (cancelled || Thread.currentThread().isInterrupted) throw IOException("Request cancelled") }
-    private fun connect(url: String): HttpsURLConnection {
+    private fun connect(url: String, position: Long = 0, method: String = "GET"): HttpsURLConnection {
         var at = manifest.checkUrl(url)
         repeat(5) {
             checkActive()
@@ -35,6 +35,8 @@ class PluginHttp(private val manifest: PluginManifest) : Closeable {
             c.setRequestProperty("User-Agent", "MegaVaultProtect/2.0.3 (music plugin)")
             c.setRequestProperty("Accept-Encoding", "identity")
             c.setRequestProperty("Cache-Control", "no-store")
+            c.requestMethod = method
+            if (position > 0) c.setRequestProperty("Range", "bytes=$position-")
             checkActive()
             val status = c.responseCode
             if (status in listOf(301,302,303,307,308)) {
@@ -42,11 +44,27 @@ class PluginHttp(private val manifest: PluginManifest) : Closeable {
                 c.disconnect()
                 at = manifest.checkUrl(at.resolve(next).toASCIIString())
             } else {
-                require(status == 200) { "Provider request failed ($status)" }
+                require(status == 200 || (position > 0 && status == 206)) { "Provider request failed ($status)" }
+                require(c.getHeaderField("Content-Encoding").orEmpty() in setOf("", "identity")) { "Encoded responses are unsupported" }
+                if (position > 0) require(status == 206 && c.getHeaderField("Content-Range").orEmpty().startsWith("bytes $position-")) { "Provider does not support this seek" }
                 return c
             }
         }
         throw IOException("Too many provider redirects")
+    }
+    fun absolute(path: String): String = if (path.startsWith("https://")) path else manifest.baseUrl.trimEnd('/') + path
+    fun jsonUrl(url: String): JSONObject {
+        val bytes = request(absolute(url), 1024 * 1024)
+        try { return JSONObject(bytes.toString(Charsets.UTF_8)) } finally { bytes.fill(0) }
+    }
+    fun stream(url: String, position: Long = 0): HttpsURLConnection = connect(absolute(url), position)
+    fun text(url: String): String {
+        val bytes = request(absolute(url), 1024 * 1024)
+        try { return bytes.toString(Charsets.UTF_8) } finally { bytes.fill(0) }
+    }
+    fun contentSize(url: String): Long {
+        val c = connect(absolute(url), method = "HEAD")
+        try { return c.contentLengthLong } finally { c.disconnect(); connection = null }
     }
     fun json(path: String): JSONObject {
         val bytes = request(manifest.baseUrl.trimEnd('/') + path, 1024 * 1024)
