@@ -56,6 +56,10 @@ set(MVP_APP_SOURCES
     src/main.cpp
     src/app_update.cpp
     src/main_window.cpp
+    # This app page calls MusicWindow; keep it out of the reusable provider
+    # library so provider-only tests don't inherit unresolved player symbols.
+    src/soundcloud_page.cpp
+    include/videovault/app/soundcloud_page.hpp
     src/media_decoder.cpp
     src/local_audio_pipeline.cpp
     src/player_window.cpp
@@ -113,11 +117,9 @@ add_library(MegaVaultPlugins STATIC src/plugin_host.cpp src/plugin_audio.cpp src
     src/soundcloud_provider.cpp
     src/soundcloud_transport.cpp
     src/soundcloud_hls_source.cpp
-    src/soundcloud_page.cpp
     src/music_resolver.cpp
     include/videovault/app/music_resolver.hpp
     include/videovault/app/soundcloud_provider.hpp
-    include/videovault/app/soundcloud_page.hpp
     include/videovault/app/plugin_audio.hpp include/videovault/app/plugin_tools.hpp include/videovault/app/plugin_host.hpp
     include/videovault/app/byte_source.hpp include/videovault/app/remote_stream_source.hpp
     resources/plugins.qrc)
