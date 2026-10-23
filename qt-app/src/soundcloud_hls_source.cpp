@@ -61,7 +61,9 @@ struct Input {
         if (memory.bytes.size() >= 3 * 188 && static_cast<unsigned char>(memory.bytes[0]) == 0x47
             && static_cast<unsigned char>(memory.bytes[188]) == 0x47 && static_cast<unsigned char>(memory.bytes[376]) == 0x47)
             hint = av_find_input_format("mpegts");
-        const auto opened = avformat_open_input(&format, nullptr, hint, &options);
+        // FFmpeg 4.x declares the format parameter non-const.
+        const auto opened = avformat_open_input(&format, nullptr,
+            const_cast<AVInputFormat*>(hint), &options);
         av_dict_free(&options);
         return opened >= 0 && avformat_find_stream_info(format, nullptr) >= 0;
     }
@@ -110,7 +112,13 @@ struct SoundCloudHlsSource::Impl {
     Impl(QUrl url, bool local) : manifest(std::move(url)), fixture(local) {}
     ~Impl() { sodium_memzero(ring.data(), ring.size()); }
     void fail(QString text) { std::lock_guard<std::mutex> lock(mutex); error = std::move(text); done = true; wake.notify_all(); }
-    static int write(void* opaque, const uint8_t* data, int size) {
+#if LIBAVFORMAT_VERSION_MAJOR >= 60
+    using AvioWriteData = const uint8_t*;
+#else
+    // FFmpeg 4.x/5.x declare the callback payload as uint8_t*.
+    using AvioWriteData = uint8_t*;
+#endif
+    static int write(void* opaque, AvioWriteData data, int size) {
         auto& self = *static_cast<Impl*>(opaque); int copied = 0;
         std::unique_lock<std::mutex> lock(self.mutex);
         while (copied < size && !self.cancelled) {
