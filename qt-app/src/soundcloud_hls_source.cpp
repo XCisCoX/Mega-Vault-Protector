@@ -112,10 +112,10 @@ struct SoundCloudHlsSource::Impl {
     Impl(QUrl url, bool local) : manifest(std::move(url)), fixture(local) {}
     ~Impl() { sodium_memzero(ring.data(), ring.size()); }
     void fail(QString text) { std::lock_guard<std::mutex> lock(mutex); error = std::move(text); done = true; wake.notify_all(); }
-#if LIBAVFORMAT_VERSION_MAJOR >= 60
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
     using AvioWriteData = const uint8_t*;
 #else
-    // FFmpeg 4.x/5.x declare the callback payload as uint8_t*.
+    // FFmpeg 4.x through 6.x declare the callback payload as uint8_t*.
     using AvioWriteData = uint8_t*;
 #endif
     static int write(void* opaque, AvioWriteData data, int size) {

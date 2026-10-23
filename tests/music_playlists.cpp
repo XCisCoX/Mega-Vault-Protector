@@ -1,5 +1,6 @@
 // Real SQLCipher vaults, authenticated packages and FFmpeg media probes.
 // No mocked persistence or media classification.
+#include "videovault/core/ffmpeg_compat.hpp"
 #include "videovault/core/vault.hpp"
 #include "internal/database.hpp"
 #include "internal/metadata.hpp"
@@ -103,7 +104,7 @@ std::vector<unsigned char> audioVideo() {
     audio->codecpar->bits_per_coded_sample = 16;
     audio->codecpar->block_align = 2;
     audio->codecpar->bit_rate = 128000;
-    av_channel_layout_default(&audio->codecpar->ch_layout, 1);
+    videovault::core::ffmpeg_compat::default_channels(audio->codecpar, 1);
     check(avio_open_dyn_buf(&raw->pb) >= 0, "open AVI fixture buffer");
     check(avformat_write_header(raw, nullptr) >= 0, "write AVI fixture header");
     for (int i = 0; i < 2; ++i) {
