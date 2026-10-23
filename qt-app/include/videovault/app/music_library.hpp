@@ -90,6 +90,11 @@ private:
     std::shared_ptr<videovault::core::Vault> vault_;
     std::vector<Track> tracks_;
     std::vector<Track> shown_;
+    // Encrypted playlists, read from the vault on every rebuild.
+    std::vector<Playlist> playlists_;
+    // 0 lists the playlists themselves; otherwise the list shows one playlist's
+    // tracks in their stored order.
+    std::int64_t openPlaylistId_{0};
 
     QLineEdit* search_{nullptr};
     QListWidget* list_{nullptr};
@@ -99,6 +104,7 @@ private:
     QPushButton* provider_{nullptr};
     QComboBox* section_{nullptr};
     QComboBox* group_{nullptr};
+    QPushButton* playlistBack_{nullptr};
     void rebuildGroups();
     QTimer* coverPump_{nullptr};
     int coverCursor_{0};

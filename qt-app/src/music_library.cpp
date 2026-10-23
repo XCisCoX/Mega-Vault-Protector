@@ -31,6 +31,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <map>
 
 namespace videovault::app {
@@ -211,6 +212,7 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     section_->addItem(QStringLiteral("Recently added"));
     section_->addItem(QStringLiteral("Offline music"));
     section_->addItem(QStringLiteral("Albums"));
+    section_->addItem(QStringLiteral("Playlists"));
     section_->setToolTip(QStringLiteral("Choose what this list shows"));
     group_ = new QComboBox(this);
     group_->setObjectName(QStringLiteral("musicGroupSelect"));
@@ -246,8 +248,22 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     auto* filters = new QWidget(this);
     auto* filterLayout = new QHBoxLayout(filters);
     filterLayout->setContentsMargins(16, 8, 16, 8);
+    playlistBack_ = new QPushButton(QStringLiteral("‹ Playlists"), filters);
+    playlistBack_->setObjectName(QStringLiteral("musicPlaylistBack"));
+    playlistBack_->setCursor(Qt::PointingHandCursor);
+    playlistBack_->setFocusPolicy(Qt::NoFocus);
+    playlistBack_->setStyleSheet(QStringLiteral(
+        "QPushButton { color: palette(highlight); background: transparent; border: none;"
+        " padding: 4px 8px; font-weight: 600; }"
+        "QPushButton:hover { background: palette(alternate-base); border-radius: 12px; }"));
+    playlistBack_->hide();
+    connect(playlistBack_, &QPushButton::clicked, this, [this] {
+        openPlaylistId_ = 0;
+        applyFilter(search_ != nullptr ? search_->text() : QString());
+    });
     filterLayout->addWidget(section_);
     filterLayout->addWidget(search_, 1);
+    filterLayout->addWidget(playlistBack_);
     root->addWidget(filters);
     root->addWidget(group_);
 
@@ -301,13 +317,45 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
             return;
         }
         const auto& track = shown_[static_cast<std::size_t>(row)];
+        QMenu menu(list_);
+        // In the playlist list the row is a playlist, so the actions are the
+        // playlist's own; anywhere else they are the track's.
+        if (currentSection_ == PlaylistsSection && openPlaylistId_ == 0) {
+            const auto* chosenPlaylist = playlistById(std::as_const(*item).data(Qt::UserRole).toLongLong());
+            if (chosenPlaylist == nullptr) {
+                return;
+            }
+            auto* open = menu.addAction(QStringLiteral("Open"));
+            auto* rename = menu.addAction(QStringLiteral("Rename…"));
+            auto* remove = menu.addAction(QStringLiteral("Delete playlist…"));
+            auto* picked = menu.exec(list_->mapToGlobal(point));
+            if (picked == open) {
+                openPlaylist(chosenPlaylist->id);
+            } else if (picked == rename) {
+                renamePlaylist(*chosenPlaylist);
+            } else if (picked == remove) {
+                deletePlaylist(*chosenPlaylist);
+            }
+            return;
+        }
         MusicTrack queued;
         queued.id = track.id;
         queued.title = track.title;
-        QMenu menu(list_);
         auto* play = menu.addAction(QStringLiteral("Play"));
         auto* next = menu.addAction(QStringLiteral("Play next"));
         auto* append = menu.addAction(QStringLiteral("Add to queue"));
+        menu.addSeparator();
+        auto* addTo = menu.addMenu(QStringLiteral("Add to playlist"));
+        auto* newPlaylist = addTo->addAction(QStringLiteral("New playlist…"));
+        std::vector<std::int64_t> targetPlaylists;
+        for (const auto& playlist : playlists_) {
+            targetPlaylists.push_back(playlist.id);
+            addTo->addAction(playlist.name);
+        }
+        if (openPlaylistId_ != 0) {
+            addTo->addSeparator();
+            addTo->addAction(QStringLiteral("Remove from this playlist"));
+        }
         menu.addSeparator();
         auto* reveal = menu.addAction(QStringLiteral("Details"));
         auto* chosen = menu.exec(list_->mapToGlobal(point));
@@ -317,6 +365,33 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
         if (chosen == play) {
             playRow(row);
             return;
+        }
+        if (chosen == newPlaylist) {
+            createPlaylist(track.id);
+            return;
+        }
+        if (chosen != nullptr && chosen->parent() == addTo
+            && chosen != newPlaylist) {
+            const int index = addTo->actions().indexOf(chosen) - 1;
+            if (index == static_cast<int>(targetPlaylists.size())) {
+                // "Remove from this playlist"
+                if (auto* playlist = const_cast<Playlist*>(playlistById(openPlaylistId_))) {
+                    auto ids = playlist->trackIds;
+                    ids.erase(std::remove(ids.begin(), ids.end(), track.id), ids.end());
+                    changePlaylistTracks(playlist->id, std::move(ids));
+                }
+                return;
+            }
+            if (index >= 0 && index < static_cast<int>(targetPlaylists.size())) {
+                if (const auto* playlist = playlistById(targetPlaylists[static_cast<std::size_t>(index)])) {
+                    auto ids = playlist->trackIds;
+                    if (std::find(ids.begin(), ids.end(), track.id) == ids.end()) {
+                        ids.push_back(track.id);
+                    }
+                    changePlaylistTracks(playlist->id, std::move(ids));
+                }
+                return;
+            }
         }
         ensurePlayer();
         if (chosen == next || chosen == append) {
@@ -407,8 +482,116 @@ void MusicLibraryPage::refresh() {
     rebuild();
 }
 
+const MusicLibraryPage::Playlist* MusicLibraryPage::playlistById(const std::int64_t id) const {
+    for (const auto& playlist : playlists_) {
+        if (playlist.id == id) {
+            return &playlist;
+        }
+    }
+    return nullptr;
+}
+
+void MusicLibraryPage::openPlaylist(const std::int64_t id) {
+    openPlaylistId_ = id;
+    applyFilter(search_ != nullptr ? search_->text() : QString());
+}
+
+void MusicLibraryPage::createPlaylist(const std::int64_t initialTrack) {
+    if (vault_ == nullptr || !vault_->is_unlocked()) {
+        return;
+    }
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("New playlist"));
+    sheet.setMessage(QStringLiteral("Give the playlist a name. It is stored inside the "
+                                    "encrypted vault, like the tracks themselves."));
+    auto* entry = sheet.addTextEntry(QLineEdit::Normal, QString(), QStringLiteral("Playlist name"));
+    sheet.addButton(QStringLiteral("Create"), 1, true, QStringLiteral("plus"));
+    sheet.addButton(QStringLiteral("Cancel"), 0, false);
+    if (sheet.run() != 1) {
+        return;
+    }
+    const auto name = sheet.text().trimmed();
+    if (name.isEmpty()) {
+        return;
+    }
+    const auto created = vault_->create_music_playlist(name.toStdString());
+    if (!created) {
+        return;
+    }
+    if (initialTrack > 0) {
+        const std::array<std::int64_t, 1> ids{initialTrack};
+        (void)vault_->set_music_playlist_tracks(created.value(), ids);
+    }
+    openPlaylistId_ = created.value();
+    rebuild();
+}
+
+void MusicLibraryPage::renamePlaylist(const Playlist& playlist) {
+    if (vault_ == nullptr || !vault_->is_unlocked()) {
+        return;
+    }
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("Rename playlist"));
+    sheet.setMessage(playlist.name);
+    sheet.addTextEntry(QLineEdit::Normal, playlist.name, QStringLiteral("Playlist name"));
+    sheet.addButton(QStringLiteral("Save"), 1, true);
+    sheet.addButton(QStringLiteral("Cancel"), 0, false);
+    if (sheet.run() != 1) {
+        return;
+    }
+    const auto name = sheet.text().trimmed();
+    if (name.isEmpty()) {
+        return;
+    }
+    (void)vault_->rename_music_playlist(playlist.id, name.toStdString());
+    rebuild();
+}
+
+void MusicLibraryPage::deletePlaylist(const Playlist& playlist) {
+    if (vault_ == nullptr || !vault_->is_unlocked()) {
+        return;
+    }
+    InWindowSheet sheet(this);
+    sheet.setTitle(QStringLiteral("Delete playlist"));
+    sheet.setMessage(QStringLiteral("Delete \"%1\"?\n\nThe encrypted tracks stay in your "
+                                    "library; only the playlist is removed.").arg(playlist.name));
+    sheet.addButton(QStringLiteral("Delete playlist"), 1, true, QStringLiteral("trash"));
+    sheet.addButton(QStringLiteral("Cancel"), 0, false);
+    if (sheet.run() != 1) {
+        return;
+    }
+    (void)vault_->delete_music_playlist(playlist.id);
+    if (openPlaylistId_ == playlist.id) {
+        openPlaylistId_ = 0;
+    }
+    rebuild();
+}
+
+void MusicLibraryPage::changePlaylistTracks(
+    const std::int64_t id, std::vector<std::int64_t> ids) {
+    if (vault_ == nullptr || !vault_->is_unlocked()) {
+        return;
+    }
+    // The core takes the complete desired sequence and validates every id, so a
+    // refused edit leaves the stored playlist untouched.
+    (void)vault_->set_music_playlist_tracks(id, ids);
+    rebuild();
+}
+
 void MusicLibraryPage::rebuild() {
     tracks_.clear();
+    playlists_.clear();
+    if (vault_ != nullptr && vault_->is_unlocked()) {
+        if (const auto listed = vault_->list_music_playlists(); listed) {
+            for (const auto& entry : listed.value()) {
+                Playlist playlist;
+                playlist.id = entry.id;
+                playlist.name = QString::fromStdString(entry.name);
+                playlist.trackIds = entry.track_ids;
+                playlists_.push_back(std::move(playlist));
+            }
+        }
+    }
     // Provider provenance is read once per rebuild: it is what turns a vault item
     // into "the offline copy of a remote track" and gives the offline section
     // something to show.
@@ -492,6 +675,20 @@ void MusicLibraryPage::rebuildGroups() {
 void MusicLibraryPage::applyFilter(const QString& text) {
     shown_.clear();
     const QString needle = text.trimmed();
+    if (openPlaylistId_ != 0) {
+        // Playlist order is the order the user arranged, not alphabetical.
+        if (const auto* playlist = playlistById(openPlaylistId_); playlist != nullptr) {
+            for (const auto id : playlist->trackIds) {
+                for (const auto& track : tracks_) {
+                    if (track.id == id) {
+                        shown_.push_back(track);
+                        break;
+                    }
+                }
+            }
+        }
+        return;
+    }
     for (const auto& track : tracks_) {
         if ((currentSection_ == ArtistsSection || currentSection_ == AlbumsSection)
             && group_->currentIndex() > 0) {
@@ -551,6 +748,40 @@ void MusicLibraryPage::applyFilter(const QString& text) {
         });
         break;
     }
+    // The Playlists section lists the playlists themselves until one is opened.
+    if (currentSection_ == PlaylistsSection && openPlaylistId_ == 0) {
+        list_->clear();
+        for (const auto& playlist : playlists_) {
+            auto* row = new QListWidgetItem(list_);
+            row->setData(Qt::UserRole, static_cast<qlonglong>(playlist.id));
+            row->setData(Qt::UserRole + 1, playlist.name);
+            row->setData(Qt::UserRole + 2,
+                playlist.trackIds.empty()
+                    ? QStringLiteral("Empty playlist")
+                    : QStringLiteral("%1 track%2").arg(playlist.trackIds.size())
+                          .arg(playlist.trackIds.size() == 1 ? QString() : QStringLiteral("s")));
+            row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+            row->setToolTip(playlist.name);
+        }
+        list_->setVisible(!playlists_.empty());
+        empty_->setVisible(playlists_.empty());
+        if (playlists_.empty()) {
+            empty_->setText(QStringLiteral("No playlists yet.\nSelect tracks and use "
+                                           "\"Add to playlist\" to start one."));
+        }
+        if (count_ != nullptr) {
+            count_->setText(playlists_.empty() ? QString()
+                : QStringLiteral("%1 playlist%2").arg(playlists_.size())
+                      .arg(playlists_.size() == 1 ? QString() : QStringLiteral("s")));
+        }
+        if (playAll_ != nullptr) {
+            playAll_->setEnabled(false);
+        }
+        if (coverPump_ != nullptr) {
+            coverPump_->stop();
+        }
+        return;
+    }
     list_->clear();
     for (const auto& track : shown_) {
         auto* item = new QListWidgetItem(list_);
@@ -585,6 +816,15 @@ void MusicLibraryPage::applyFilter(const QString& text) {
         item->setData(Qt::UserRole + 2, detail);
         item->setToolTip(track.title);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+    }
+    if (playlistBack_ != nullptr) {
+        const bool inside = openPlaylistId_ != 0;
+        playlistBack_->setVisible(inside);
+        if (inside) {
+            const auto* playlist = playlistById(openPlaylistId_);
+            const auto name = playlist != nullptr ? playlist->name : QStringLiteral("Playlist");
+            playlistBack_->setText(QStringLiteral("‹ %1").arg(name));
+        }
     }
     const bool any = !shown_.empty();
     list_->setVisible(any);
@@ -739,7 +979,18 @@ void MusicLibraryPage::ensurePlayer() {
 }
 
 void MusicLibraryPage::playRow(const int row) {
-    if (vault_ == nullptr || !vault_->is_unlocked() || shown_.empty()) {
+    if (vault_ == nullptr || !vault_->is_unlocked()) {
+        return;
+    }
+    // In the Playlists section a row is a playlist, not a track.
+    if (currentSection_ == PlaylistsSection && openPlaylistId_ == 0) {
+        const auto* item = list_->item(row);
+        if (item != nullptr) {
+            openPlaylist(std::as_const(*item).data(Qt::UserRole).toLongLong());
+        }
+        return;
+    }
+    if (shown_.empty()) {
         return;
     }
     const int index = std::clamp(row, 0, static_cast<int>(shown_.size()) - 1);

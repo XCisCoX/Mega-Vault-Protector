@@ -110,7 +110,7 @@ void SoundCloudPage::setVault(const std::shared_ptr<core::Vault>& vault) {
     if (browseCancel_) *browseCancel_ = true;
     stopPlayback(); cancelImport();
     vault_ = vault; resolver_ = vault ? std::make_unique<MusicResolver>(vault) : nullptr;
-    covers_.clear(); coverBusy_ = false; results_->clear(); history_.clear(); next_ = {}; currentBrowse_ = {};
+    covers_.clear(); coverBusy_ = false; results_->clear(); history_.clear(); next_ = QUrl(); currentBrowse_ = QUrl();
     query_->clear(); context_.clear(); title_->setText(tr("SoundCloud")); status_->clear(); nowPlaying_->clear(); more_->hide();
     if (auto* editor = findChild<QWidget*>("soundCloudIdentityEditor")) delete editor;
     reloadKeyState(); refreshImportButton();
@@ -171,7 +171,7 @@ void SoundCloudPage::browse(QUrl url, QString kind, QString context, bool append
     if (browseCancel_) *browseCancel_ = true;
     browseCancel_ = std::make_shared<std::atomic<bool>>(false); covers_.clear(); coverBusy_ = false;
     if (!append) { results_->clear(); currentBrowse_ = url; }
-    browseKind_ = kind; context_ = context; next_ = {}; more_->hide(); status_->setText(tr("Loading SoundCloud…")); title_->setText(context);
+    browseKind_ = kind; context_ = context; next_ = QUrl(); more_->hide(); status_->setText(tr("Loading SoundCloud…")); title_->setText(context);
     request(SoundCloudProvider::withClientId(url,apiKey()), 4 << 20, browseCancel_, [this, kind, context, append](QByteArray body) {
         QJsonParseError error; const auto doc = QJsonDocument::fromJson(body, &error);
         if (error.error != QJsonParseError::NoError || (!doc.isObject() && !doc.isArray())) { status_->setText(tr("Invalid SoundCloud catalogue response.")); return; }
