@@ -393,6 +393,113 @@ struct GalleryPerformanceTestAccess {
 
     // The sheet's action row: three long labels in a 420px card used to be cut
     // mid-word ("Lock and stop sha"). It has to either fit the card or stack.
+    // Keyboard contract for the custom prompt: Enter runs the default action,
+    // Escape cancels, and Tab/arrows choose between actions.
+    static int sheetKeys() {
+        int failures = 0;
+        const auto check = [&failures](bool condition, const char* message) {
+            if (!condition) {
+                std::fprintf(stderr, "FAIL %s\n", message);
+                ++failures;
+            }
+        };
+        QWidget host;
+        host.resize(720, 520);
+        host.show();
+        QApplication::processEvents();
+
+        const auto sendKey = [](QWidget* target, const int key, Qt::KeyboardModifiers mods = Qt::NoModifier) {
+            QKeyEvent press(QEvent::KeyPress, key, mods);
+            QApplication::sendEvent(target, &press);
+        };
+        const auto makeSheet = [&host](InWindowSheet*& sheet, QPushButton*& primary,
+                                       QPushButton*& cancel) {
+            sheet = new InWindowSheet(&host);
+            sheet->setTitle(QStringLiteral("Keyboard"));
+            sheet->setMessage(QStringLiteral("Choose an action with the keyboard."));
+            primary = sheet->addButton(QStringLiteral("Save"), 1, true);
+            sheet->addButton(QStringLiteral("Discard"), 2, false);
+            cancel = sheet->addButton(QStringLiteral("Cancel"), 0, false);
+        };
+
+        // Enter picks the primary (default) action.
+        {
+            InWindowSheet* sheet = nullptr;
+            QPushButton* primary = nullptr;
+            QPushButton* cancel = nullptr;
+            makeSheet(sheet, primary, cancel);
+            int result = -1;
+            InWindowSheet::setTestDriver([&](InWindowSheet* driver) {
+                check(driver->defaultAction() == primary, "the primary action is the Enter default");
+                check(primary->focusPolicy() != Qt::NoFocus, "sheet buttons accept keyboard focus");
+                check(primary->property("sheetDefault").toBool(), "the default action is marked for styling");
+                sendKey(driver, Qt::Key_Return);
+                result = 0; // finish() already ran
+            });
+            const int outcome = sheet->run();
+            InWindowSheet::setTestDriver({});
+            check(outcome == 1, "Enter activates the default action");
+            delete sheet;
+        }
+
+        // Tab moves the focus, and Enter then runs the focused action.
+        {
+            InWindowSheet* sheet = nullptr;
+            QPushButton* primary = nullptr;
+            QPushButton* cancel = nullptr;
+            makeSheet(sheet, primary, cancel);
+            int outcome = -1;
+            InWindowSheet::setTestDriver([&](InWindowSheet* driver) {
+                sendKey(driver, Qt::Key_Tab);
+                sendKey(driver, Qt::Key_Tab);
+                check(QApplication::focusWidget() == cancel, "Tab walks to the third action");
+                sendKey(driver, Qt::Key_Return);
+            });
+            outcome = sheet->run();
+            InWindowSheet::setTestDriver({});
+            check(outcome == 0, "Enter runs the focused (non-default) action");
+            delete sheet;
+        }
+
+        // Escape always cancels, whatever has focus.
+        {
+            InWindowSheet* sheet = nullptr;
+            QPushButton* primary = nullptr;
+            QPushButton* cancel = nullptr;
+            makeSheet(sheet, primary, cancel);
+            InWindowSheet::setTestDriver([&](InWindowSheet* driver) {
+                sendKey(driver, Qt::Key_Tab);
+                sendKey(driver, Qt::Key_Escape);
+            });
+            const int outcome = sheet->run();
+            InWindowSheet::setTestDriver({});
+            check(outcome == 0, "Escape cancels the prompt");
+            delete sheet;
+        }
+
+        // A text entry keeps the focus (and its own Enter-to-submit path).
+        {
+            InWindowSheet* sheet = new InWindowSheet(&host);
+            sheet->setTitle(QStringLiteral("Rename"));
+            auto* entry = sheet->addTextEntry(QLineEdit::Normal, QStringLiteral("name"),
+                QStringLiteral("New name"));
+            sheet->addButton(QStringLiteral("Rename"), 1, true);
+            sheet->addButton(QStringLiteral("Cancel"), 0, false);
+            InWindowSheet::setTestDriver([&](InWindowSheet* driver) {
+                check(QApplication::focusWidget() == entry, "a text prompt starts in its field");
+                check(driver->defaultAction() != nullptr, "a text prompt still has a default action");
+                sendKey(entry, Qt::Key_Return);
+            });
+            const int outcome = sheet->run();
+            InWindowSheet::setTestDriver({});
+            check(outcome == 1, "Enter in the field submits the prompt");
+            delete sheet;
+        }
+
+        std::printf("Sheet keyboard checks done (%d failure(s)).\n", failures);
+        return failures == 0 ? 0 : 1;
+    }
+
     static int sheetLayout() {
         int failures = 0;
         const auto check = [&failures](bool condition, const char* message) {
@@ -1374,6 +1481,8 @@ int main(int argc, char** argv) {
         return videovault::app::GalleryPerformanceTestAccess::shareUnlock();
     if (qEnvironmentVariableIsSet("MVP_AUTH_LAYOUT_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::authLayout();
+    if (qEnvironmentVariableIsSet("MVP_SHEET_KEYS_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::sheetKeys();
     if (qEnvironmentVariableIsSet("MVP_SHEET_LAYOUT_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::sheetLayout();
     return videovault::app::GalleryPerformanceTestAccess::run();

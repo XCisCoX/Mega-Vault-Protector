@@ -11,7 +11,10 @@
 #include <QGraphicsScene>
 #include <QGridLayout>
 #include <QSpacerItem>
+#include <QApplication>
 #include <QKeyEvent>
+#include <QPushButton>
+#include <QStyle>
 #include <QTimer>
 #include <cstdio>
 #include <QScopedValueRollback>
@@ -64,7 +67,12 @@ InWindowSheet::InWindowSheet(QWidget* host)
         "  color: palette(button-text); background: palette(alternate-base);"
         "  border: 1px solid palette(midlight); border-radius: 10px;"
         "  min-height: 36px; padding: 0 16px; }"
-        "QPushButton[sheetSecondary='true']:hover { background: palette(midlight); }"));
+        "QPushButton[sheetSecondary='true']:hover { background: palette(midlight); }"
+        // Keyboard focus and the Enter default are visible, so a keyboard user
+        // can see which action a press will run.
+        "QPushButton[sheetPrimary='true']:focus { border: 2px solid palette(light); }"
+        "QPushButton[sheetSecondary='true']:focus { border: 1px solid palette(highlight); }"
+        "QPushButton[sheetDefault='true'][sheetSecondary='true'] { border: 1px solid palette(highlight); }"));
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(24, 24, 24, 24);
@@ -195,7 +203,81 @@ void InWindowSheet::addButtonWidget(QPushButton* button) {
         button->setCursor(Qt::PointingHandCursor);
     }
     actions_.push_back(button);
+    if (button->focusPolicy() == Qt::NoFocus) {
+        button->setFocusPolicy(Qt::StrongFocus);
+    }
     relayoutActions(false);
+    pickDefaultAction();
+}
+
+void InWindowSheet::pickDefaultAction() {
+    if (actions_.empty()) {
+        defaultAction_ = nullptr;
+        return;
+    }
+    const bool stillThere = std::find(actions_.begin(), actions_.end(), defaultAction_)
+        != actions_.end();
+    QPushButton* chosen = stillThere ? defaultAction_ : nullptr;
+    if (chosen == nullptr) {
+        for (auto* action : actions_) {
+            if (action->property("sheetPrimary").toBool()) {
+                chosen = action;
+                break;
+            }
+        }
+    }
+    if (chosen == nullptr) {
+        chosen = actions_.back();
+    }
+    setDefaultAction(chosen);
+}
+
+void InWindowSheet::setDefaultAction(QPushButton* button) {
+    defaultAction_ = button;
+    for (auto* action : actions_) {
+        action->setProperty("sheetDefault", action == button);
+        action->style()->unpolish(action);
+        action->style()->polish(action);
+    }
+}
+
+void InWindowSheet::focusAction(const int delta) {
+    if (actions_.empty()) {
+        return;
+    }
+    int index = -1;
+    for (int i = 0; i < static_cast<int>(actions_.size()); ++i) {
+        if (actions_[static_cast<std::size_t>(i)]->hasFocus()) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) {
+        index = 0;
+        for (int i = 0; i < static_cast<int>(actions_.size()); ++i) {
+            if (actions_[static_cast<std::size_t>(i)] == defaultAction_) {
+                index = i;
+                break;
+            }
+        }
+    }
+    const int count = static_cast<int>(actions_.size());
+    const int next = ((index + delta) % count + count) % count;
+    actions_[static_cast<std::size_t>(next)]->setFocus(
+        delta < 0 ? Qt::BacktabFocusReason : Qt::TabFocusReason);
+}
+
+void InWindowSheet::focusDefault() {
+    if (entry_ != nullptr) {
+        entry_->setFocus();
+        entry_->selectAll();
+        return;
+    }
+    if (defaultAction_ != nullptr) {
+        defaultAction_->setFocus(Qt::OtherFocusReason);
+    } else {
+        setFocus(Qt::OtherFocusReason);
+    }
 }
 
 QPushButton* InWindowSheet::addButton(const QString& label, const int result, const bool primary,
@@ -205,7 +287,9 @@ QPushButton* InWindowSheet::addButton(const QString& label, const int result, co
     // automation, and the look must survive that.
     button->setProperty(primary ? "sheetPrimary" : "sheetSecondary", true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setFocusPolicy(Qt::NoFocus);
+    // Tab-focusable: the sheet drives Enter/Escape/arrows itself, and a button
+    // that cannot take focus cannot be chosen with the keyboard.
+    button->setFocusPolicy(Qt::StrongFocus);
     if (!icon.isEmpty()) {
         button->setIconSize(QSize(15, 15));
         if (primary) {
@@ -329,6 +413,7 @@ int InWindowSheet::run() {
         entry_->setFocus();
         entry_->selectAll();
     }
+    focusDefault();
     if (testDriver_) {
         // A driver stands in for the user: it acts inside the visible sheet.
         testDriver_(this);
@@ -384,7 +469,77 @@ void InWindowSheet::mousePressEvent(QMouseEvent* event) {
     QWidget::mousePressEvent(event);
 }
 
+bool InWindowSheet::handleKey(QKeyEvent* event) {
+    if (!isVisible() || event == nullptr) {
+        return false;
+    }
+    const int key = event->key();
+    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+    // Enter activates the focused action, or the default one when focus is on
+    // the card. A text field keeps its own Enter (it submits through
+    // returnPressed), otherwise typing would confirm before it was finished.
+    if (key == Qt::Key_Return || key == Qt::Key_Enter) {
+        if (qobject_cast<QLineEdit*>(QApplication::focusWidget()) != nullptr) {
+            return false;
+        }
+        if (auto* focused = qobject_cast<QPushButton*>(QApplication::focusWidget())) {
+            focused->click();
+            return true;
+        }
+        if (defaultAction_ != nullptr) {
+            defaultAction_->click();
+            return true;
+        }
+        return false;
+    }
+    if (key == Qt::Key_Escape) {
+        finish(0);
+        return true;
+    }
+    // Tab and the arrows walk the actions. Inside a text field or list the
+    // arrows must keep their editing meaning, so they are only intercepted when
+    // a button (or the card itself) has focus.
+    const bool onAction = qobject_cast<QPushButton*>(QApplication::focusWidget()) != nullptr
+        || QApplication::focusWidget() == this
+        || QApplication::focusWidget() == nullptr;
+    if (key == Qt::Key_Tab) {
+        focusAction(1);
+        return true;
+    }
+    if (key == Qt::Key_Backtab || (key == Qt::Key_Tab && shift)) {
+        focusAction(-1);
+        return true;
+    }
+    if (onAction && (key == Qt::Key_Left || key == Qt::Key_Up)) {
+        focusAction(-1);
+        return true;
+    }
+    if (onAction && (key == Qt::Key_Right || key == Qt::Key_Down)) {
+        focusAction(1);
+        return true;
+    }
+    return false;
+}
+
+void InWindowSheet::keyPressEvent(QKeyEvent* event) {
+    if (handleKey(event)) {
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
+}
+
 bool InWindowSheet::eventFilter(QObject* watched, QEvent* event) {
+    // While the sheet is open it owns the keyboard: the host window must not
+    // act on Enter/Escape/Tab that were meant for the card.
+    if (event->type() == QEvent::KeyPress && isVisible()) {
+        QWidget* target = qobject_cast<QWidget*>(watched);
+        const bool inside = target != nullptr
+            && (target == this || isAncestorOf(target) || target == parentWidget());
+        if (inside && handleKey(static_cast<QKeyEvent*>(event))) {
+            return true;
+        }
+    }
     if (watched == parentWidget() && event->type() == QEvent::Resize && parentWidget() != nullptr) {
         setGeometry(parentWidget()->rect());
         // A shorter window must shrink the card too, or its buttons fall off the

@@ -52,6 +52,15 @@ if(WIN32)
     mvp_import_release_dll(MvpSwscale swscale-8.dll swscale)
     mvp_import_release_dll(MvpAvcodec avcodec-61.dll avcodec)
     mvp_import_release_dll(MvpAvformat avformat-61.dll avformat)
+    # libavfilter supplies `atempo`, the pitch-preserving speed filter Telegram
+    # Desktop also builds (--enable-filter=atempo). Optional: the player keeps a
+    # normalised fallback when the library is absent.
+    set(MVP_HAS_AVFILTER OFF)
+    if(EXISTS "${MVP_VCPKG_PREFIX}/bin/avfilter-10.dll"
+        AND EXISTS "${MVP_VCPKG_PREFIX}/lib/avfilter.lib")
+        mvp_import_release_dll(MvpAvfilter avfilter-10.dll avfilter)
+        set(MVP_HAS_AVFILTER ON)
+    endif()
     mvp_import_release_dll(MvpZlib zlib1.dll zlib)
     set_property(TARGET MvpAvcodec APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES MvpZlib)
@@ -62,9 +71,14 @@ if(WIN32)
         MvpSwscale
         MvpSwresample
     )
+    if(MVP_HAS_AVFILTER)
+        list(APPEND MVP_FFMPEG_LIBS MvpAvfilter)
+    endif()
 elseif(ANDROID)
     # Dependency paths are defined at the top level (CMakeLists.txt) so that
-    # tests/ and qt-app/ resolve the same NDK-built static libraries.
+    # tests/ and qt-app/ resolve the same NDK-built static libraries. The NDK
+    # FFmpeg is configured --disable-everything without libavfilter.
+    set(MVP_HAS_AVFILTER OFF)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
@@ -80,11 +94,20 @@ else()
     pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavformat libavcodec libavutil libswscale libswresample)
+    # Optional: atempo lives in libavfilter. Distributions without the -dev
+    # package still build; the player then uses its normalised fallback.
+    pkg_check_modules(AVFILTER QUIET IMPORTED_TARGET libavfilter)
 
     set(MVP_SODIUM_LIBS PkgConfig::SODIUM)
     set(MVP_ARGON2_LIBS PkgConfig::ARGON2)
     set(MVP_SQLCIPHER_LIBS PkgConfig::SQLCIPHER)
     set(MVP_FFMPEG_LIBS PkgConfig::FFMPEG)
+    if(AVFILTER_FOUND)
+        list(APPEND MVP_FFMPEG_LIBS PkgConfig::AVFILTER)
+        set(MVP_HAS_AVFILTER ON)
+    else()
+        set(MVP_HAS_AVFILTER OFF)
+    endif()
 endif()
 
 add_library(VideoVaultCore STATIC
@@ -105,6 +128,12 @@ if(NOT MVP_VERSION)
     set(MVP_VERSION "2.1.0")
 endif()
 target_compile_definitions(VideoVaultCore PRIVATE MVP_VERSION_STRING="${MVP_VERSION}")
+# The music player's speed filter is compiled only where libavfilter is linked.
+if(MVP_HAS_AVFILTER)
+    target_compile_definitions(VideoVaultCore PUBLIC MVP_HAVE_AVFILTER=1)
+else()
+    target_compile_definitions(VideoVaultCore PUBLIC MVP_HAVE_AVFILTER=0)
+endif()
 
 target_include_directories(VideoVaultCore
     PUBLIC

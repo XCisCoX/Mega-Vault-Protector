@@ -58,6 +58,7 @@ set(MVP_APP_SOURCES
     src/main_window.cpp
     src/media_decoder.cpp
     src/local_audio_pipeline.cpp
+    src/audio_time_stretch.cpp
     src/player_window.cpp
     ${MVP_APP_WINRT_SOURCES}
     ${MVP_APP_FALLBACK_SOURCES}
@@ -82,6 +83,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/player_window.hpp
     include/videovault/app/music_window.hpp
     include/videovault/app/music_library.hpp
+    include/videovault/app/audio_time_stretch.hpp
     include/videovault/app/pdf_window.hpp
     include/videovault/app/in_window_sheet.hpp
     include/videovault/app/record_document.hpp
@@ -305,6 +307,20 @@ if(MVP_BUILD_TESTS)
     add_test(NAME telegram_photo_chrome COMMAND VideoVaultTelegramPhotoChromeTests)
     set_tests_properties(telegram_photo_chrome PROPERTIES TIMEOUT 30)
 
+    add_executable(VideoVaultAudioTimeStretchTests
+        tests/audio_time_stretch.cpp src/audio_time_stretch.cpp)
+    target_include_directories(VideoVaultAudioTimeStretchTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultAudioTimeStretchTests PRIVATE VideoVault::Core ${MVP_FFMPEG_LIBS})
+    if(WIN32)
+        target_include_directories(VideoVaultAudioTimeStretchTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+    elseif(ANDROID)
+        target_include_directories(VideoVaultAudioTimeStretchTests PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    endif()
+    target_compile_features(VideoVaultAudioTimeStretchTests PRIVATE cxx_std_20)
+    add_test(NAME audio_time_stretch COMMAND VideoVaultAudioTimeStretchTests)
+    set_tests_properties(audio_time_stretch PROPERTIES TIMEOUT 60)
+    mvp_copy_runtime_dlls(VideoVaultAudioTimeStretchTests)
+
     add_executable(VideoVaultVideoPacingTests tests/video_pacing.cpp)
     target_include_directories(VideoVaultVideoPacingTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(VideoVaultVideoPacingTests PRIVATE cxx_std_20)
@@ -330,6 +346,7 @@ if(MVP_BUILD_TESTS)
         set(_chrome_target VideoVaultTelegram${_chrome_kind}UiTests)
         add_executable(${_chrome_target} ${_chrome_test}
             src/music_window.cpp src/player_window.cpp src/media_decoder.cpp src/local_audio_pipeline.cpp
+            src/audio_time_stretch.cpp
             src/icons.cpp src/theme.cpp resources/icons.qrc resources/telegram_player.qrc
             include/videovault/app/music_window.hpp include/videovault/app/player_window.hpp)
         target_include_directories(${_chrome_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -355,8 +372,8 @@ if(MVP_BUILD_TESTS)
     # QCoreApplication-only tests. Compile the real MusicWindow translation unit
     # too, but never instantiate widgets or open an audio device in this test.
     add_executable(VideoVaultLocalAudioTests
-        tests/local_audio_pipeline.cpp src/local_audio_pipeline.cpp src/media_decoder.cpp
-        src/music_window.cpp src/player_window.cpp src/icons.cpp src/theme.cpp
+        tests/local_audio_pipeline.cpp src/local_audio_pipeline.cpp src/audio_time_stretch.cpp src/media_decoder.cpp
+        src/music_window.cpp src/player_window.cpp src/audio_time_stretch.cpp src/icons.cpp src/theme.cpp
         include/videovault/app/music_window.hpp include/videovault/app/player_window.hpp)
     target_include_directories(VideoVaultLocalAudioTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(VideoVaultLocalAudioTests PRIVATE VideoVault::Core Qt5::Core Qt5::Gui
@@ -454,6 +471,9 @@ if(MVP_BUILD_TESTS)
     add_test(NAME share_unlock COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(share_unlock PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_SHARE_UNLOCK_TEST=1" TIMEOUT 60)
+    add_test(NAME sheet_keys COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(sheet_keys PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_SHEET_KEYS_TEST=1" TIMEOUT 60)
     add_test(NAME auth_layout COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(auth_layout PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_AUTH_LAYOUT_TEST=1" TIMEOUT 60)

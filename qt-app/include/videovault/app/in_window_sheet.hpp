@@ -9,6 +9,7 @@
 
 class QFrame;
 class QGridLayout;
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -34,6 +35,11 @@ public:
         const QString& icon = QString());
     // Adds an already-built button to the action row under the same reflow rules.
     void addButtonWidget(QPushButton* button);
+    // The action Enter activates. A sheet is a plain widget, so Qt's QDialog
+    // default-button routing does not apply and the sheet does it itself. The
+    // first primary action is chosen automatically; call this to override.
+    void setDefaultAction(QPushButton* button);
+    [[nodiscard]] QPushButton* defaultAction() const noexcept { return defaultAction_; }
     // Blocks until a button, Escape, or a click outside the card finishes it.
     int run();
     void finish(int result);
@@ -47,12 +53,19 @@ public:
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     // The dimmed backdrop is painted, not styled: a type selector cannot match this
     // class (it has no Q_OBJECT, so Qt knows it as a plain QWidget).
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    // Enter/Escape/Tab/arrows: one place so the host filter and the sheet's own
+    // key handler behave identically.
+    bool handleKey(QKeyEvent* event);
+    void pickDefaultAction();
+    void focusAction(int delta);
+    void focusDefault();
     void captureBackdrop();
     bool fitting_{false};
     bool fitPending_{false};
@@ -73,6 +86,7 @@ private:
     QVBoxLayout* body_{nullptr};
     QGridLayout* buttons_{nullptr};
     std::vector<QPushButton*> actions_;
+    QPushButton* defaultAction_{nullptr};
     QLineEdit* entry_{nullptr};
     QEventLoop loop_;
     int result_{0};

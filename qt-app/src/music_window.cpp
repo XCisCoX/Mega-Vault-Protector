@@ -79,6 +79,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+
+#include "videovault/app/audio_time_stretch.hpp"
 #include <cstddef>
 #include <functional>
 #include <random>
@@ -186,11 +188,7 @@ QPixmap paintNotePlate(int side);
 // 1x bypasses this and writes the decoded samples unchanged.
 class TimeStretch {
 public:
-    void reset() {
-        pending_.clear();
-        overlap_.assign(overlap_.size(), 0.f);
-        ready_ = false;
-    }
+    void reset() { stretch_.reset(); }
 
     std::vector<std::int16_t> process(
         const std::int16_t* samples,
@@ -198,136 +196,23 @@ public:
         const int channels,
         const double speed,
         std::size_t* consumedFrames) {
-        if (channels <= 0) {
-            return {};
-        }
-        if (channels_ != channels) {
-            channels_ = channels;
-            ready_ = false;
-            pending_.clear();
-            overlap_.clear();
-        }
-        const bool bypass = std::abs(speed - 1.0) < 0.03;
-        if (bypass) {
-            pending_.clear();
-            overlap_.clear();
-            if (count == 0 || samples == nullptr) {
-                return {};
-            }
-            if (consumedFrames != nullptr) {
-                *consumedFrames += count / static_cast<std::size_t>(channels);
-            }
-            return std::vector<std::int16_t>(samples, samples + count);
-        }
-        ensureWindow();
-        if (samples != nullptr && count > 0) {
-            pending_.insert(pending_.end(), samples, samples + count);
-        }
-        std::vector<std::int16_t> out;
-        const int width = kWindow;
-        const int hop = kHop;
-        const int analysis = std::max(1, static_cast<int>(std::lround(hop * speed)));
-        const int frame = channels_;
-        while (static_cast<int>(pending_.size()) >= width * frame) {
-            for (int i = 0; i < width; ++i) {
-                const float weight = window_[static_cast<std::size_t>(i)];
-                for (int channel = 0; channel < frame; ++channel) {
-                    overlap_[static_cast<std::size_t>(i * frame + channel)] +=
-                        weight * static_cast<float>(pending_[static_cast<std::size_t>(i * frame + channel)]);
-                }
-            }
-            out.reserve(out.size() + static_cast<std::size_t>(hop * frame));
-            for (int i = 0; i < hop; ++i) {
-                const float norm = std::max(0.001f, norm_[static_cast<std::size_t>(i)]);
-                for (int channel = 0; channel < frame; ++channel) {
-                    const int sample = static_cast<int>(std::lround(
-                        overlap_[static_cast<std::size_t>(i * frame + channel)] / norm));
-                    out.push_back(static_cast<std::int16_t>(std::clamp(sample, -32768, 32767)));
-                }
-            }
-            const int tail = (width - hop) * frame;
-            for (int i = 0; i < tail; ++i) {
-                overlap_[static_cast<std::size_t>(i)] =
-                    overlap_[static_cast<std::size_t>(i + hop * frame)];
-            }
-            std::fill(overlap_.begin() + tail, overlap_.end(), 0.f);
-            pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(analysis * frame));
-            if (consumedFrames != nullptr) {
-                *consumedFrames += static_cast<std::size_t>(analysis);
-            }
-        }
-        return out;
+        // Pitch-preserving speed change through FFmpeg's atempo filter (the
+        // filter Telegram's own build enables), with a normalised fallback where
+        // libavfilter is unavailable. The old overlap-add lost level and
+        // comb-filtered the signal at anything but 1.0x.
+        return stretch_.process(samples, count, channels, LocalAudioReader::rate,
+            speed, consumedFrames);
     }
 
     std::vector<std::int16_t> flush(
         const int channels,
         const double speed,
         std::size_t* consumedFrames) {
-        if (channels <= 0 || pending_.empty()) {
-            overlap_.clear();
-            return {};
-        }
-        if (std::abs(speed - 1.0) < 0.03) {
-            auto out = pending_;
-            if (consumedFrames != nullptr) {
-                *consumedFrames += pending_.size() / static_cast<std::size_t>(channels);
-            }
-            pending_.clear();
-            return out;
-        }
-        ensureWindow();
-        const int need = kWindow * channels_ - static_cast<int>(pending_.size());
-        if (need > 0) {
-            pending_.insert(pending_.end(), static_cast<std::size_t>(need), 0);
-        }
-        auto out = process(nullptr, 0, channels, speed, consumedFrames);
-        if (!overlap_.empty() && channels_ > 0) {
-            const int frames = static_cast<int>(overlap_.size()) / channels_;
-            for (int i = 0; i < frames; ++i) {
-                const float norm = std::max(0.001f, norm_[static_cast<std::size_t>(i % kHop)]);
-                for (int channel = 0; channel < channels_; ++channel) {
-                    const int sample = static_cast<int>(std::lround(
-                        overlap_[static_cast<std::size_t>(i * channels_ + channel)] / norm));
-                    out.push_back(static_cast<std::int16_t>(std::clamp(sample, -32768, 32767)));
-                }
-            }
-        }
-        pending_.clear();
-        overlap_.clear();
-        return out;
+        return stretch_.flush(channels, LocalAudioReader::rate, speed, consumedFrames);
     }
 
 private:
-    static constexpr int kWindow = 2048;
-    static constexpr int kHop = 512;
-
-    void ensureWindow() {
-        if (ready_ || channels_ <= 0) {
-            return;
-        }
-        window_.resize(static_cast<std::size_t>(kWindow));
-        for (int i = 0; i < kWindow; ++i) {
-            window_[static_cast<std::size_t>(i)] =
-                0.5f * (1.f - std::cos(2.f * 3.14159265f * static_cast<float>(i) / (kWindow - 1)));
-        }
-        norm_.assign(static_cast<std::size_t>(kHop), 0.f);
-        for (int i = 0; i < kHop; ++i) {
-            float sum = 0.f;
-            for (int k = i; k < kWindow; k += kHop) {
-                sum += window_[static_cast<std::size_t>(k)];
-            }
-            norm_[static_cast<std::size_t>(i)] = sum;
-        }
-        overlap_.assign(static_cast<std::size_t>(kWindow * channels_), 0.f);
-        ready_ = true;
-    }
-
-    int channels_{0};
-    bool ready_{false};
-    std::vector<float> window_;
-    std::vector<float> norm_;
-    std::vector<float> overlap_;
-    std::vector<std::int16_t> pending_;
+    videovault::app::AudioTimeStretch stretch_;
 };
 
 enum class Glyph {
