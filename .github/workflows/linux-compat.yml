@@ -1,0 +1,69 @@
+name: Linux compatibility
+
+# Builds and tests the desktop app on both supported Ubuntu releases. Ubuntu
+# 22.04 is the oldest supported distribution: it ships Qt 5.15.3 and FFmpeg 4.4,
+# where audio channel layouts are still the deprecated channels/channel_layout
+# pair. Ubuntu 24.04 ships FFmpeg 6.1 with AVChannelLayout. Both go through
+# core/include/videovault/core/ffmpeg_compat.hpp, and this job is the proof.
+#
+# It never publishes anything: the release pipeline is separate.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "qt-app/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - ".github/workflows/linux-compat.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "qt-app/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - ".github/workflows/linux-compat.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Report toolchain versions
+        run: |
+          cmake --version | head -1
+          gcc --version | head -1
+          pkg-config --modversion libavcodec libavutil sqlcipher libsodium libargon2 || true
+
+      - name: Install dependencies (Qt 5, FFmpeg, SQLCipher, Argon2, libsodium)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libsqlcipher-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
+            libxcb-cursor0 libxcb-xinerama0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - name: Configure (Release)
+        run: cmake --preset linux-release
+
+      - name: Build (Release)
+        run: cmake --build --preset linux-release -j "$(nproc)"
+
+      - name: Run tests (Release, headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir out/build/linux-release -C Release --output-on-failure
