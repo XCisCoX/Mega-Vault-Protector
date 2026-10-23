@@ -68,6 +68,14 @@ elseif(ANDROID)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
+    # Upstream pkg-config exposes include/sqlcipher for <sqlite3.h>, while our
+    # explicit <sqlcipher/sqlite3.h> includes need its parent too. System /usr
+    # installs hid this discrepancy; isolated pinned builds must expose both.
+    pkg_get_variable(MVP_SQLCIPHER_INCLUDEDIR sqlcipher includedir)
+    if(EXISTS "${MVP_SQLCIPHER_INCLUDEDIR}/sqlcipher/sqlite3.h")
+        set_property(TARGET PkgConfig::SQLCIPHER APPEND PROPERTY
+            INTERFACE_INCLUDE_DIRECTORIES "${MVP_SQLCIPHER_INCLUDEDIR}")
+    endif()
     pkg_check_modules(ARGON2 REQUIRED IMPORTED_TARGET libargon2)
     pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET

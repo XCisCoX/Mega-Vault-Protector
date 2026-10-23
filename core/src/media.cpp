@@ -785,7 +785,7 @@ Result<std::vector<unsigned char>> encode_jpeg(
     codec->width = static_cast<int>(width);
     codec->height = static_cast<int>(height);
     codec->time_base = AVRational{1, 25};
-    codec->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec->pix_fmt = AV_PIX_FMT_YUVJ420P;
     codec->color_range = AVCOL_RANGE_JPEG;
     int status = avcodec_open2(codec.get(), encoder, nullptr);
     if (status < 0) {
@@ -796,7 +796,7 @@ Result<std::vector<unsigned char>> encode_jpeg(
         pixels->width, pixels->height,
         static_cast<AVPixelFormat>(pixels->format),
         static_cast<int>(width), static_cast<int>(height),
-        AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr));
+        AV_PIX_FMT_YUVJ420P, SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!scaler) {
         return VaultError{VaultErrorCode::CryptoFailure,
             "unable to allocate FFmpeg scaler"};
@@ -810,7 +810,7 @@ Result<std::vector<unsigned char>> encode_jpeg(
         return VaultError{VaultErrorCode::CryptoFailure,
             "unable to allocate FFmpeg frame"};
     }
-    scaled->format = AV_PIX_FMT_YUV420P;
+    scaled->format = AV_PIX_FMT_YUVJ420P;
     scaled->width = static_cast<int>(width);
     scaled->height = static_cast<int>(height);
     scaled->color_range = AVCOL_RANGE_JPEG;

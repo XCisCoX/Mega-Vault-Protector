@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bundle MegaVaultProtect with the Qt, FFmpeg, and GStreamer libraries it
 # loads, so the release tarball runs without a matching -dev install.
-# Glibc itself stays on the system (Ubuntu 24.04 / glibc 2.39 or newer).
+# Glibc itself stays on the system (Ubuntu 22.04 / glibc 2.35 or newer).
 set -euo pipefail
 
 bin="${1:?path to the MegaVaultProtect binary}"
@@ -18,8 +18,11 @@ mkdir -p "$root/lib" "$root/plugins" "$root/gstreamer-1.0"
 
 cp -L "$bin" "$root/MegaVaultProtect"
 chmod +x "$root/MegaVaultProtect"
-# The desktop build stages original license texts beside its executable.
 mkdir -p "$root/licenses"
+if [[ -n "${MVP_SQLCIPHER_LICENSE:-}" ]]; then
+  cp "$MVP_SQLCIPHER_LICENSE" "$root/licenses/SQLCipher-LICENSE.txt"
+fi
+# The desktop build stages the bundled Telegram player notices beside its executable.
 cp -a "$(dirname "$bin")/licenses/telegram-player" "$root/licenses/"
 
 is_system_lib() {
@@ -208,8 +211,8 @@ Mega Vault Protect for Linux x64.
 Run:
   ./MegaVaultProtect.sh
 
-This build is linked on Ubuntu 24.04. It needs glibc 2.39 or newer
-(Ubuntu 24.04, or another current distro). Extract the archive and
+This build is linked on Ubuntu 22.04. It needs glibc 2.35 or newer
+(Ubuntu 22.04, Ubuntu 24.04, or another compatible distro). Extract the archive and
 start the shell script above; the libraries it needs are in lib/.
 
 Optional: add the application menu entry, the icons, and the .mvpk

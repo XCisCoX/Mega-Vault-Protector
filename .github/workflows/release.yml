@@ -264,7 +264,9 @@ jobs:
 
   build-linux:
     needs: version
-    runs-on: ubuntu-24.04
+    # Build on the oldest supported glibc. A 24.04-built executable cannot run
+    # on Ubuntu 22.04 even if every application library is bundled.
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -275,9 +277,12 @@ jobs:
           sudo apt-get install -y -qq \
             qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-            libsqlcipher-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
+            tcl-dev libargon2-dev libsodium-dev zlib1g-dev libssl-dev \
             libxcb-cursor0 libxcb-xinerama0 \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - name: Build SQLCipher 4 (vault-compatible encryption)
+        run: bash scripts/build-linux-sqlcipher.sh "$RUNNER_TEMP/sqlcipher4"
 
       - name: Configure (Release)
         run: cmake --preset linux-release -DMVP_VERSION="${{ needs.version.outputs.number }}"
@@ -367,7 +372,7 @@ jobs:
             cat "$RUNNER_TEMP/notes.md"
             echo
             echo "- **Windows x64:** unzip and run \`MegaVaultProtect.exe\`."
-            echo "- **Linux x64:** extract and run \`./MegaVaultProtect.sh\`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive."
+            echo "- **Linux x64:** extract and run \`./MegaVaultProtect.sh\`. Built on Ubuntu 22.04; needs glibc 2.35 or newer. Libraries are in the archive."
             echo "- **Android (arm64):** install \`MegaVaultProtect-android-arm64.apk\` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. It is signed with the project release key, so a newer build installs straight over the copy you already have — including from the update icon inside the app."
             echo
             echo "The vault stays on your machine. Playback does not decrypt videos onto disk."
