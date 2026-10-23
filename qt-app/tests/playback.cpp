@@ -8,6 +8,9 @@
 #include <QApplication>
 #include <QLibraryInfo>
 #include <QSlider>
+#include <QThreadPool>
+#include <QSemaphore>
+#include <QtConcurrent/QtConcurrentRun>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -28,7 +31,25 @@ extern "C" {
 #include <thread>
 #include <vector>
 
+namespace videovault::app {
+struct PlayerWindowTestAccess {
+    static bool videoWorkerStarted(const PlayerWindow& player) { return player.worker_.joinable(); }
+};
+}
+
 namespace {
+
+template<class Player>
+std::unique_ptr<Player> makeStillPlayer(const std::shared_ptr<videovault::core::Vault>& vault,
+                                      std::int64_t id) {
+    if constexpr (std::is_constructible_v<Player, decltype(vault), std::int64_t,
+                                          const QString&, QWidget*, bool>) {
+        return std::make_unique<Player>(vault, id, QStringLiteral("initial still"), nullptr, true);
+    } else {
+        return {};
+    }
+}
+
 
 class TemporaryDirectory {
 public:
@@ -772,6 +793,15 @@ int main() {
     char* player_argv[1] = {player_name};
     QApplication player_app(player_argc, player_argv);
 
+    const auto spin = [&player_app](const std::chrono::milliseconds duration) {
+        const auto deadline = std::chrono::steady_clock::now() + duration;
+        while (std::chrono::steady_clock::now() < deadline) {
+            player_app.processEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+
+    if (!qEnvironmentVariableIsSet("MVP_PHOTOS_ONLY")) {
     auto reopened = Vault::open(root, "playback test password");
     if (!reopened) {
         return fail("Reopening the vault for the headless player must succeed.");
@@ -784,13 +814,6 @@ int main() {
         return fail("The player must expose its position slider.");
     }
 
-    const auto spin = [&player_app](const std::chrono::milliseconds duration) {
-        const auto deadline = std::chrono::steady_clock::now() + duration;
-        while (std::chrono::steady_clock::now() < deadline) {
-            player_app.processEvents();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    };
 
     // Let playback start from the beginning.
     spin(std::chrono::milliseconds(1500));
@@ -829,6 +852,7 @@ int main() {
 
     std::printf("Headless player seek checks succeeded (%d -> %d -> %d -> %d ms).\n",
         pos_before, pos_after, pos_later, pos_back);
+    }
 
     // A real RGB photo, not a 1x1 test pattern, opened in the actual window.
     // This is the path that stayed black: the player must show an opaque frame.
@@ -872,6 +896,43 @@ int main() {
         }
         std::printf("PNG player open checks succeeded (%dx%d).\n",
             surface->frame().width(), surface->frame().height());
+
+        auto initialStill = makeStillPlayer<videovault::app::PlayerWindow>(photo_opened, photo_id.value());
+        if (!initialStill) {
+            return fail("The constructor must support initial still-image mode without a video launch.");
+        }
+        if (videovault::app::PlayerWindowTestAccess::videoWorkerStarted(*initialStill)) {
+            return fail("An initial still must never start an FFmpeg worker.");
+        }
+        spin(std::chrono::milliseconds(800));
+        if (initialStill->findChild<videovault::app::VideoSurface*>()->frame().size() != QSize(320, 240)) {
+            return fail("Initial still mode must load the full-resolution photo.");
+        }
+        initialStill->playStill(photo_opened, photo_id.value());
+        if (videovault::app::PlayerWindowTestAccess::videoWorkerStarted(*initialStill)) {
+            return fail("Still navigation must not launch an FFmpeg worker.");
+        }
+        std::printf("Initial still/navigation no-FFmpeg checks succeeded.\n");
+
+        // Occupy every global-pool slot. Photo opening must have its own
+        // bounded executor, independent of imports and gallery work.
+        auto* global = QThreadPool::globalInstance();
+        const int oldLimit = global->maxThreadCount();
+        global->setMaxThreadCount(1);
+        QSemaphore started, release;
+        auto blocker = QtConcurrent::run([&] { started.release(); release.acquire(); });
+        started.acquire();
+        photo_player.playStill(photo_opened, photo_id.value());
+        spin(std::chrono::milliseconds(800));
+        const bool independentPhoto = !surface->frame().isNull()
+            && surface->frame().size() == QSize(320, 240);
+        release.release();
+        blocker.waitForFinished();
+        global->setMaxThreadCount(oldLimit);
+        if (!independentPhoto) {
+            return fail("Still photo opening must not starve behind the global thread pool.");
+        }
+        std::printf("Still photo dedicated-pool/full-resolution checks succeeded.\n");
 
         const std::filesystem::path png_samples[] = {
             std::filesystem::path("docs") / "MVP-logo.png",

@@ -11,16 +11,41 @@ data class FileKind(val label: String, val route: Int)
 
 object FileKinds {
     private val cache = ConcurrentHashMap<Long, FileKind>()
+    // Bumped when the open vault changes. A read started on the previous vault
+    // must not be stored under the same id in the next one.
+    private var stamp = 0
 
     fun peek(id: Long): FileKind? = cache[id]
 
+    /**
+     * What the name alone says, with no vault read. A tap uses this so opening
+     * a video never waits behind the gallery's probes or a folder's worth of
+     * header reads; [resolve] still has the last word when it is free.
+     */
+    fun fromNameOnly(name: String): FileKind = fromName(name)
+
+    /** True when the name alone says "movie" (a picture is on route 1 too). */
+    fun looksLikeVideo(name: String): Boolean {
+        val kind = fromName(name)
+        return kind.route == 1 && !isImage(kind)
+    }
+
+    fun looksLikeAudio(name: String): Boolean = fromName(name).route == 2
+
+    fun clear() {
+        stamp++
+        cache.clear()
+    }
+
     fun resolve(id: Long, name: String): FileKind {
         cache[id]?.let { return it }
+        val seen = stamp
         val head = runCatching { CoreBridge.nativeReadRange(id, 0L, 560) }.getOrNull()
             ?: ByteArray(0)
+        if (seen != stamp) return cache[id] ?: fromName(name)
         val sniffed = sniff(head)
         val kind = if (sniffed.label == "File") fromName(name) else sniffed
-        cache[id] = kind
+        if (seen == stamp) cache[id] = kind
         return kind
     }
 

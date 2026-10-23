@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sampled from the plate inside docs/branding/app-icon.png so the
+         launcher mask shows the same dark field the mark already has. -->
+    <color name="ic_launcher_background">#1e242a</color>
+</resources>

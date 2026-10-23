@@ -13,6 +13,7 @@ object CoreBridge {
     }
 
     external fun nativeVaultExists(root: String): Boolean
+    external fun nativeInvokeExtension(source: String, command: String, inputJson: String): String
     external fun nativeCreateVault(root: String, password: String, memKib: Int, iterations: Int, parallelism: Int): String
     external fun nativeOpenVault(root: String, password: String): String
     external fun nativeIsUnlocked(): Boolean
@@ -25,6 +26,8 @@ object CoreBridge {
     external fun nativeMoveFolder(id: Long, parentId: Long): String
     external fun nativeRenameVideo(id: Long, name: String): String
     external fun nativeMoveVideo(id: Long, folderId: Long): String
+    external fun nativeImportBytes(data: ByteArray, name: String, folderId: Long): String
+    external fun nativeImportBytesForVault(data: ByteArray, name: String, folderId: Long, expectedRoot: String): String
     external fun nativeImportFile(path: String): String
     external fun nativeImportInto(path: String, folderId: Long): String
     external fun nativeRemoveVideo(id: Long): String
@@ -43,6 +46,16 @@ object CoreBridge {
     /** Short clips only. Null means the video is longer than about 1.5s, so ExoPlayer should play it. */
     external fun nativeLoopClip(id: Long, maxDimension: Int): ByteArray?
     external fun nativeClose()
+    external fun nativePackageProgress(): Double
+    external fun nativeExportPackage(
+        path: String,
+        password: String,
+        ids: LongArray,
+        paths: Array<String>,
+        dirs: Array<String>,
+        compress: Boolean,
+    ): String
+    external fun nativeImportPackage(path: String, password: String, folderId: Long): String
 
     class Result(
         val ok: Boolean,

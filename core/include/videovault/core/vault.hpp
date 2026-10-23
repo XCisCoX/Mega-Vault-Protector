@@ -1,5 +1,8 @@
 #pragma once
 
+#include "videovault/core/provenance.hpp"
+#include "videovault/core/secret.hpp"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -7,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -124,6 +128,62 @@ struct ThumbnailInfo {
     std::vector<unsigned char> bytes;
 };
 
+// Defined in vault.cpp; the handle that the vault keeps private access to.
+class StreamImportImpl;
+
+// One import whose bytes are still arriving (a provider stream).
+//
+// Bytes are authenticated-encrypted chunk by chunk into a vault staging package
+// as they are appended, so no plaintext is ever written to disk and memory use
+// does not grow with the track's length. commit() finalizes the package,
+// atomically publishes it and records the row plus its provenance in one
+// transaction; destroying an uncommitted handle discards the staging package,
+// so a cancelled, crashed or short stream can never publish a playable item.
+//
+// The handle borrows the Vault it was created from: it must not outlive that
+// Vault, and it stops being usable once the vault is locked (commit() then
+// fails with the vault-locked error and leaves nothing behind).
+class StreamImport final {
+public:
+    StreamImport() noexcept;
+    ~StreamImport();
+
+    StreamImport(StreamImport&& other) noexcept;
+    StreamImport& operator=(StreamImport&& other) noexcept;
+
+    StreamImport(const StreamImport&) = delete;
+    StreamImport& operator=(const StreamImport&) = delete;
+
+    // False once the handle was committed, aborted or destructured.
+    [[nodiscard]] bool active() const noexcept;
+    // The plaintext size declared at begin; the import fails unless exactly
+    // this many bytes arrive.
+    [[nodiscard]] std::uint64_t expected_size() const noexcept;
+    [[nodiscard]] std::uint64_t written() const noexcept;
+
+    // Appends bytes observed from the provider. Rejects input past the declared
+    // size and any call after commit/abort. Not thread-safe: call it from one
+    // thread at a time.
+    [[nodiscard]] Result<std::uint64_t> append(
+        std::span<const unsigned char> bytes);
+
+    // Finalizes and publishes. Returns the new item id. When the vault already
+    // holds this provider track, the staged package is discarded, the existing
+    // id is returned and already_present() reports true.
+    [[nodiscard]] Result<std::int64_t> commit();
+
+    // Discards the staging package. Idempotent and safe from a cancellation
+    // path as long as no append() is running concurrently.
+    void abort() noexcept;
+
+    [[nodiscard]] bool already_present() const noexcept;
+
+private:
+    friend class Vault;
+    explicit StreamImport(std::unique_ptr<StreamImportImpl> impl) noexcept;
+    std::unique_ptr<StreamImportImpl> impl_;
+};
+
 class Vault final {
 public:
     Vault() noexcept;
@@ -137,6 +197,29 @@ public:
 
     [[nodiscard]] static bool exists(const std::filesystem::path& root) noexcept;
 
+    // True when this process could lock secret pages with mlock(). When false,
+    // Secret buffers are still wiped on release but may be swappable; the UI
+    // must not claim otherwise.
+    [[nodiscard]] static bool secure_memory_available() noexcept;
+
+    // Secure-memory entry points. Prefer these: the password bytes go straight
+    // into a locked, self-wiping buffer and are never copied into a std::string.
+    [[nodiscard]] static Result<Vault> create(
+        const std::filesystem::path& root,
+        const Secret& password,
+        Argon2Parameters parameters = {});
+
+    [[nodiscard]] static Result<Vault> open(
+        const std::filesystem::path& root,
+        const Secret& password);
+
+    [[nodiscard]] static Result<bool> validate_password(
+        const std::filesystem::path& root,
+        const Secret& password);
+
+    // Compatibility overloads for callers that already hold the password as
+    // text. They copy it into a Secret internally, but the caller's own bytes
+    // are outside the core's control (see REMAINING_RISKS.md).
     [[nodiscard]] static Result<Vault> create(
         const std::filesystem::path& root,
         std::string_view password,
@@ -151,38 +234,52 @@ public:
         std::string_view password);
 
     [[nodiscard]] bool is_unlocked() const noexcept;
+
+    // Hard lock: revokes the session, closes the encrypted database, wipes the
+    // master key and clears every capability handed out during the unlock.
     void lock() noexcept;
+
+    // Increases on every completed lock(). An asynchronous result created under
+    // an older generation belongs to a vault that no longer exists; callers
+    // must discard it instead of reopening a closed view.
+    [[nodiscard]] std::uint64_t lock_generation() const noexcept;
 
     [[nodiscard]] const std::filesystem::path& root_path() const noexcept;
     [[nodiscard]] Argon2Parameters kdf_parameters() const noexcept;
 
     // Phase 3: import and gallery.
     // Imports an opaque file as an encrypted package and records it in the
-    // vault database. The same bytes are stored once: a second copy, even
-    // under another name, returns the existing id and adds nothing.
+    // vault database. Every import is an independent item; see
+    // `collapse_identical` below for the replaying-transport exception.
     // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
     // file processed, called from the importing thread.
-    // folder_id 0 stores the new video in the library root. An existing
-    // copy of the same file keeps the folder it already has.
-    // already_present, when given, is set true when the bytes were already
-    // in the vault and false when a new item was stored.
+    // folder_id 0 stores the new video in the library root. Importing bytes that
+    // are already in the vault stores another independent item: the user asked
+    // for a copy, so the vault does not silently resolve to the first one.
+    // `collapse_identical` exists for transports that replay a whole batch (a
+    // sync package resumed after a disconnect): those resolve identical content
+    // onto the existing item and set `already_present` instead of adding copies.
     [[nodiscard]] Result<std::int64_t> import_file(
         const std::filesystem::path& source_path,
         const std::function<void(double)>& progress = {},
         std::int64_t folder_id = 0,
-        bool* already_present = nullptr);
+        bool* already_present = nullptr,
+        bool collapse_identical = false);
 
     // Phase 8: text records. Imports content supplied in memory instead
     // of a file on disk, so the app can author an item that lives in the library
     // exactly like an imported file: the same package format, folders, tags,
     // search, sharing and password-change behavior. The caller decides the
     // content format; the core stores it as opaque bytes. Identical content
-    // returns the item already in the vault, exactly as import_file does.
+    // becomes its own item, exactly as import_file does. `collapse_identical`
+    // has the same replay-only meaning as in import_file.
     // `display_name` follows the folder/file naming rule (1–120 characters).
     [[nodiscard]] Result<std::int64_t> import_bytes(
         std::span<const unsigned char> bytes,
         std::string_view display_name,
-        std::int64_t folder_id = 0);
+        std::int64_t folder_id = 0,
+        bool* already_present = nullptr,
+        bool collapse_identical = false);
 
     // Replaces an existing item's content in place. A new package is sealed and
     // the row, its wrapped key and the content hash are updated in one
@@ -194,7 +291,46 @@ public:
         std::span<const unsigned char> bytes,
         std::string_view display_name);
 
+    // Phase 9: progressive import. Begins an item whose bytes will arrive in
+    // pieces (a provider stream) and returns a handle that seals them into a
+    // vault package as they are appended. The declared plaintext size is
+    // authenticated in the package header, so it must be known up front
+    // (Content-Length, or the sum of the resolved segments); an import that
+    // receives a different number of bytes fails and publishes nothing.
+    //
+    // `provenance`, when given, is recorded in the same transaction as the row,
+    // which is what makes a provider track resolvable to its offline copy.
+    // Nothing is created in the database until commit() succeeds.
+    [[nodiscard]] Result<StreamImport> begin_stream_import(
+        std::string_view display_name,
+        std::uint64_t expected_plaintext_size,
+        std::int64_t folder_id = 0,
+        const TrackProvenance* provenance = nullptr);
+
+    // Phase 9: provider provenance inside the encrypted database.
+    // `provider_id` + `provider_track_id` are unique per vault, so an item
+    // imported from a provider can be found again after a restart without
+    // matching file names or re-downloading anything.
+    [[nodiscard]] Result<bool> set_video_provenance(
+        std::int64_t video_id,
+        const TrackProvenance& provenance);
+
+    [[nodiscard]] Result<std::optional<TrackProvenance>> video_provenance(
+        std::int64_t video_id) const;
+
+    [[nodiscard]] Result<std::optional<std::int64_t>> find_video_by_provenance(
+        std::string_view provider_id,
+        std::string_view provider_track_id) const;
+
+    // Every provider-linked item in this vault, so a library can mark tracks
+    // that are already available offline with one query.
+    [[nodiscard]] Result<std::vector<TrackProvenance>> list_video_provenance() const;
+
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
+
+    // Plaintext byte length for one id. Playback must never list/probe the
+    // whole library just to implement AVSEEK_SIZE for the selected item.
+    [[nodiscard]] Result<std::uint64_t> video_size(std::int64_t video_id) const;
 
     // Resolves the stored package file for a video and verifies it exists.
     [[nodiscard]] Result<std::filesystem::path> package_path(
@@ -247,6 +383,13 @@ public:
     // Re-keys the vault with a new password: new salt and Argon2id parameters,
     // SQLCipher rekey, a fresh sealed password verifier, and re-wrapped file
     // keys. The vault stays unlocked under the new credentials on success.
+    // Both passwords are held in secure memory for the duration of the change
+    // only; neither is retained afterwards.
+    [[nodiscard]] Result<bool> change_password(
+        const Secret& current_password,
+        const Secret& new_password,
+        Argon2Parameters parameters = {});
+
     [[nodiscard]] Result<bool> change_password(
         std::string_view current_password,
         std::string_view new_password,
@@ -328,6 +471,14 @@ public:
     // `progress` receives 0.0..1.0 from the calling thread.
     [[nodiscard]] Result<bool> export_package(
         const std::filesystem::path& destination,
+        const Secret& password,
+        const std::vector<PackageItem>& files,
+        const std::vector<std::string>& directories,
+        bool compress,
+        const std::function<void(double)>& progress = {});
+
+    [[nodiscard]] Result<bool> export_package(
+        const std::filesystem::path& destination,
         std::string_view password,
         const std::vector<PackageItem>& files,
         const std::vector<std::string>& directories,
@@ -338,6 +489,14 @@ public:
     // library root), recreating folders. The password is the one chosen when
     // the package was written, not the vault password.
     // `on_file` / `on_folder` run for items that were newly stored.
+    [[nodiscard]] Result<int> import_package(
+        const std::filesystem::path& source,
+        const Secret& password,
+        std::int64_t folder_id,
+        const std::function<void(double)>& progress = {},
+        const std::function<void(std::int64_t id, const std::string& name, std::uint64_t size, std::int64_t parent)>& on_file = {},
+        const std::function<void(std::int64_t id, std::int64_t parent, const std::string& name)>& on_folder = {});
+
     [[nodiscard]] Result<int> import_package(
         const std::filesystem::path& source,
         std::string_view password,
@@ -358,6 +517,9 @@ public:
 
 private:
     class Impl;
+    // StreamImportImpl::commit() publishes and records the row; it needs the
+    // vault mutex and the pinned Impl the import was started from.
+    friend class StreamImportImpl;
     explicit Vault(std::filesystem::path root, std::unique_ptr<Impl> impl) noexcept;
 
     // Guards impl_ and all operations on it. Held by unique_ptr so the mutex
@@ -370,6 +532,10 @@ private:
     // without blocking on mutex_ — which a worker import holds for the whole
     // duration of each file. Blocking there would freeze the UI thread.
     std::atomic<bool> unlocked_{false};
+
+    // Incremented by every lock() so asynchronous callers can tell that the
+    // vault they were reading belongs to a session that has ended.
+    std::atomic<std::uint64_t> lock_generation_{0};
 
     std::filesystem::path root_;
     std::unique_ptr<Impl> impl_;

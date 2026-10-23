@@ -1,7 +1,16 @@
 #pragma once
 
+#include <QJsonArray>
+#include <QJsonObject>
+
+#include "videovault/app/sync_state.hpp"
+
+#include <QHash>
 #include <QMainWindow>
+
+#include "videovault/app/record_document.hpp"
 #include <QStringList>
+#include <QVector>
 
 #include <atomic>
 #include <cstdint>
@@ -9,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 class QAbstractButton;
@@ -23,6 +33,9 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
+class QPixmap;
+class QThreadPool;
 class QProgressBar;
 class QPushButton;
 class QThread;
@@ -33,6 +46,7 @@ class QLocalServer;
 class QObject;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QToolButton;
 
 template <typename T>
 class QFutureWatcher;
@@ -53,6 +67,15 @@ class PlayerWindow;
 class MusicWindow;
 class PdfWindow;
 class RecordWindow;
+class SyncEngine;
+class SyncPage;
+class TagFilterButton;
+class SettingsDialog;
+class PluginHost;
+class MusicPluginPage;
+class MusicLibraryPage;
+class PluginTrackDownloader;
+class ExtensionToolsPage;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -85,6 +108,7 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
+    friend struct GalleryPerformanceTestAccess;
     void buildInterface();
     QWidget* buildSetupPage();
     QWidget* buildLoginPage();
@@ -94,6 +118,7 @@ private:
     void selectLoginLocation();
     void beginCreate();
     void beginOpen();
+    void beginCloudLogin();
     void finishOperation();
     void beginImport();
     void beginImportFolder();
@@ -102,11 +127,32 @@ private:
     void flushExternalImports();
     bool handleExplorerDrag(QObject* watched, QEvent* event);
     void moveItemsToFolder(std::int64_t destination);
+    // Rows travel as (kind, signed role) pairs, exactly as the gallery stores
+    // them, so a drop moves what the drag carried, not the live selection.
+    using GalleryRow = std::pair<int, qlonglong>;
+    std::vector<GalleryRow> selectedRows() const;
+    void captureDragPayload(bool from_details);
+    void clearDragPayload();
+    // Returns true when every requested move landed. sourceFolder is where the
+    // rows were listed from, so moving them back there is a silent no-op.
+    bool moveRowsToFolder(const std::vector<GalleryRow>& rows, std::int64_t destination,
+        std::int64_t sourceFolder);
+    void selectGalleryRow(int kind, qlonglong role);
+    void applyPendingSelection();
+    void cutSelection();
+    void pasteCutSelection();
+    void clearCut();
+    void applyCutDimming();
+    void goUpFolder();
+    // Explorer-style folder pane on the left of both gallery views.
+    void rebuildFolderTree();
+    void setFolderPaneCollapsed(bool collapsed);
     void highlightDropFolder(std::int64_t folder_id, bool on);
     bool galleryHasFocus() const;
     void beginRestoreSelected();
     void beginExportPackage(std::int64_t only_folder_id = 0);
     void beginImportPackage();
+    bool importPackagePath(const QString& path);
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
     void revealVideo(qlonglong id, const QString& name, qlonglong size,
@@ -114,10 +160,20 @@ private:
     void revealFolder(qlonglong id, qlonglong parentId, const QString& name);
     void placeVideoRow(qlonglong id, const QString& name, qlonglong size, qlonglong importedAt);
     void placeFolderRow(qlonglong id, const QString& name);
-    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize);
+    void decorateVideo(qlonglong video_id, const QString& name, quint64 originalSize, bool loadThumbnail = true);
+    void rememberGalleryThumbnail(qlonglong id, const QPixmap& pixmap);
+    QListWidgetItem* galleryIconItem(qlonglong id) const;
+    QTreeWidgetItem* galleryTreeItem(qlonglong id) const;
+    void galleryTaskFinished();
     void paintGalleryBatch();
     void decorateVisible();
     void recountLibrary();
+    // The footer shows the current folder's totals, or the selection while one
+    // exists. Both paths go through setFooterSummary so an async listing cannot
+    // overwrite a selected-item summary with the folder total.
+    void setFooterSummary(const QString& summary);
+    void updateSelectionFooter();
+    QString selectionFooterText() const;
     void openFolder(std::int64_t folder_id);
     void rebuildBreadcrumb();
     void beginNewFolder();
@@ -133,6 +189,68 @@ private:
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
+    void openPluginMusic(const QString& query = QString());
+    // The library's own music page: audio items, not a provider search.
+    void openMusicLibrary();
+    void offerPluginSearchRow();
+    // The provider shown as a folder of the library: one mixed root list of
+    // album folders and song rows, an album opening as a folder of its tracks,
+    // and Back walking one level at a time.
+    void ensurePluginPage();
+    void enterPluginFolder(const QString& term);
+    void leavePluginFolder();
+    void rebuildPluginFolder(const QString& problem = QString());
+    void armPluginDeadline(const QString& message);
+    void openPluginAlbum(int entry);
+    bool handlePluginRow(int kind, int entry);
+    void enterPluginListView();
+    void restorePluginViewMode();
+    void ensurePluginDownloads();
+    int pluginRowState(const QString& trackId) const;
+    void applyPluginRowState(const QString& trackId);
+    void syncPluginRowButtons();
+    void startPluginDownload(const QString& trackId);
+    void updatePluginFolderStatus(int songs, int albums);
+    bool pluginFolder_{false};
+    QString pluginQuery_;
+    QJsonObject pluginCatalogue_;
+    // The song rows currently listed, in row order, so a row can be activated.
+    std::vector<QJsonObject> pluginRows_;
+    // Albums of the root list, and the open album's own state.
+    std::vector<QJsonObject> pluginAlbumItems_;
+    QJsonArray pluginAlbumTracks_;
+    QString pluginAlbumId_;
+    QString pluginAlbumName_;
+    QString pluginAlbumProblem_;
+    bool pluginAlbumPending_{false};
+    // Track id -> catalogue object, and the row's download state and progress.
+    QHash<QString, QJsonObject> pluginTrackItems_;
+    QHash<QString, int> pluginRowPercent_;
+    // Download buttons pinned over the visible track rows.
+    QVector<QToolButton*> pluginRowButtons_;
+    bool pluginViewModeSaved_{false};
+    int pluginSavedViewMode_{1};
+    // The folder's own deadline: a provider that never answers must not leave
+    // the row at "Waiting" for the rest of the session.
+    QTimer* pluginDeadline_{nullptr};
+    void openExtensionTools(const QString& id = {});
+    PluginHost* pluginHost_{nullptr};
+    MusicPluginPage* pluginMusic_{nullptr};
+    MusicLibraryPage* musicLibrary_{nullptr};
+    PluginTrackDownloader* pluginDownloads_{nullptr};
+    QPushButton* pluginMusicButton_{nullptr};
+    ExtensionToolsPage* extensionTools_{nullptr};
+    QPushButton* extensionToolsButton_{nullptr};
+    void openSync();
+    void closeSync();
+
+    // The running build against the newest GitHub release, the same check the
+    // phone runs when its library opens. The whole flow is off the UI thread.
+    void configureUpdateChecks();
+    void beginUpdateCheck(bool manual = false);
+    void beginUpdateInstall(bool automatic = false);
+    void setUpdateProgress(qint64 done, qint64 total);
+    void offerUpdateRestart();
     void beginPlayback(std::int64_t video_id);
     void beginMusic(std::int64_t video_id);
     void beginPdf(std::int64_t video_id, const QString& title, bool previous, bool next);
@@ -146,6 +264,11 @@ private:
     void placeTransferPanel();
     // A record is a key/value item, edited in its own window.
     void beginNewRecord();
+    // "New from template": the same entry point as New record, with the structure
+    // filled in. The templates are the built-ins plus the user's own template items.
+    void beginNewRecordFromTemplate();
+    void showTemplateChooser(const QVector<QPair<QString, RecordEntry>>& choices);
+    void createRecordItem(const QString& title, const QByteArray& bytes);
     void beginRecord(std::int64_t video_id, const QString& title);
     void closeRecord();
     void stepPlayback(int delta);
@@ -185,7 +308,13 @@ private:
     void showTransfers();
     void refreshTransfers();
     void notePeerCopyFinished(bool ok, const QString& message);
+    // Ordinary Lock: stops sharing, wipes the keys and closes the database.
+    // When a phone is connected the user is asked to choose explicitly between
+    // this and the privacy screen; the privacy screen is never silent.
     void lockVault();
+    // Screen-only lock: hides the library while sharing stays up. Reached only
+    // through lockVault()'s explicit "keep sharing" choice.
+    void enterPrivacyScreen(const std::filesystem::path& root);
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
     void showStatus(const QString& message, bool problem);
@@ -210,6 +339,22 @@ private:
     QLineEdit* loginLocation_{nullptr};
     QLineEdit* loginPassword_{nullptr};
     QLabel* loginError_{nullptr};
+    // Shown only after the user explicitly chose "hide the screen, keep
+    // sharing": the vault is still unlocked in this process, so the lock screen
+    // must say so instead of pretending the keys were wiped.
+    QWidget* privacyBanner_{nullptr};
+    QLabel* privacyBannerText_{nullptr};
+    QPushButton* privacyLockButton_{nullptr};
+    bool privacyScreenActive_{false};
+    // False while the idle auto-lock runs: an unattended lock must not wait on
+    // a dialog, so it always takes the hard-lock path.
+    bool interactiveLock_{true};
+    QWidget* loginLocationRow_{nullptr};
+    QLineEdit* cloudAddress_{nullptr};
+    QLineEdit* cloudFingerprint_{nullptr};
+    QWidget* cloudFields_{nullptr};
+    QWidget* cloudPage_{nullptr};
+    bool cloudLogin_{false};
     QPushButton* unlockButton_{nullptr};
 
     QLabel* unlockedLocation_{nullptr};
@@ -223,12 +368,32 @@ private:
     QWidget* crumbHost_{nullptr};
     QHBoxLayout* crumbLayout_{nullptr};
     std::int64_t currentFolderId_{0};
+    // The templates store folder, recorded when the library is listed and then dropped from
+    // folders_, so nothing that walks the library ever sees it. 0 means "not there yet".
+    std::int64_t templateFolderId_{0};
     std::vector<std::filesystem::path> pendingExternal_;
+    // .mvpk files handed over by the shell file association, kept apart from
+    // media imports because they unlock and import as packages.
+    QStringList pendingPackageExternal_;
     QLocalServer* importServer_{nullptr};
     std::int64_t dropHighlight_{-1};
     std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
+    SettingsDialog* settingsPage_{nullptr};
     QPushButton* shareButton_{nullptr};
+    // Update offer: the release GitHub reported, shown as an icon in the library
+    // bar only once a newer version exists. updatePayload_ holds the unpacked
+    // folder while the user decides whether to restart into it.
+    QPushButton* updateButton_{nullptr};
+    QTimer* updateCheckTimer_{nullptr};
+    bool updateChecking_{false};
+    bool updateInstalling_{false};
+    bool updateChannelBeta_{false};
+    QString updateStatus_;
+    QString updateVersion_;
+    QString updateUrl_;
+    qint64 updateSize_{0};
+    QString updatePayload_;
     QComboBox* viewModeCombo_{nullptr};
     QButtonGroup* viewModeGroup_{nullptr};
     QPushButton* sortButton_{nullptr};
@@ -237,11 +402,31 @@ private:
     bool sortingGallery_{false};
     bool gallerySortAgain_{false};
     bool gallerySortQueued_{false};
-    QComboBox* tagFilterCombo_{nullptr};
+    TagFilterButton* tagFilterButton_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
     QListWidget* iconList_{nullptr};
+    // Folder pane: the tree and its narrow collapse strip, positioned by
+    // layoutLibraryChrome. expandedFolders_ survives every refresh so a rebuilt
+    // tree opens the same way.
+    QWidget* folderPane_{nullptr};
+    QLabel* folderPaneLabel_{nullptr};
+    QPushButton* folderPaneToggle_{nullptr};
+    QTreeWidget* folderTree_{nullptr};
+    bool folderPaneCollapsed_{false};
+    std::unordered_set<std::int64_t> expandedFolders_;
+    // Captured when a gallery drag starts, consumed by the next drop.
+    std::vector<GalleryRow> dragPayload_;
+    bool dragPayloadValid_{false};
+    // Pending Ctrl+X rows. Kept here, never on the OS clipboard.
+    std::vector<GalleryRow> cutItems_;
+    // Folder the cut rows were listed from, so pasting them back there is a no-op.
+    std::int64_t cutFolderId_{0};
+    // Rows to re-select once the post-move refresh has painted them.
+    std::vector<GalleryRow> pendingSelection_;
+    QTimer* dragExpandTimer_{nullptr};
+    std::int64_t dragExpandFolder_{0};
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     MusicWindow* musicWindow_{nullptr};
@@ -261,10 +446,12 @@ private:
     struct GalleryCache;
     std::unique_ptr<GalleryCache> galleryCache_;
     QLabel* statusCountLabel_{nullptr};
+    // Folder total last reported by a listing/recount; the label falls back to
+    // this whenever nothing is selected.
+    QString footerSummary_;
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
-    std::int64_t tagFilterId_{-1};
-    QString tagFilterName_;
+    QStringList tagFilterNames_;
     QString searchText_;
     // Label for the in-progress batch status text ("Importing"/"Restoring").
     QString batchLabel_;
@@ -288,6 +475,10 @@ private:
     std::uint64_t galleryPaintGeneration_{0};
     std::unordered_set<std::int64_t> decoratedIds_;
     int sortProbeCursor_{0};
+    int galleryTasksInFlight_{0};
+    std::size_t galleryResidentLimit_{128};
+    QThreadPool* galleryPool_{nullptr};
+    std::unordered_set<std::int64_t> metadataRequested_;
     // True while refreshGallery is rebuilding the rows. Arrivals during that
     // window are kept and merged into the snapshot, so a late list cannot
     // wipe a file that landed after the list was read.
@@ -335,6 +526,12 @@ private:
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
+    SyncEngine* syncEngine_{nullptr};
+    SyncPage* syncPage_{nullptr};
+    // Derived from the vault password at unlock and never written anywhere:
+    // the package password shared by this vault's devices, and the key that
+    // seals this device's sync state (token and record map). Wiped on lock.
+    sync::Keys syncKeys_;
     // Declared after the vault so sharing stops before the vault is destroyed.
     std::unique_ptr<ShareServer> shareServer_;
     // The swapped phone's library, while it is open. Deletes itself on close.

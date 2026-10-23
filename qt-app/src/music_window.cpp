@@ -6,6 +6,7 @@
 
 #include "videovault/app/media_decoder.hpp"
 #include "videovault/app/player_window.hpp"
+#include "videovault/app/theme.hpp"
 #include "videovault/core/vault.hpp"
 
 #include <QApplication>
@@ -19,6 +20,7 @@
 #include <QCursor>
 #include <QEvent>
 #include <QFileInfo>
+#include <QIcon>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
@@ -81,8 +83,67 @@ constexpr int kBarHeight = 48;
 constexpr int kControlHeight = 32;
 const QColor kAccent(0x33, 0x90, 0xEC);
 const QColor kIcon(0x8D, 0x98, 0xA3);
-const QColor kIconDisabled(0x4A, 0x4A, 0x4C);
-const QColor kCard(28, 28, 30);
+// The player is chrome, not video: unlike the video overlay it follows the live
+// Light/Dark palette. These used to be dark literals (a black bar, white labels,
+// a #1c1c1e popup card), which left the whole music player dark inside a light
+// theme. Every one of them is read at paint time, so a theme switch repaints.
+QColor playerBar() {
+    return isDarkTheme() ? QColor(0, 0, 0) : QApplication::palette().color(QPalette::Window);
+}
+QColor playerCard() {
+    return isDarkTheme() ? QColor(28, 28, 30) : QApplication::palette().color(QPalette::Base);
+}
+QColor playerInk() {
+    return QApplication::palette().color(QPalette::WindowText);
+}
+QColor playerSecondaryInk() {
+    return QApplication::palette().color(QPalette::PlaceholderText);
+}
+QColor playerHover() {
+    return isDarkTheme() ? QColor(255, 255, 255, 18) : QColor(0, 0, 0, 18);
+}
+QColor playerHairline() {
+    QColor color = QApplication::palette().color(QPalette::Midlight);
+    color.setAlpha(isDarkTheme() ? 90 : 160);
+    return color;
+}
+QColor playerGroove() {
+    QColor color = QApplication::palette().color(QPalette::Midlight);
+    color.setAlpha(isDarkTheme() ? 255 : 200);
+    return color;
+}
+
+// Slider painted straight from the palette. A stylesheet's literal groove and
+// handle colours do not re-resolve when the theme changes, which is how the
+// music bar kept dark controls inside a light window.
+class PlayerSlider : public QSlider {
+public:
+    explicit PlayerSlider(QWidget* parent = nullptr) : QSlider(Qt::Horizontal, parent) {
+        setFocusPolicy(Qt::NoFocus);
+        setMinimumHeight(14);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        const qreal centre = height() / 2.0;
+        const QRectF groove(1, centre - 1.5, std::max(1, width() - 2), 3);
+        painter.setBrush(playerGroove());
+        painter.drawRoundedRect(groove, 1.5, 1.5);
+        const int span = maximum() - minimum();
+        const qreal fraction = span <= 0 ? 0.0 : qreal(value() - minimum()) / span;
+        QRectF played = groove;
+        played.setWidth(groove.width() * fraction);
+        painter.setBrush(kAccent);
+        painter.drawRoundedRect(played, 1.5, 1.5);
+        const qreal radius = (underMouse() || isSliderDown()) ? 6.0 : 5.0;
+        painter.setBrush(kAccent);
+        painter.drawEllipse(QPointF(groove.left() + groove.width() * fraction, centre),
+            radius, radius);
+    }
+};
 
 QString speedLabel(const int milli) {
     const double shown = std::round(milli / 100.0) / 10.0;
@@ -352,7 +413,7 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
         if (isEnabled() && underMouse()) {
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255, 255, 255, 18));
+            painter.setBrush(playerHover());
             painter.drawEllipse(rect().center(), 13, 13);
         }
         painter.setPen(Qt::NoPen);
@@ -373,15 +434,15 @@ protected:
 private:
     QColor ink() const {
         if (!isEnabled()) {
-            return kIconDisabled;
+            return playerSecondaryInk();
         }
         if (active_) {
             return kAccent;
         }
         if (underMouse()) {
-            return Qt::white;
+            return playerInk();
         }
-        return kIcon;
+        return isDarkTheme() ? kIcon : playerSecondaryInk();
     }
 
     void paintGlyph(QPainter& painter, const QRect& box) const {
@@ -553,7 +614,7 @@ protected:
         const int played = isEnabled() ? width() * value_ / 1000 : 0;
         painter.setBrush(kAccent);
         painter.drawRect(0, y, played, thick);
-        painter.setBrush(QColor(0x3A, 0x3A, 0x3C));
+        painter.setBrush(playerGroove());
         painter.drawRect(played, y, width() - played, thick);
     }
     void mousePressEvent(QMouseEvent* event) override {
@@ -619,8 +680,8 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(QColor(255, 255, 255, 36)));
-        painter.setBrush(kCard);
+        painter.setPen(QPen(playerHairline()));
+        painter.setBrush(playerCard());
         painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 12, 12);
     }
 };
@@ -647,10 +708,10 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
         if (underMouse()) {
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255, 255, 255, 18));
+            painter.setBrush(playerHover());
             painter.drawRoundedRect(rect().adjusted(4, 1, -4, -1), 8, 8);
         }
-        painter.setPen(marked_ ? kAccent : QColor(Qt::white));
+        painter.setPen(marked_ ? kAccent : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
@@ -708,7 +769,7 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
         if (underMouse()) {
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255, 255, 255, 16));
+            painter.setBrush(playerHover());
             painter.drawRoundedRect(rect().adjusted(6, 2, -6, -2), 8, 8);
         }
         const QRect icon(12, 9, 40, 40);
@@ -723,7 +784,7 @@ protected:
         } else {
             painter.drawPixmap(icon, paintNotePlate(icon.width()));
         }
-        painter.setPen(current_ ? kAccent : Qt::white);
+        painter.setPen(current_ ? kAccent : playerInk());
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(13);
         painter.setFont(font);
@@ -762,7 +823,7 @@ public:
         scroll_->setStyleSheet(QStringLiteral(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollBar:vertical { width: 8px; background: transparent; margin: 4px 0; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,70); border-radius: 4px; }"
+            "QScrollBar::handle:vertical { background: palette(mid); border-radius: 4px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"));
         scroll_->viewport()->setAutoFillBackground(false);
         host_ = new QWidget();
@@ -881,19 +942,13 @@ public:
         layout->setContentsMargins(10, 8, 10, 8);
         layout->setSpacing(2);
         readout_ = new QLabel(this);
-        readout_->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
+        readout_->setForegroundRole(QPalette::WindowText);
         QFont font(QStringLiteral("Segoe UI"));
         font.setPixelSize(12);
         font.setBold(true);
         readout_->setFont(font);
-        slider_ = new QSlider(Qt::Horizontal, this);
+        slider_ = new PlayerSlider(this);
         slider_->setRange(5, 25);
-        slider_->setFocusPolicy(Qt::NoFocus);
-        slider_->setStyleSheet(QStringLiteral(
-            "QSlider::groove:horizontal { height: 4px; background: #3a3a3c; border-radius: 2px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
-            "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; "
-            "background: white; border-radius: 6px; }"));
         layout->addWidget(readout_);
         layout->addWidget(slider_);
         connect(slider_, &QSlider::valueChanged, this, [this](const int value) {
@@ -969,13 +1024,13 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, true);
         const QRect track(width() / 2 - 2, 18, 4, height() - 36);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0x3A, 0x3A, 0x3C));
+        painter.setBrush(playerGroove());
         painter.drawRoundedRect(track, 2, 2);
         const int filled = track.height() * percent_ / 100;
         painter.setBrush(kAccent);
         painter.drawRoundedRect(QRect(track.left(), track.bottom() - filled + 1, track.width(), filled), 2, 2);
         const int handleY = track.bottom() - filled;
-        painter.setBrush(Qt::white);
+        painter.setBrush(kAccent);
         painter.drawEllipse(QPoint(track.center().x(), handleY), 6, 6);
     }
     void mousePressEvent(QMouseEvent* event) override { apply(event->pos().y()); }
@@ -1064,11 +1119,9 @@ QPixmap roundedCover(const QImage& image, const int side) {
     return plate;
 }
 
-class ClickSlider final : public QSlider {
+class ClickSlider final : public PlayerSlider {
 public:
-    explicit ClickSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {
-        setFocusPolicy(Qt::NoFocus);
-    }
+    explicit ClickSlider(QWidget* parent) : PlayerSlider(parent) {}
 
     std::function<void()> began;
     std::function<void(int)> jumped;
@@ -1137,9 +1190,11 @@ public:
         titleFont.setPixelSize(15);
         titleFont.setBold(true);
         title_->setFont(titleFont);
-        title_->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
-        artist_->setStyleSheet(QStringLiteral("color: #d0d0d4; background: transparent;"));
-        album_->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
+        // Foreground roles instead of literal colours: labels without a
+        // stylesheet follow the palette, including a live theme switch.
+        title_->setForegroundRole(QPalette::WindowText);
+        artist_->setForegroundRole(QPalette::PlaceholderText);
+        album_->setForegroundRole(QPalette::PlaceholderText);
         QFont small(QStringLiteral("Segoe UI"));
         small.setPixelSize(12);
         artist_->setFont(small);
@@ -1157,11 +1212,6 @@ public:
         timeline_->setRange(0, 1000);
         timeline_->setFocusPolicy(Qt::NoFocus);
         timeline_->setFixedHeight(16);
-        timeline_->setStyleSheet(QStringLiteral(
-            "QSlider::groove:horizontal { height: 3px; background: #3a3a3c; border-radius: 1px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 1px; }"
-            "QSlider::handle:horizontal { width: 10px; height: 10px; margin: -4px 0; "
-            "background: white; border-radius: 5px; }"));
         column->addSpacing(4);
         column->addWidget(timeline_);
 
@@ -1177,14 +1227,8 @@ public:
         previous_->setToolTip(QStringLiteral("Previous"));
         play_->setToolTip(QStringLiteral("Pause"));
         next_->setToolTip(QStringLiteral("Next"));
-        volume_ = new QSlider(Qt::Horizontal, this);
+        volume_ = new PlayerSlider(this);
         volume_->setRange(0, 100);
-        volume_->setFocusPolicy(Qt::NoFocus);
-        volume_->setStyleSheet(QStringLiteral(
-            "QSlider::groove:horizontal { height: 4px; background: #3a3a3c; border-radius: 2px; }"
-            "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
-            "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; "
-            "background: white; border-radius: 6px; }"));
         controls->addWidget(previous_);
         controls->addWidget(play_);
         controls->addWidget(next_);
@@ -1283,8 +1327,8 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(QColor(255, 255, 255, 36)));
-        painter.setBrush(kCard);
+        painter.setPen(QPen(playerHairline()));
+        painter.setBrush(playerCard());
         painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 16, 16);
     }
     void resizeEvent(QResizeEvent* event) override {
@@ -1601,8 +1645,8 @@ MusicWindow::MusicWindow(QWidget* parent)
     timeLabel_->setFont(textFont);
     nameLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
     timeLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
-    nameLabel_->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
-    timeLabel_->setStyleSheet(QStringLiteral("color: #999999; background: transparent;"));
+    nameLabel_->setForegroundRole(QPalette::WindowText);
+    timeLabel_->setForegroundRole(QPalette::PlaceholderText);
     nameLabel_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     timeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
@@ -2384,9 +2428,14 @@ void MusicWindow::layoutControls() {
 
 void MusicWindow::applyName() {
     const bool failed = !errorText_.isEmpty();
-    nameLabel_->setStyleSheet(failed
-        ? QStringLiteral("color: #ff6b6b; background: transparent;")
-        : QStringLiteral("color: white; background: transparent;"));
+    // The normal colour is the palette's window text so the label follows the
+    // theme; only the failure state keeps a dedicated warning colour.
+    if (failed) {
+        nameLabel_->setStyleSheet(QStringLiteral("color: #c0392b; background: transparent;"));
+    } else {
+        nameLabel_->setStyleSheet(QString());
+        nameLabel_->setForegroundRole(QPalette::WindowText);
+    }
     const QString full = failed ? errorText_ : titleText_;
     nameLabel_->setText(nameLabel_->fontMetrics().elidedText(full, Qt::ElideRight, std::max(0, nameLabel_->width())));
 }
@@ -2579,8 +2628,8 @@ void MusicWindow::resizeEvent(QResizeEvent* event) {
 
 void MusicWindow::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    painter.fillRect(rect(), Qt::black);
-    painter.fillRect(0, 0, width(), 1, QColor(255, 255, 255, 28));
+    painter.fillRect(rect(), playerBar());
+    painter.fillRect(0, 0, width(), 1, playerHairline());
 }
 
 void MusicWindow::mouseDoubleClickEvent(QMouseEvent* event) {

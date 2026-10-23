@@ -51,6 +51,10 @@ public:
         QString* error,
         const char* name_hint = nullptr);
 
+    // Plugin-only RAM source. Shares Qt's immutable byte storage; never stages
+    // plaintext in a file or imports into a vault merely to start playback.
+    bool open_memory(const QByteArray& bytes, QString* error);
+
     bool is_open() const;
     std::int64_t duration_ms() const;
     int video_width() const;

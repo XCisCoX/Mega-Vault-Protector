@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -23,7 +24,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +47,8 @@ import androidx.core.view.WindowCompat
 private object AppSession {
     var screen: Screen = Screen.Login
     var leftAt: Long = 0L
+    // Retained with the native/remote session across activity recreation, not process death.
+    var vaultIdentity by mutableStateOf(VaultIdentity())
 }
 
 class MainActivity : ComponentActivity() {
@@ -56,9 +58,35 @@ class MainActivity : ComponentActivity() {
     /** The lock screen is up, but the vault stays open so a swap can keep going. */
     private var shareHoldsVault = false
 
+    private fun openedLocalVault(root: String) {
+        AppSession.vaultIdentity = AppSession.vaultIdentity.openedLocal(root)
+        VaultLocation.save(this, root)
+        shareHoldsVault = false
+        GalleryCache.clear()
+        show(Screen.Vault)
+        SyncV4Auto.attach(this, root)
+    }
+
+    private fun openedRemoteVault() {
+        SyncV4Auto.detach()
+        AppSession.vaultIdentity = AppSession.vaultIdentity.connectedRemote()
+        shareHoldsVault = false
+        show(Screen.Vault)
+    }
+
     private fun show(next: Screen) {
+        // The library and its provider player share the same RAM-only session.
+        if (next !is Screen.Vault && next !is Screen.PluginMusic) PluginLibrary.close()
+        if (next !is Screen.Plugins && next !is Screen.Vault && next !is Screen.PluginMusic) PluginRuntime.close()
         screen = next
         AppSession.screen = next
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Coming back to a vault that is already open is the best moment to
+        // catch up: no pass was running while the phone was in someone's pocket.
+        if (unlocked() && !RemoteVault.connected()) SyncV4Auto.syncNow()
     }
 
     private fun unlocked(): Boolean =
@@ -70,19 +98,41 @@ class MainActivity : ComponentActivity() {
         return SystemClock.elapsedRealtime() - AppSession.leftAt >= limit
     }
 
-    private fun lockNow() {
+    /** Set when the user must choose between a hard lock and a screen-only lock. */
+    private var lockChoice by mutableStateOf(false)
+
+    /**
+     * The Lock button. When a PC is swapped in, the user has to say whether the
+     * vault really locks (sharing ends) or only the screen hides (the keys stay
+     * in memory and the PC keeps reading). The choice is never made silently.
+     */
+    private fun requestLock() {
+        if (PeerLink.linked() && unlocked()) {
+            lockChoice = true
+            return
+        }
+        lockNow(keepSharing = false)
+    }
+
+    private fun lockNow(keepSharing: Boolean = false) {
+        SyncV4Auto.detach()
+        PluginLibrary.close()
+        PluginRuntime.close()
         if (MusicHub.active) {
             startService(
                 Intent(this, MusicPlaybackService::class.java)
                     .setAction(MusicPlaybackService.ACTION_STOP),
             )
         }
-        // A swap outlives the lock screen. It ends when someone disconnects
-        // or the PC stops sharing, and the vault locks then.
-        if (PeerLink.linked()) {
+        if (keepSharing && PeerLink.linked()) {
+            // Deliberate, user-chosen exception: the swap keeps its vault so the
+            // PC can still read it. The login screen says so.
             shareHoldsVault = true
         } else {
             shareHoldsVault = false
+            // Dropping the PC link is part of the lock: its session handle was a
+            // second way into this vault.
+            runCatching { PeerLink.unlink() }
             if (RemoteVault.connected()) RemoteVault.disconnect()
             else runCatching { CoreBridge.nativeLock() }
         }
@@ -101,14 +151,25 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppProxy.initialize(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Decrypted filenames, thumbnails and video frames must not reach the
+        // screenshot pipeline or the Recents thumbnail. This is the platform
+        // mechanism for that; it protects the preview, not process memory.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
+        // The saved appearance is read once, before the first frame.
+        MvpThemeState.loadOnce(this)
 
-        val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
+        // Only a locked-screen picker hint. Never use preferences to identify an open vault.
+        val initialLocation = VaultLocation.saved(this) ?: filesDir.absolutePath
         val locationOptions = runCatching { VaultLocation.options(this) }
             .getOrDefault(listOf(filesDir.absolutePath))
-        val vaultExists = runCatching { CoreBridge.nativeVaultExists(vaultRoot) }.getOrDefault(false)
+        val vaultExists = runCatching { CoreBridge.nativeVaultExists(initialLocation) }.getOrDefault(false)
         val open = unlocked()
-        if (open && awayTooLong()) {
+        if (open && (awayTooLong() || (!RemoteVault.connected() && AppSession.vaultIdentity.activeLocalRoot == null))) {
             lockNow()
         } else if (open && AppSession.screen !is Screen.Login && AppSession.screen !is Screen.Setup) {
             show(AppSession.screen)
@@ -119,15 +180,44 @@ class MainActivity : ComponentActivity() {
         }
         acceptShare(intent)
         openMusicFromNotification(intent)
+        // A recreated activity reattaches to the actual retained local session.
+        if (unlocked() && !RemoteVault.connected() && screen !is Screen.Login && screen !is Screen.Setup) {
+            AppSession.vaultIdentity.activeLocalRoot?.let { root -> SyncV4Auto.attach(this, root) }
+        }
 
         setContent {
-            MaterialTheme(colorScheme = MvpColorScheme) {
+            MvpTheme {
                 // A player, picture, PDF, or song returns to the library. The library
                 // walks up one folder, then leaves only after a second press.
                 // Login leaves on one press. Setup has nowhere to go back to.
+                if (lockChoice) {
+                    // The app's own blurred sheet, like every other confirmation:
+                    // a Material AlertDialog was the last one left and reads as a
+                    // different product next to the library's sheets.
+                    MvpSheet(
+                        title = "Lock the vault?",
+                        confirmLabel = "Lock and stop sharing",
+                        dismissLabel = "Hide screen, keep sharing",
+                        onDismiss = {
+                            lockChoice = false
+                            lockNow(keepSharing = true)
+                        },
+                        onConfirm = {
+                            lockChoice = false
+                            lockNow(keepSharing = false)
+                        },
+                    ) {
+                        Text(
+                            "Choosing “hide screen” only hides the screen: the vault stays " +
+                                "unlocked in memory and the PC can still read and copy it.",
+                            color = Mvp.text,
+                            fontSize = 14.sp,
+                        )
+                    }
+                }
                 BackHandler(enabled = screen !is Screen.Setup && screen !is Screen.Vault) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.Pdf, is Screen.Text, is Screen.Peer -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music, is Screen.PluginMusic, is Screen.Pdf, is Screen.Text, is Screen.Peer, is Screen.Sync, is Screen.Plugins -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -137,6 +227,11 @@ class MainActivity : ComponentActivity() {
                         shareHoldsVault = false
                         runCatching { CoreBridge.nativeLock() }
                     }
+                }
+                // The cloud copy of the library waits while anything is open, so
+                // a video, a still or a song never shares the link with the sync.
+                LaunchedEffect(screen) {
+                    CloudFiles.viewerOpen = screen !is Screen.Vault
                 }
                 var notice by remember { mutableStateOf<String?>(null) }
                 LaunchedEffect(notice) {
@@ -171,24 +266,32 @@ class MainActivity : ComponentActivity() {
                     ) { current ->
                     when (current) {
                         is Screen.Setup -> SetupScreen(
-                            vaultLocation = vaultRoot,
+                            vaultLocation = initialLocation,
                             locationOptions = locationOptions,
-                            onCreated = { show(Screen.Vault) },
+                            onCreated = { root -> openedLocalVault(root) },
+                            onRemoteConnected = { openedRemoteVault() },
                             onOpenExisting = { show(Screen.Login) },
                         )
                         is Screen.Login -> LoginScreen(
-                            vaultLocation = vaultRoot,
+                            vaultLocation = initialLocation,
                             locationOptions = locationOptions,
-                            onUnlocked = {
-                                shareHoldsVault = false
-                                show(Screen.Vault)
-                            },
+                            onUnlocked = { root -> openedLocalVault(root) },
+                            onRemoteConnected = { openedRemoteVault() },
                             onBack = { show(Screen.Setup) },
+                            privacyScreen = shareHoldsVault && unlocked(),
+                            onLockFully = { lockNow(keepSharing = false) },
                         )
-                        is Screen.Vault -> VaultScreen(
-                            vaultLocation = RemoteVault.label() ?: vaultRoot,
-                            onLock = { lockNow() },
+                        is Screen.Vault -> {
+                            // Outgoing animated content may recompose after a remote disconnect.
+                            val location = if (RemoteVault.connected()) RemoteVault.label() ?: "PC vault"
+                                else AppSession.vaultIdentity.activeLocalRoot
+                            if (location != null) VaultScreen(
+                            vaultLocation = location,
+                            onLock = { requestLock() },
                             onOpenPeer = { show(Screen.Peer) },
+                            onOpenSync = { if (!RemoteVault.connected()) show(Screen.Sync) },
+                            onOpenPlugins = { if (!RemoteVault.connected()) show(Screen.Plugins) },
+                            onPlayPlugin = { show(Screen.PluginMusic) },
                             shareUris = pendingShare,
                             onShareHandled = { pendingShare = emptyList() },
                             onOpenMusic = {
@@ -201,37 +304,76 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onPlay = { id, name, playlist ->
-                                lifecycleScope.launch {
-                                    val kind = withContext(Dispatchers.IO) { FileKinds.resolve(id, name) }
-                                    if (kind.route == 0) {
-                                        notice = "this format currently not supported"
-                                        return@launch
-                                    }
-                                    val next = when {
-                                        FileKinds.isImage(kind) -> Screen.Image(id, name)
-                                        kind.route == 4 -> Screen.Text(id, name)
-                                        kind.route == 3 -> Screen.Pdf(id, name)
-                                        kind.route == 2 -> {
-                                            val songs = withContext(Dispatchers.IO) {
-                                                playlist.filter { FileKinds.resolve(it.id, it.name).route == 2 }
-                                                    .map { PlayItem(it.id, it.name) }
-                                            }
-                                            Screen.Music(id, name, songs)
+                                // A tap opens what was tapped, now. This used to
+                                // read the header of every file in the folder
+                                // (one vault read each, competing with the
+                                // gallery's probes) before the player appeared,
+                                // which is what made the first video take a
+                                // minute on a fresh vault. The name answers
+                                // without touching the vault; only a name that
+                                // says nothing at all falls back to a read.
+                                val known = FileKinds.peek(id) ?: FileKinds.fromNameOnly(name)
+                                when {
+                                    FileKinds.isImage(known) -> show(Screen.Image(id, name))
+                                    known.route == 4 -> show(Screen.Text(id, name))
+                                    known.route == 3 -> show(Screen.Pdf(id, name))
+                                    // playlist holds library rows; the screens
+                                    // take PlayItem, so the filter maps too.
+                                    known.route == 2 -> show(Screen.Music(
+                                        id, name,
+                                        playlist.filter { FileKinds.looksLikeAudio(it.name) }
+                                            .map { PlayItem(it.id, it.name) }))
+                                    known.route == 1 -> show(Screen.Player(
+                                        id, name,
+                                        playlist.filter { FileKinds.looksLikeVideo(it.name) }
+                                            .map { PlayItem(it.id, it.name) }))
+                                    else -> lifecycleScope.launch {
+                                        // No extension and nothing cached: one
+                                        // read is unavoidable, and only for the
+                                        // item actually tapped.
+                                        val sniffed = withContext(Dispatchers.IO) { FileKinds.resolve(id, name) }
+                                        when {
+                                            FileKinds.isImage(sniffed) -> show(Screen.Image(id, name))
+                                            sniffed.route == 4 -> show(Screen.Text(id, name))
+                                            sniffed.route == 3 -> show(Screen.Pdf(id, name))
+                                            sniffed.route == 2 -> show(Screen.Music(
+                                                id, name, listOf(PlayItem(id, name))))
+                                            sniffed.route == 1 -> show(Screen.Player(
+                                                id, name, listOf(PlayItem(id, name))))
+                                            else -> notice = "this format currently not supported"
                                         }
-                                        else -> {
-                                            val playable = withContext(Dispatchers.IO) {
-                                                playlist.filter {
-                                                    val item = FileKinds.resolve(it.id, it.name)
-                                                    item.route == 1 && !FileKinds.isImage(item)
-                                                }.map { PlayItem(it.id, it.name) }
-                                            }
-                                            Screen.Player(id, name, playable)
-                                        }
                                     }
-                                    show(next)
                                 }
                             },
-                        )
+                            )
+                        }
+                        is Screen.Plugins -> {
+                            val root = AppSession.vaultIdentity.activeLocalRoot
+                            if (!RemoteVault.connected() && root != null) PluginScreen(
+                                vaultRoot = root,
+                                onClose = { show(Screen.Vault) },
+                            ) else LaunchedEffect(Unit) { show(Screen.Vault) }
+                        }
+                        is Screen.PluginMusic -> {
+                            val session = PluginLibrary.session
+                            if (session == null) {
+                                LaunchedEffect(Unit) { show(Screen.Vault) }
+                            } else MusicScreen(
+                                videoId = 0L,
+                                name = session.selected?.title ?: session.manifest.name,
+                                playlist = emptyList(),
+                                startFresh = false,
+                                onBack = { show(Screen.Vault) },
+                                pluginSession = session,
+                            )
+                        }
+                        is Screen.Sync -> {
+                            val root = AppSession.vaultIdentity.activeLocalRoot
+                            if (!RemoteVault.connected() && root != null) SyncScreen(
+                                vaultRoot = root,
+                                onClose = { show(Screen.Vault) },
+                            ) else LaunchedEffect(Unit) { show(Screen.Vault) }
+                        }
                         is Screen.Peer -> PeerScreen(onClose = { show(Screen.Vault) })
                         is Screen.Player -> PlayerScreen(
                             videoId = current.videoId,
@@ -275,7 +417,7 @@ class MainActivity : ComponentActivity() {
                             fontSize = 13.sp,
                             modifier = Modifier
                                 .padding(bottom = 72.dp)
-                                .background(Color(0xFFC62828), RoundedCornerShape(8.dp))
+                                .background(Mvp.destructive, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 14.dp, vertical = 8.dp),
                         )
                     }
@@ -298,7 +440,7 @@ class MainActivity : ComponentActivity() {
         pendingShare = uris
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Music || screen is Screen.PluginMusic || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && unlocked()) show(Screen.Vault)
     }
 
@@ -306,7 +448,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val inside = screen is Screen.Vault || screen is Screen.Player
             || screen is Screen.Image || screen is Screen.Pdf || screen is Screen.Text
-            || screen is Screen.Music || screen is Screen.Peer
+            || screen is Screen.Music || screen is Screen.PluginMusic || screen is Screen.Peer || screen is Screen.Sync || screen is Screen.Plugins
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }
@@ -321,7 +463,7 @@ class MainActivity : ComponentActivity() {
 private fun Screen.depth(): Int = when (this) {
     Screen.Setup, Screen.Login -> 0
     Screen.Vault -> 1
-    Screen.Peer -> 2
+    Screen.Peer, Screen.Sync, Screen.Plugins -> 2
     else -> 3
 }
 

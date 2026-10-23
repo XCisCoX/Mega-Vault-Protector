@@ -5,10 +5,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -208,19 +210,47 @@ object LibraryArrivals {
 /** One quiet line. Tap it for the list. */
 @Composable
 fun TransferBar(onOpen: () -> Unit) {
-    val line = TransferHub.headline ?: return
-    Text(
-        line,
-        color = Color.White,
-        fontSize = 13.sp,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
+    val sync = SyncV4Run.progress
+    val line = TransferHub.headline
+    if (sync == null && line == null) return
+    Row(
+        Modifier
             .fillMaxWidth()
-            .background(Color(0xFF16324F))
+            .background(Mvp.progressTrack)
             .clickable(onClick = onOpen)
             .padding(horizontal = 14.dp, vertical = 8.dp),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // A sync in flight owns the left of the bar, so leaving the Sync page
+        // never hides that work is still happening.
+        if (sync != null) {
+            Text(
+                "⇅ Syncing",
+                color = Mvp.accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (line != null) "$line · ${sync.label}" else sync.label,
+                color = Mvp.text,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Text(
+                line.orEmpty(),
+                color = Mvp.text,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
 }
 
 /** What is coming in, what is moving, and what you can stop. */
@@ -233,7 +263,7 @@ fun TransferPage(onClose: () -> Unit) {
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black)
+                .background(Mvp.window)
                 .statusBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
@@ -286,19 +316,19 @@ private fun TransferRow(item: TransferItem) {
     Column(
         Modifier
             .fillMaxWidth()
-            .background(Color(0xFF161618), RoundedCornerShape(12.dp))
+            .background(Mvp.tileBg, RoundedCornerShape(12.dp))
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(item.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(item.title, color = Mvp.title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(item.detail, color = Mvp.description, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (alive) {
                 Text(
                     "Cancel",
-                    color = Color(0xFFFF6B6B),
+                    color = Mvp.errorText,
                     fontSize = 14.sp,
                     modifier = Modifier.clickable { TransferHub.cancel(item.id) }.padding(start = 10.dp),
                 )

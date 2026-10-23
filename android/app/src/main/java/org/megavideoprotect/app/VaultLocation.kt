@@ -63,13 +63,13 @@ object VaultLocation {
 
     /** A plain name for the unlock screen. The raw path stays off that page. */
     fun shortName(context: Context, path: String): String = when {
-        path == context.filesDir.absolutePath -> "App-private (recommended)"
+        path == context.filesDir.absolutePath -> "This phone (recommended)"
         path.contains("/Android/data/") && path.contains("emulated/0") -> "Shared storage"
         path.contains("/Android/data/") -> "SD card"
         else -> java.io.File(path).name.ifBlank { "Chosen folder" }
     }
     fun label(context: Context, path: String): String = when {
-        path == context.filesDir.absolutePath -> "App-private (recommended)"
+        path == context.filesDir.absolutePath -> "This phone"
         path.contains("/Android/data/") ->
             "Shared storage " + path.substringBefore("/Android/data/")
         else -> path

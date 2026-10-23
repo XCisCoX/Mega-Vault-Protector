@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/peer_browser.hpp"
 #include "videovault/app/peer_link.hpp"
 
@@ -107,12 +108,12 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
         "QLabel#peerHint, QLabel#peerStatus { color: #8e8e93; }"
         "QListWidget { background: #000000; border: none; color: white; outline: none; }"
         "QListWidget::item { color: white; border-radius: 6px; }"
-        "QListWidget::item:selected { background: rgba(51, 144, 236, 110); }"
+        "QListWidget::item:selected { background: rgba(38, 114, 200, 110); }"
         "QPushButton { background: #1c1c1e; color: white; border: none; border-radius: 14px;"
         "  min-height: 34px; padding: 0 16px; }"
         "QPushButton:hover { background: #2c2c2e; }"
         "QPushButton:disabled { color: #636366; }"
-        "QPushButton#peerCopy { background: #3390ec; font-weight: 600; }"
+        "QPushButton#peerCopy { background: #2672c8; font-weight: 600; }"
         "QPushButton#peerCopy:hover { background: #4aa0f0; }"
         "QPushButton#peerUnlink { background: #2c1518; color: #ff6b6b; }"));
 
@@ -122,6 +123,7 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
 
     auto* heading = new QHBoxLayout();
     auto* back = new QPushButton(QStringLiteral("Back"), this);
+    icons::withText(back, QStringLiteral("arrow-left"));
     back->setCursor(Qt::PointingHandCursor);
     auto* title = new QLabel(QStringLiteral("%1 · shared with you").arg(phone_), this);
     QFont titleFont(QStringLiteral("Segoe UI"));
@@ -139,7 +141,9 @@ PeerBrowser::PeerBrowser(std::shared_ptr<PeerLink> peer, QWidget* parent)
     crumbLayout_->setSpacing(2);
     top->addWidget(crumbHost_, 1);
     refresh_ = new QPushButton(QStringLiteral("Refresh"), this);
+    icons::withText(refresh_, QStringLiteral("refresh-cw"));
     unlink_ = new QPushButton(QStringLiteral("Disconnect phone"), this);
+    icons::withText(unlink_, QStringLiteral("unplug"));
     unlink_->setObjectName(QStringLiteral("peerUnlink"));
     top->addWidget(refresh_);
     top->addWidget(unlink_);

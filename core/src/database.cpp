@@ -565,6 +565,85 @@ Result<bool> migrate_to_version_6(sqlite3* database) {
     return true;
 }
 
+// Schema version 7: provider provenance (Phase 9).
+//
+// The row records which provider track a vault item is the offline copy of.
+// It lives inside the SQLCipher database, so it inherits the vault's
+// protection: no provider id, track id or source URL is written anywhere in the
+// clear, and two vaults never see each other's provenance.
+Result<bool> migrate_to_version_7(sqlite3* database) {
+    auto transaction = run(database, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read current schema version", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    const int version = sqlite3_column_int(current.get(), 0);
+    if (version >= 7) {
+        auto committed = run(database, "COMMIT;");
+        if (!committed) {
+            rollback();
+            return committed.error();
+        }
+        return true;
+    }
+
+    auto created = run(database,
+        "CREATE TABLE video_provenance ("
+        "video_id INTEGER PRIMARY KEY NOT NULL REFERENCES videos(id) ON DELETE CASCADE,"
+        "provider_id TEXT NOT NULL,"
+        "provider_track_id TEXT NOT NULL,"
+        "source_url TEXT NOT NULL,"
+        "title TEXT NOT NULL,"
+        "artist TEXT NOT NULL,"
+        "album TEXT NOT NULL,"
+        "duration_ms INTEGER NOT NULL,"
+        "codec TEXT NOT NULL,"
+        "quality TEXT NOT NULL,"
+        "artwork_sha256 TEXT NOT NULL,"
+        "imported_at INTEGER NOT NULL);");
+    if (!created) {
+        rollback();
+        return created.error();
+    }
+    // One offline copy per provider track. The index is the concurrency guard
+    // for two saves of the same track; the importer resolves the winner.
+    auto indexed = run(database,
+        "CREATE UNIQUE INDEX video_provenance_identity"
+        " ON video_provenance(provider_id, provider_track_id);");
+    if (!indexed) {
+        rollback();
+        return indexed.error();
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database,
+        "INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?1);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseFailure,
+            "insert schema migration 7", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
 VideoRow row_from_statement(sqlite3_stmt* statement) {
     VideoRow row;
     row.id = sqlite3_column_int64(statement, 0);
@@ -666,6 +745,10 @@ Result<Database> Database::create(
     if (!migrated_v6) {
         return migrated_v6.error();
     }
+    auto migrated_v7 = migrate_to_version_7(database.value().database_);
+    if (!migrated_v7) {
+        return migrated_v7.error();
+    }
     return std::move(database.value());
 }
 
@@ -701,6 +784,10 @@ Result<Database> Database::open(
     auto migrated_v6 = migrate_to_version_6(database.value().database_);
     if (!migrated_v6) {
         return migrated_v6.error();
+    }
+    auto migrated_v7 = migrate_to_version_7(database.value().database_);
+    if (!migrated_v7) {
+        return migrated_v7.error();
     }
     return std::move(database.value());
 }
@@ -739,7 +826,8 @@ Result<bool> Database::verify_vault_metadata(
 
 Result<std::int64_t> Database::insert_video(
     const VideoRow& row,
-    const WrappedVideoKey& key) {
+    const WrappedVideoKey& key,
+    const TrackProvenance* provenance) {
     if (database_ == nullptr) {
         return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
     }
@@ -825,12 +913,196 @@ Result<std::int64_t> Database::insert_video(
         return error;
     }
 
+    // Provider identity lives in the same transaction as the row: the unique
+    // (provider_id, provider_track_id) index is what stops a track from being
+    // imported twice by concurrent saves.
+    if (provenance != nullptr) {
+        TrackProvenance owned = *provenance;
+        owned.video_id = video_id;
+        auto stored = set_provenance(owned);
+        if (!stored) {
+            rollback();
+            return stored.error();
+        }
+    }
+
     auto committed = run(database_, "COMMIT;");
     if (!committed) {
         rollback();
         return committed.error();
     }
     return video_id;
+}
+
+namespace {
+
+constexpr const char* kProvenanceColumns =
+    "video_id, provider_id, provider_track_id, source_url, title, artist, album,"
+    " duration_ms, codec, quality, artwork_sha256";
+
+std::string provenance_text(sqlite3_stmt* statement, const int column) {
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(statement, column));
+    if (text == nullptr) {
+        return {};
+    }
+    return std::string(text, static_cast<std::size_t>(sqlite3_column_bytes(statement, column)));
+}
+
+TrackProvenance provenance_from_statement(sqlite3_stmt* statement) {
+    TrackProvenance row;
+    row.video_id = sqlite3_column_int64(statement, 0);
+    row.provider_id = provenance_text(statement, 1);
+    row.provider_track_id = provenance_text(statement, 2);
+    row.source_url = provenance_text(statement, 3);
+    row.title = provenance_text(statement, 4);
+    row.artist = provenance_text(statement, 5);
+    row.album = provenance_text(statement, 6);
+    row.duration_ms = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 7));
+    row.codec = provenance_text(statement, 8);
+    row.quality = provenance_text(statement, 9);
+    row.artwork_sha256 = provenance_text(statement, 10);
+    return row;
+}
+
+bool bind_provenance_text(
+    sqlite3_stmt* statement, const int index, const std::string& value) {
+    return sqlite3_bind_text(statement, index, value.c_str(),
+               static_cast<int>(value.size()), SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+} // namespace
+
+Result<bool> Database::set_provenance(const TrackProvenance& row) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    if (row.video_id <= 0 || row.provider_id.empty() || row.provider_track_id.empty()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "provenance needs an item id, a provider id and a track id"};
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database_,
+        "INSERT INTO video_provenance(video_id, provider_id, provider_track_id, source_url,"
+        " title, artist, album, duration_ms, codec, quality, artwork_sha256, imported_at)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+        " ON CONFLICT(video_id) DO UPDATE SET"
+        " provider_id = excluded.provider_id,"
+        " provider_track_id = excluded.provider_track_id,"
+        " source_url = excluded.source_url,"
+        " title = excluded.title,"
+        " artist = excluded.artist,"
+        " album = excluded.album,"
+        " duration_ms = excluded.duration_ms,"
+        " codec = excluded.codec,"
+        " quality = excluded.quality,"
+        " artwork_sha256 = excluded.artwork_sha256;");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, row.video_id) != SQLITE_OK
+        || !bind_provenance_text(insert.get(), 2, row.provider_id)
+        || !bind_provenance_text(insert.get(), 3, row.provider_track_id)
+        || !bind_provenance_text(insert.get(), 4, row.source_url)
+        || !bind_provenance_text(insert.get(), 5, row.title)
+        || !bind_provenance_text(insert.get(), 6, row.artist)
+        || !bind_provenance_text(insert.get(), 7, row.album)
+        || sqlite3_bind_int64(insert.get(), 8,
+               static_cast<sqlite3_int64>(row.duration_ms)) != SQLITE_OK
+        || !bind_provenance_text(insert.get(), 9, row.codec)
+        || !bind_provenance_text(insert.get(), 10, row.quality)
+        || !bind_provenance_text(insert.get(), 11, row.artwork_sha256)
+        || sqlite3_bind_int64(insert.get(), 12, now) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "bind provenance insert", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const int status = sqlite3_extended_errcode(database_);
+        // A different item already owns this provider track. Refusing here keeps
+        // the "one offline copy per track" contract instead of re-pointing the
+        // identity at whichever row was written last.
+        if ((status & 0xff) == SQLITE_CONSTRAINT) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "this provider track is already linked to another vault item"};
+        }
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute provenance insert", status);
+    }
+    return true;
+}
+
+Result<std::optional<TrackProvenance>> Database::query_provenance(
+    const std::int64_t video_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    const std::string sql = std::string("SELECT ") + kProvenanceColumns
+        + " FROM video_provenance WHERE video_id = ?1;";
+    Statement query(database_, sql.c_str());
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1, video_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare provenance query", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_DONE) {
+        return std::optional<TrackProvenance>{};
+    }
+    if (status != SQLITE_ROW) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute provenance query", sqlite3_extended_errcode(database_));
+    }
+    return std::optional<TrackProvenance>{provenance_from_statement(query.get())};
+}
+
+Result<std::optional<std::int64_t>> Database::query_video_id_by_provenance(
+    const std::string& provider_id,
+    const std::string& provider_track_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    if (provider_id.empty() || provider_track_id.empty()) {
+        return std::optional<std::int64_t>{};
+    }
+    Statement query(database_,
+        "SELECT video_id FROM video_provenance"
+        " WHERE provider_id = ?1 AND provider_track_id = ?2 LIMIT 1;");
+    if (query.status() != SQLITE_OK
+        || !bind_provenance_text(query.get(), 1, provider_id)
+        || !bind_provenance_text(query.get(), 2, provider_track_id)) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare provenance identity query", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_DONE) {
+        return std::optional<std::int64_t>{};
+    }
+    if (status != SQLITE_ROW) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute provenance identity query", sqlite3_extended_errcode(database_));
+    }
+    return std::optional<std::int64_t>{sqlite3_column_int64(query.get(), 0)};
+}
+
+Result<std::vector<TrackProvenance>> Database::list_provenance() const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    const std::string sql = std::string("SELECT ") + kProvenanceColumns
+        + " FROM video_provenance ORDER BY title COLLATE NOCASE, artist COLLATE NOCASE, video_id;";
+    Statement query(database_, sql.c_str());
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare provenance listing", sqlite3_extended_errcode(database_));
+    }
+    std::vector<TrackProvenance> rows;
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+        rows.push_back(provenance_from_statement(query.get()));
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute provenance listing", sqlite3_extended_errcode(database_));
+    }
+    return rows;
 }
 
 Result<std::vector<VideoRow>> Database::list_videos() const {

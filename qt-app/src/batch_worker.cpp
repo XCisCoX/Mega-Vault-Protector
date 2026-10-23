@@ -608,7 +608,7 @@ QString packageFailure(const videovault::core::VaultError& error) {
 void BatchWorker::exportPackage(
     std::shared_ptr<videovault::core::Vault> vault,
     std::shared_ptr<std::filesystem::path> destination,
-    std::shared_ptr<std::string> password,
+    std::shared_ptr<videovault::core::Secret> password,
     std::shared_ptr<std::vector<videovault::core::Vault::PackageItem>> files,
     std::shared_ptr<std::vector<std::string>> directories,
     bool compress) {
@@ -619,8 +619,7 @@ void BatchWorker::exportPackage(
                 std::clamp(fraction, 0.0, 1.0) * 1000.0);
             emit progress(done, 1000);
         });
-    password->assign(password->size(), '\0');
-    password->clear();
+    password->wipe();
     if (!outcome) {
         emit finished(false, packageFailure(outcome.error()), 0);
         return;
@@ -634,7 +633,7 @@ void BatchWorker::exportPackage(
 void BatchWorker::importPackage(
     std::shared_ptr<videovault::core::Vault> vault,
     std::shared_ptr<std::filesystem::path> source,
-    std::shared_ptr<std::string> password,
+    std::shared_ptr<videovault::core::Secret> password,
     std::int64_t folder_id) {
     const auto when = static_cast<qlonglong>(std::chrono::duration_cast<
         std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
@@ -660,8 +659,7 @@ void BatchWorker::importPackage(
                 static_cast<qlonglong>(parent),
                 QString::fromStdString(name));
         });
-    password->assign(password->size(), '\0');
-    password->clear();
+    password->wipe();
     if (!outcome) {
         emit finished(false, packageFailure(outcome.error()), 0);
         return;

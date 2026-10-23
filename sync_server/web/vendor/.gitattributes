@@ -1,0 +1,4 @@
+# Preserve the upstream artifact bytes (and documented hashes) on Windows.
+sodium.js -text
+sodium-wrappers.js -text
+*.LICENSE -text

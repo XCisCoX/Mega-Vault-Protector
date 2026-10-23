@@ -6,6 +6,8 @@
 
 #include <jni.h>
 
+#include <sodium.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -29,6 +31,7 @@ extern "C" {
 }
 
 #include "videovault/core/vault.hpp"
+#include "videovault/extensions/runtime.hpp"
 
 using namespace videovault::core;
 
@@ -36,6 +39,9 @@ namespace {
 
 std::mutex g_mutex;
 std::shared_ptr<Vault> g_vault;
+std::string g_vault_root;
+// 0..1 while a package is being written or read. -1 when idle.
+std::atomic<double> g_package_progress{-1.0};
 
 // A copy of the open vault, taken without holding g_mutex across the call.
 // Import encrypts for a long time and drops the vault lock while it does, so
@@ -57,7 +63,12 @@ std::unordered_map<std::int64_t, std::vector<unsigned char>> g_plain;
 std::size_t g_plain_bytes = 0;
 
 void wipe_plain(std::vector<unsigned char>& bytes) {
-    std::fill(bytes.begin(), bytes.end(), 0U);
+    // sodium_memzero cannot be optimised away; std::fill over a buffer that is
+    // freed immediately afterwards can be. The vector is cleared only after the
+    // bytes are gone.
+    if (!bytes.empty()) {
+        sodium_memzero(bytes.data(), bytes.size());
+    }
     bytes.clear();
     bytes.shrink_to_fit();
 }
@@ -133,6 +144,22 @@ std::string json_escape(const std::string& s) {
         }
     }
     return out;
+}
+
+// Password input from Kotlin. The UTF-16 code units are encoded straight into
+// libsodium secure memory, so the password never becomes a std::string and the
+// buffer zeroises itself when the Secret leaves scope on any return path.
+// This does not (and cannot) wipe the Java String the caller passed in.
+std::optional<Secret> secret_from_jstring(JNIEnv* env, jstring jstr) {
+    if (jstr == nullptr) return std::nullopt;
+    const jsize length = env->GetStringLength(jstr);
+    if (length <= 0) return std::nullopt;
+    const jchar* chars = env->GetStringChars(jstr, nullptr);
+    if (chars == nullptr) return std::nullopt;
+    auto secret = Secret::from_utf16(std::span<const char16_t>(
+        reinterpret_cast<const char16_t*>(chars), static_cast<std::size_t>(length)));
+    env->ReleaseStringChars(jstr, chars);
+    return secret;
 }
 
 std::string ok_json(const std::string& extra = "") {
@@ -825,9 +852,8 @@ std::string folders_json() {
     return out;
 }
 
-std::string media_info_json(std::int64_t id) {
-    if (!g_vault) return "{}";
-    auto info = g_vault->media_info(id);
+std::string media_info_json(Vault& vault, std::int64_t id) {
+    auto info = vault.media_info(id);
     if (!info) return "{}";
     const auto& media = info.value();
     return "{\"durationMs\":" + std::to_string(media.duration_ms)
@@ -867,34 +893,63 @@ std::string tags_json() {
 
 extern "C" {
 
+JNI_METHOD(nativeInvokeExtension)(JNIEnv* env, jobject, jstring source, jstring command, jstring input_json) {
+    if (source == nullptr || command == nullptr || input_json == nullptr)
+        return to_jstring(env, err_msg("Missing extension input"));
+    if (env->GetStringLength(source) > 256*1024 || env->GetStringLength(command) > 64
+        || env->GetStringLength(input_json) > 64*1024)
+        return to_jstring(env, err_msg("Extension input exceeds host limits"));
+    try {
+        const auto code = jstring_to_string(env, source);
+        const auto action = jstring_to_string(env, command);
+        const auto input = jstring_to_string(env, input_json);
+        if (env->ExceptionCheck()) return nullptr;
+        if (code.size() > 256*1024 || input.size() > 64*1024)
+            return to_jstring(env, err_msg("Extension input exceeds host limits"));
+        const auto result = videovault::extensions::invoke(code, action, input);
+        if (!result.ok) return to_jstring(env, err_msg(result.error));
+        return to_jstring(env, ok_json("\"result\":" + (result.json.empty() ? "null" : result.json)));
+    } catch (...) {
+        return to_jstring(env, err_msg("Extension execution failed"));
+    }
+}
+
 JNIEXPORT jboolean JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVaultExists(
     JNIEnv* env, jobject, jstring root) {
     const std::string r = jstring_to_string(env, root);
     return Vault::exists(r) ? JNI_TRUE : JNI_FALSE;
 }
 
-JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring password,
+JNI_METHOD(nativeCreateVault)(JNIEnv* env, jobject, jstring root, jstring jpassword,
                               jint mem_kib, jint iterations, jint parallelism) {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string r = jstring_to_string(env, root);
-    const std::string p = jstring_to_string(env, password);
+    auto password = secret_from_jstring(env, jpassword);
+    if (!password) {
+        return to_jstring(env, err_msg("The password could not be held in protected memory."));
+    }
     Argon2Parameters params{
         static_cast<std::uint32_t>(mem_kib),
         static_cast<std::uint32_t>(iterations),
         static_cast<std::uint32_t>(parallelism)};
-    auto result = Vault::create(r, p, params);
+    auto result = Vault::create(r, *password, params);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
+    g_vault_root = r;
     return to_jstring(env, ok_json());
 }
 
-JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring password) {
+JNI_METHOD(nativeOpenVault)(JNIEnv* env, jobject, jstring root, jstring jpassword) {
     std::lock_guard<std::mutex> lock(g_mutex);
     const std::string r = jstring_to_string(env, root);
-    const std::string p = jstring_to_string(env, password);
-    auto result = Vault::open(r, p);
+    auto password = secret_from_jstring(env, jpassword);
+    if (!password) {
+        return to_jstring(env, err_msg("The password could not be held in protected memory."));
+    }
+    auto result = Vault::open(r, *password);
     if (!result) return to_jstring(env, err_json(result.error()));
     g_vault = std::make_shared<Vault>(std::move(result.value()));
+    g_vault_root = r;
     return to_jstring(env, ok_json());
 }
 
@@ -930,6 +985,58 @@ JNI_METHOD(nativeImportFile)(JNIEnv* env, jobject, jstring path) {
     return to_jstring(env, ok_json(buf));
 }
 
+// Pin both the Java bytes and the current vault identity until import completes.
+// g_mutex prevents open/lock/close from replacing or locking this vault mid-import.
+static jstring import_bytes_for_vault(JNIEnv* env, jbyteArray data, jstring name, jlong folder_id, jstring expected_root) {
+    if (data == nullptr || name == nullptr || folder_id < 0)
+        return to_jstring(env, err_msg("Invalid memory import"));
+    const jsize size = env->GetArrayLength(data);
+    if (size <= 0 || size > (128 << 20))
+        return to_jstring(env, err_msg("Memory import exceeds the 128 MiB ceiling"));
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault || !g_vault->is_unlocked())
+        return to_jstring(env, err_msg("Vault is locked"));
+    if (expected_root != nullptr && jstring_to_string(env, expected_root) != g_vault_root)
+        return to_jstring(env, err_msg("The destination vault changed"));
+    const std::string display_name = jstring_to_string(env, name);
+    if (env->ExceptionCheck()) return nullptr;
+    jboolean copied = JNI_FALSE;
+    jbyte* raw = env->GetByteArrayElements(data, &copied);
+    if (raw == nullptr) return nullptr;
+    struct Release {
+        JNIEnv* env; jbyteArray array; jbyte* bytes; jsize size; jboolean copied;
+        ~Release() {
+            // When ART copied, erase that native copy before releasing it. Never
+            // erase a pinned Java array: the plugin player still owns those bytes.
+            if (copied) {
+                volatile jbyte* p = bytes;
+                for (jsize i = 0; i < size; ++i) p[i] = 0;
+            }
+            env->ReleaseByteArrayElements(array, bytes, JNI_ABORT);
+        }
+    } release{env, data, raw, size, copied};
+    try {
+        auto result = g_vault->import_bytes(
+            std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(raw),
+                static_cast<std::size_t>(size)), display_name,
+            static_cast<std::int64_t>(folder_id));
+        if (!result) return to_jstring(env, err_json(result.error()));
+        return to_jstring(env, ok_json("\"id\":" + std::to_string(result.value())));
+    } catch (...) {
+        return to_jstring(env, err_msg("Memory import failed"));
+    }
+}
+
+JNI_METHOD(nativeImportBytes)(JNIEnv* env, jobject, jbyteArray data, jstring name, jlong folder_id) {
+    return import_bytes_for_vault(env, data, name, folder_id, nullptr);
+}
+
+JNI_METHOD(nativeImportBytesForVault)(JNIEnv* env, jobject, jbyteArray data, jstring name,
+    jlong folder_id, jstring expected_root) {
+    if (expected_root == nullptr) return to_jstring(env, err_msg("Missing destination vault"));
+    return import_bytes_for_vault(env, data, name, folder_id, expected_root);
+}
+
 JNI_METHOD(nativeRemoveVideo)(JNIEnv* env, jobject, jlong id) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
@@ -957,8 +1064,12 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeThum
 }
 
 JNI_METHOD(nativeMediaInfo)(JNIEnv* env, jobject, jlong id) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return to_jstring(env, media_info_json(id));
+    // retain_vault copies the shared vault and drops g_mutex. media_info only
+    // holds the vault lock while it opens the package, so a tap can start
+    // playback while a duration probe is still reading.
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, "{}");
+    return to_jstring(env, media_info_json(*vault, id));
 }
 
 JNI_METHOD(nativeRestoreVideo)(JNIEnv* env, jobject, jlong id, jstring dir) {
@@ -974,13 +1085,16 @@ JNI_METHOD(nativeChangePassword)(JNIEnv* env, jobject, jstring current, jstring 
                                  jint mem_kib, jint iterations, jint parallelism) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
-    const std::string cur = jstring_to_string(env, current);
-    const std::string nw = jstring_to_string(env, new_password);
+    auto cur = secret_from_jstring(env, current);
+    auto nw = secret_from_jstring(env, new_password);
+    if (!cur || !nw) {
+        return to_jstring(env, err_msg("A password could not be held in protected memory."));
+    }
     Argon2Parameters params{
         static_cast<std::uint32_t>(mem_kib),
         static_cast<std::uint32_t>(iterations),
         static_cast<std::uint32_t>(parallelism)};
-    auto result = g_vault->change_password(cur, nw, params);
+    auto result = g_vault->change_password(*cur, *nw, params);
     if (!result) return to_jstring(env, err_json(result.error()));
     return to_jstring(env, ok_json());
 }
@@ -1171,6 +1285,67 @@ JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {
     if (g_vault) g_vault->lock();
     g_vault.reset();
     return to_jstring(env, ok_json());
+}
+
+JNIEXPORT jdouble JNICALL Java_org_megavideoprotect_app_CoreBridge_nativePackageProgress(
+    JNIEnv*, jobject) {
+    return g_package_progress.load();
+}
+
+JNI_METHOD(nativeExportPackage)(JNIEnv* env, jobject, jstring path, jstring password,
+    jlongArray ids, jobjectArray paths, jobjectArray dirs, jboolean compress) {
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string dest = jstring_to_string(env, path);
+    auto pass = secret_from_jstring(env, password);
+    if (!pass) return to_jstring(env, err_msg("The package password is not valid."));
+    const jsize count = ids == nullptr ? 0 : env->GetArrayLength(ids);
+    const jsize path_count = paths == nullptr ? 0 : env->GetArrayLength(paths);
+    if (count != path_count) return to_jstring(env, err_msg("The package list is invalid."));
+    std::vector<Vault::PackageItem> files;
+    files.reserve(static_cast<std::size_t>(count));
+    jlong* raw = count == 0 ? nullptr : env->GetLongArrayElements(ids, nullptr);
+    for (jsize i = 0; i < count; ++i) {
+        auto* item_path = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+        Vault::PackageItem item;
+        item.video_id = static_cast<std::int64_t>(raw[i]);
+        item.relative_path = jstring_to_string(env, item_path);
+        if (item_path != nullptr) env->DeleteLocalRef(item_path);
+        files.push_back(std::move(item));
+    }
+    if (raw != nullptr) env->ReleaseLongArrayElements(ids, raw, JNI_ABORT);
+    std::vector<std::string> directories;
+    const jsize dir_count = dirs == nullptr ? 0 : env->GetArrayLength(dirs);
+    directories.reserve(static_cast<std::size_t>(dir_count));
+    for (jsize i = 0; i < dir_count; ++i) {
+        auto* dir = static_cast<jstring>(env->GetObjectArrayElement(dirs, i));
+        directories.push_back(jstring_to_string(env, dir));
+        if (dir != nullptr) env->DeleteLocalRef(dir);
+    }
+    g_package_progress.store(0.0);
+    auto result = vault->export_package(
+        dest, *pass, files, directories, compress == JNI_TRUE,
+        [](double fraction) { g_package_progress.store(fraction); });
+    g_package_progress.store(result ? 1.0 : -1.0);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeImportPackage)(JNIEnv* env, jobject, jstring path, jstring password, jlong folder_id) {
+    auto vault = retain_vault();
+    if (!vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string source = jstring_to_string(env, path);
+    auto pass = secret_from_jstring(env, password);
+    if (!pass) return to_jstring(env, err_msg("The package password is not valid."));
+    g_package_progress.store(0.0);
+    auto result = vault->import_package(
+        source, *pass, static_cast<std::int64_t>(folder_id),
+        [](double fraction) { g_package_progress.store(fraction); });
+    g_package_progress.store(result ? 1.0 : -1.0);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"count\":%d", result.value());
+    return to_jstring(env, ok_json(buf));
 }
 
 }  // extern "C"

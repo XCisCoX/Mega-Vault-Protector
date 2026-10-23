@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(MegaVaultExtensionSDK LANGUAGES C CXX)
+endif()
+# Standalone add_subdirectory entry point, also used by the Android JNI host.
+enable_language(C)
+add_subdirectory(../third_party/quickjs-ng "${CMAKE_CURRENT_BINARY_DIR}/quickjs-ng")
+add_library(MegaVaultExtensions STATIC ../core/src/extension_runtime.cpp)
+target_include_directories(MegaVaultExtensions PUBLIC ../core/include)
+target_compile_features(MegaVaultExtensions PUBLIC cxx_std_20)
+target_link_libraries(MegaVaultExtensions PRIVATE MegaVaultQuickJS)
+set_target_properties(MegaVaultExtensions PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+option(MVP_BUILD_EXTENSION_RUNNER "Build the developer-only JavaScript runner" OFF)
+if(MVP_BUILD_EXTENSION_RUNNER)
+    add_executable(MegaVaultExtensionRunner tools/run.cpp)
+    target_link_libraries(MegaVaultExtensionRunner PRIVATE MegaVaultExtensions)
+endif()

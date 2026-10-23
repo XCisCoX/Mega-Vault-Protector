@@ -187,22 +187,42 @@ int main() {
         }
     }
 
-    // The same bytes are one gallery item, including a copy saved under
-    // another file name.
+    // Identical bytes are imported as independent items: a deliberate second
+    // import must not silently resolve to the first copy.
     {
-        const auto duplicate_id = reopened.value().import_file(source_path);
-        if (!duplicate_id || duplicate_id.value() != video_id) {
-            return fail("Re-importing the same bytes must keep the existing item.");
+        bool already_present = true;
+        const auto second_id = reopened.value().import_file(source_path, {}, 0, &already_present);
+        if (!second_id || second_id.value() == video_id) {
+            return fail("Re-importing the same bytes must create an independent item.");
+        }
+        if (already_present) {
+            return fail("A real second import must not report the item as already present.");
+        }
+        const auto second_copy = reopened.value().read_video_bytes(second_id.value());
+        if (!second_copy || second_copy.value() != source) {
+            return fail("The second copy must decrypt to the same bytes.");
         }
         const auto alias_path = temp.path() / L"sample-copy.bin";
         writeBinaryFile(alias_path, source);
         const auto alias_id = reopened.value().import_file(alias_path);
-        if (!alias_id || alias_id.value() != video_id) {
-            return fail("A renamed copy of the same bytes must not be stored again.");
+        if (!alias_id || alias_id.value() == video_id || alias_id.value() == second_id.value()) {
+            return fail("A renamed copy of the same bytes must be its own item.");
         }
         const auto listed_same = reopened.value().list_videos();
-        if (!listed_same || listed_same.value().size() != 2U) {
-            return fail("Duplicate bytes must not add a gallery row.");
+        if (!listed_same || listed_same.value().size() != 4U) {
+            return fail("Every deliberate import must add exactly one gallery row.");
+        }
+        // Deleting one copy leaves the others readable.
+        if (!reopened.value().remove_video(second_id.value())) {
+            return fail("A duplicate copy must be removable on its own.");
+        }
+        const auto survivors = reopened.value().list_videos();
+        if (!survivors || survivors.value().size() != 3U) {
+            return fail("Removing one copy must not remove the others.");
+        }
+        const auto still_there = reopened.value().read_video_bytes(video_id);
+        if (!still_there || still_there.value() != source) {
+            return fail("Removing a copy must leave the original readable.");
         }
     }
 

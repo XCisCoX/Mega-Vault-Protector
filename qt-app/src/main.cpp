@@ -1,4 +1,5 @@
 #include "videovault/app/main_window.hpp"
+#include "videovault/app/proxy_settings.hpp"
 #include "videovault/app/theme.hpp"
 #include "videovault/core/version.hpp"
 
@@ -13,6 +14,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QFont>
 #include <QIcon>
@@ -81,6 +83,80 @@ void installSendToShortcut() {
 #endif
 }
 
+#ifdef Q_OS_WIN
+// Writes one value under HKEY_CURRENT_USER and reports whether it changed.
+// name is nullptr for the key's default value, which is where a ProgID and the
+// shell's open command live. QSettings was tried first and dropped its "/"
+// suffix, putting the values on the wrong key.
+bool writeRegistryString(const std::wstring& path, const wchar_t* name,
+    const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, nullptr, 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    bool differs = true;
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &size) == ERROR_SUCCESS
+        && type == REG_SZ && size >= sizeof(wchar_t)) {
+        std::wstring current(size / sizeof(wchar_t), L'\0');
+        if (RegQueryValueExW(key, name, nullptr, &type,
+                reinterpret_cast<BYTE*>(current.data()), &size) == ERROR_SUCCESS) {
+            while (!current.empty() && current.back() == L'\0') {
+                current.pop_back();
+            }
+            differs = current != value;
+        }
+    }
+    if (differs) {
+        RegSetValueExW(key, name, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(value.c_str()),
+            static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    }
+    RegCloseKey(key);
+    return differs;
+}
+
+// Gives .mvpk packages the package icon in Explorer and lets a double-click
+// open this app's package import. Everything sits under HKEY_CURRENT_USER, so
+// it needs no elevation and never touches another user's settings. The
+// resource id 2 is mvpk.ico, compiled in by resources/app.rc.
+void installPackageFileType() {
+    const std::wstring exe =
+        QDir::toNativeSeparators(QCoreApplication::applicationFilePath()).toStdWString();
+    const std::wstring classes = L"Software\\Classes";
+    const std::wstring prog_id = L"MegaVaultProtect.mvpk";
+    const std::wstring icon = L"\"" + exe + L"\",2";
+    const std::wstring command = L"\"" + exe + L"\" \"%1\"";
+    // Bumped when the registration itself changes (the icon resource was
+    // rebuilt from PNG frames to BMP frames, which is what the shell reads).
+    // Without this, an install whose values already match never re-announces
+    // the type, and Explorer keeps serving its cached generic icon.
+    constexpr int kRegistrationVersion = 2;
+    QSettings settings;
+    const bool stale = settings.value(QStringLiteral("shell/registrationVersion"), 0).toInt()
+        != kRegistrationVersion;
+    bool changed = false;
+    changed |= writeRegistryString(classes + L"\\.mvpk", nullptr, prog_id);
+    changed |= writeRegistryString(classes + L"\\.mvpk", L"Content Type",
+        L"application/x-megavault-package");
+    changed |= writeRegistryString(classes + L"\\" + prog_id, nullptr,
+        L"Mega Vault package");
+    changed |= writeRegistryString(classes + L"\\" + prog_id + L"\\DefaultIcon",
+        nullptr, icon);
+    changed |= writeRegistryString(
+        classes + L"\\" + prog_id + L"\\shell\\open\\command", nullptr, command);
+    if (!changed && !stale) {
+        return;
+    }
+    settings.setValue(QStringLiteral("shell/registrationVersion"), kRegistrationVersion);
+    // Explorer caches the icon it showed for a file type, so tell it to look
+    // again after the first run (or after the app moved).
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -111,8 +187,7 @@ int main(int argc, char* argv[]) {
     QFont appFont(QStringLiteral("Segoe UI"));
     appFont.setPointSize(10);
     application.setFont(appFont);
-    application.setPalette(videovault::app::darkPalette());
-    application.setStyleSheet(videovault::app::appStyleSheet());
+    videovault::app::initializeTheme(application);
 
     QStringList incoming;
     const QStringList arguments = QCoreApplication::arguments();
@@ -123,10 +198,14 @@ int main(int argc, char* argv[]) {
         }
     }
     installSendToShortcut();
+#ifdef Q_OS_WIN
+    installPackageFileType();
+#endif
     if (forwardToRunning(incoming)) {
         return 0;
     }
 
+    videovault::app::initializeProxySettings();
     videovault::app::MainWindow window;
     if (!incoming.isEmpty()) {
         window.acceptExternalPaths(incoming);

@@ -1,1 +1,5 @@
-IDI_ICON1 ICON "app.ico"
+// Explorer takes the lowest icon group for the executable itself, so the app
+// mark stays at 1 and the .mvpk file type registered by installPackageFileType()
+// points here for resource 2. Both .ico files carry 16-256 px frames.
+1 ICON "app.ico"
+2 ICON "mvpk.ico"

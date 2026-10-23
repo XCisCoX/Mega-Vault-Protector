@@ -88,10 +88,27 @@ public:
         const SensitiveBuffer& verifier_key) const;
 
     // Phase 3: gallery storage. insert_video commits the video row and its
-    // wrapped file key in one transaction.
+    // wrapped file key in one transaction. Phase 9: when `provenance` is given,
+    // the provider identity row is committed in that same transaction, so an
+    // item can never exist without the provenance its row was created with.
     [[nodiscard]] Result<std::int64_t> insert_video(
         const VideoRow& row,
-        const WrappedVideoKey& key);
+        const WrappedVideoKey& key,
+        const TrackProvenance* provenance = nullptr);
+
+    // Phase 9: provider provenance. `provider_id` + `provider_track_id` are
+    // unique per vault; set_provenance refuses to overwrite a different item's
+    // identity (InvalidArgument) instead of silently re-pointing a track.
+    [[nodiscard]] Result<bool> set_provenance(const TrackProvenance& row);
+
+    [[nodiscard]] Result<std::optional<TrackProvenance>> query_provenance(
+        std::int64_t video_id) const;
+
+    [[nodiscard]] Result<std::optional<std::int64_t>> query_video_id_by_provenance(
+        const std::string& provider_id,
+        const std::string& provider_track_id) const;
+
+    [[nodiscard]] Result<std::vector<TrackProvenance>> list_provenance() const;
 
     [[nodiscard]] Result<std::vector<VideoRow>> list_videos() const;
 

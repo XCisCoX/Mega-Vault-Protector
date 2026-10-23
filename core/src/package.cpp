@@ -242,6 +242,7 @@ Result<PackageWriteResult> write_package_file(
         const auto current = static_cast<std::size_t>(chunk_length);
         source.read(reinterpret_cast<char*>(chunk.data()), static_cast<std::streamsize>(current));
         if (source.gcount() != static_cast<std::streamsize>(current)) {
+            wipe_bytes(chunk);
             return VaultError{VaultErrorCode::InvalidArgument,
                 "source ended before the declared plaintext size"};
         }
@@ -250,6 +251,10 @@ Result<PackageWriteResult> write_package_file(
             static_cast<std::uint32_t>(chunk_length), final_chunk);
         auto ciphertext = encrypt_xchacha20_poly1305(
             std::span(chunk).first(current), ad, chunk_nonce(header, index), file_key);
+        // The plaintext of this chunk has been sealed: zero the buffer before
+        // the next read overwrites it, so a completed import does not leave the
+        // last chunk's plaintext (or a partial one) on the heap.
+        wipe_bytes(std::span(chunk).first(current));
         if (!ciphertext) {
             return ciphertext.error();
         }
@@ -277,6 +282,252 @@ Result<PackageWriteResult> write_package_file(
     result.package_id = header.package_id;
     result.package_size = package_file_size(header, kPackageHeaderAndTagSize);
     return result;
+}
+
+// --- Incremental package writer -------------------------------------------
+//
+// The chunk sealing here is deliberately the same code path as
+// write_package_file: one AEAD tag per chunk, associated data bound to the
+// header digest, chunk index, plaintext length and the final-chunk flag, so a
+// package produced piecemeal is byte-identical in shape to one produced from a
+// seekable source and is read back by the same PackageReader.
+
+StreamPackageWriter::~StreamPackageWriter() {
+    abort();
+}
+
+StreamPackageWriter::StreamPackageWriter(StreamPackageWriter&& other) noexcept
+    : output_(std::move(other.output_)),
+      destination_(std::move(other.destination_)),
+      header_(other.header_),
+      digest_(other.digest_),
+      accumulator_(std::move(other.accumulator_)),
+      file_key_(std::move(other.file_key_)),
+      pending_(std::move(other.pending_)),
+      written_(other.written_),
+      next_index_(other.next_index_),
+      finished_(other.finished_) {
+    // The moved-from writer must not delete the destination on destruction.
+    other.pending_.clear();
+    other.destination_.clear();
+    other.finished_ = true;
+}
+
+StreamPackageWriter& StreamPackageWriter::operator=(
+    StreamPackageWriter&& other) noexcept {
+    if (this != &other) {
+        abort();
+        output_ = std::move(other.output_);
+        destination_ = std::move(other.destination_);
+        header_ = other.header_;
+        digest_ = other.digest_;
+        accumulator_ = std::move(other.accumulator_);
+        file_key_ = std::move(other.file_key_);
+        pending_ = std::move(other.pending_);
+        written_ = other.written_;
+        next_index_ = other.next_index_;
+        finished_ = other.finished_;
+        other.pending_.clear();
+        other.destination_.clear();
+        other.finished_ = true;
+    }
+    return *this;
+}
+
+Result<StreamPackageWriter> StreamPackageWriter::create(
+    const std::filesystem::path& destination,
+    SensitiveBuffer file_key,
+    const std::uint32_t chunk_size,
+    const std::uint64_t plaintext_size) {
+    if (file_key.size() != 32U) {
+        return VaultError{VaultErrorCode::CryptoFailure, "invalid file key length"};
+    }
+    if (chunk_size < kMinimumPackageChunkSize || chunk_size > kMaximumPackageChunkSize) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package chunk size is outside supported bounds"};
+    }
+    const auto count = chunk_count_for(plaintext_size, chunk_size);
+    if (count == 0U && plaintext_size != 0U) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package is too large for the requested chunk size"};
+    }
+
+    StreamPackageWriter writer;
+    writer.header_.chunk_size = chunk_size;
+    writer.header_.plaintext_size = plaintext_size;
+    writer.header_.chunk_count = count;
+    random_bytes(writer.header_.package_id);
+    random_bytes(writer.header_.nonce_prefix);
+    writer.digest_ = package_header_digest(writer.header_);
+    writer.file_key_ = std::move(file_key);
+    writer.destination_ = destination;
+    // One chunk of plaintext is the only buffering this writer needs: the
+    // memory cost of an import is independent of the track's length.
+    writer.pending_.reserve(static_cast<std::size_t>(chunk_size));
+
+    writer.output_.open(destination, std::ios::binary | std::ios::trunc);
+    if (!writer.output_) {
+        writer.destination_.clear();
+        writer.finished_ = true;
+        return VaultError{VaultErrorCode::DatabaseFailure,
+            "unable to open package destination for writing"};
+    }
+
+    const auto header_bytes = serialize_package_header(writer.header_);
+    auto header_tag = encrypt_xchacha20_poly1305(
+        {}, header_bytes, header_nonce(writer.header_), writer.file_key_);
+    if (!header_tag) {
+        writer.abort();
+        return header_tag.error();
+    }
+    if (header_tag.value().size() != kPackageTagSize) {
+        writer.abort();
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "package header tag has an invalid size"};
+    }
+    auto wrote_header = writer.write_all(header_bytes);
+    if (!wrote_header) {
+        writer.abort();
+        return wrote_header.error();
+    }
+    auto wrote_tag = writer.write_all(header_tag.value());
+    if (!wrote_tag) {
+        writer.abort();
+        return wrote_tag.error();
+    }
+    return std::move(writer);
+}
+
+Result<bool> StreamPackageWriter::write_all(
+    const std::span<const unsigned char> bytes) {
+    if (!output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (!bytes.empty()) {
+        output_.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        accumulator_.update(bytes);
+    }
+    if (!output_) {
+        // A full disk or a closed handle lands here: the caller aborts, which
+        // removes the staging package, so nothing partial is ever published.
+        return VaultError{VaultErrorCode::DiskFull, "package write failed"};
+    }
+    return true;
+}
+
+Result<bool> StreamPackageWriter::seal_pending(const bool final_chunk) {
+    if (pending_.empty()) {
+        return true;
+    }
+    if (next_index_ >= header_.chunk_count) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package has more chunks than its header declares"};
+    }
+    const auto length = static_cast<std::uint32_t>(pending_.size());
+    const auto ad = chunk_ad(digest_, header_, next_index_, length, final_chunk);
+    auto ciphertext = encrypt_xchacha20_poly1305(
+        std::span<const unsigned char>(pending_.data(), pending_.size()),
+        ad, chunk_nonce(header_, next_index_), file_key_);
+    // The plaintext of this chunk is sealed; zero it before the buffer is
+    // reused so a completed import leaves no decodable audio on the heap.
+    wipe_bytes(pending_);
+    pending_.clear();
+    if (!ciphertext) {
+        return ciphertext.error();
+    }
+    auto written = write_all(ciphertext.value());
+    if (!written) {
+        return written.error();
+    }
+    ++next_index_;
+    return true;
+}
+
+Result<bool> StreamPackageWriter::append(
+    const std::span<const unsigned char> bytes) {
+    if (finished_ || !output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (bytes.empty()) {
+        return true;
+    }
+    if (written_ + bytes.size() > header_.plaintext_size) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "stream is longer than the declared plaintext size"};
+    }
+    auto remaining = bytes;
+    while (!remaining.empty()) {
+        const auto space = static_cast<std::size_t>(header_.chunk_size) - pending_.size();
+        const auto take = std::min<std::size_t>(space, remaining.size());
+        pending_.insert(pending_.end(), remaining.begin(),
+            remaining.begin() + static_cast<std::ptrdiff_t>(take));
+        remaining = remaining.subspan(take);
+        written_ += static_cast<std::uint64_t>(take);
+        // A full chunk is sealed immediately only when another one follows: the
+        // last chunk carries the final-chunk flag, which is decided by
+        // finalize(). That keeps the tail (<= one chunk) buffered, never more.
+        if (pending_.size() >= header_.chunk_size
+            && static_cast<std::uint64_t>(next_index_) + 1U < header_.chunk_count) {
+            auto sealed = seal_pending(false);
+            if (!sealed) {
+                return sealed.error();
+            }
+        }
+    }
+    return true;
+}
+
+Result<PackageWriteResult> StreamPackageWriter::finalize() {
+    if (finished_ || !output_.is_open()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "package import is not active"};
+    }
+    if (written_ != header_.plaintext_size) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "stream ended before the declared plaintext size"};
+    }
+    if (header_.chunk_count != 0U) {
+        auto sealed = seal_pending(true);
+        if (!sealed) {
+            return sealed.error();
+        }
+        if (next_index_ != header_.chunk_count) {
+            return VaultError{VaultErrorCode::InvalidArgument,
+                "package chunk count does not match the declared size"};
+        }
+    }
+    output_.flush();
+    output_.close();
+    if (!output_) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "package finalize failed"};
+    }
+    auto flushed = flush_existing_file(destination_);
+    if (!flushed) {
+        return flushed.error();
+    }
+    finished_ = true;
+    PackageWriteResult result;
+    result.sha256 = accumulator_.digest();
+    result.package_id = header_.package_id;
+    result.package_size = package_file_size(header_, kPackageHeaderAndTagSize);
+    return result;
+}
+
+void StreamPackageWriter::abort() noexcept {
+    wipe_bytes(pending_);
+    pending_.clear();
+    if (output_.is_open()) {
+        output_.close();
+    }
+    if (!destination_.empty()) {
+        std::error_code ignored;
+        std::filesystem::remove(destination_, ignored);
+        destination_.clear();
+    }
+    finished_ = true;
 }
 
 Result<std::vector<unsigned char>> read_package_content(
@@ -347,13 +598,17 @@ Result<std::vector<unsigned char>> read_package_content(
             return decrypted.error();
         }
         plaintext.insert(plaintext.end(), decrypted.value().begin(), decrypted.value().end());
+        // The per-chunk plaintext copy is transient; zero it before the vector
+        // releases its heap block into the allocator's free lists.
+        wipe_bytes(decrypted.value());
     }
     return plaintext;
 }
 
 Result<PackageReader> PackageReader::open(
     const std::filesystem::path& path,
-    SensitiveBuffer file_key) {
+    SensitiveBuffer file_key,
+    std::shared_ptr<SessionGuard> guard) {
     if (file_key.size() != 32U) {
         return VaultError{VaultErrorCode::CryptoFailure, "invalid file key length"};
     }
@@ -401,11 +656,82 @@ Result<PackageReader> PackageReader::open(
     reader.header_ = std::move(header.value());
     reader.digest_ = package_header_digest(reader.header_);
     reader.file_key_ = std::move(file_key);
+    reader.guard_ = std::move(guard);
     reader.plaintext_size_ = reader.header_.plaintext_size;
     return reader;
 }
 
+PackageReader::~PackageReader() {
+    clear_cache();
+}
+
+PackageReader::PackageReader(PackageReader&& other) noexcept
+    : input_(std::move(other.input_)),
+      header_(other.header_),
+      digest_(other.digest_),
+      file_key_(std::move(other.file_key_)),
+      guard_(std::move(other.guard_)),
+      plaintext_size_(other.plaintext_size_),
+      position_(other.position_),
+      cache_(std::move(other.cache_)),
+      last_used_(other.last_used_),
+      clock_(other.clock_) {
+    // The moved-from reader must not zeroise the chunks that now belong to
+    // this object, but it must not keep them listed either.
+    for (auto& slot : other.cache_) {
+        slot.index = std::numeric_limits<std::uint32_t>::max();
+        slot.plaintext.clear();
+    }
+    other.plaintext_size_ = 0U;
+    other.position_ = 0U;
+}
+
+PackageReader& PackageReader::operator=(PackageReader&& other) noexcept {
+    if (this != &other) {
+        clear_cache();
+        input_ = std::move(other.input_);
+        header_ = other.header_;
+        digest_ = other.digest_;
+        file_key_ = std::move(other.file_key_);
+        guard_ = std::move(other.guard_);
+        plaintext_size_ = other.plaintext_size_;
+        position_ = other.position_;
+        cache_ = std::move(other.cache_);
+        last_used_ = other.last_used_;
+        clock_ = other.clock_;
+        for (auto& slot : other.cache_) {
+            slot.index = std::numeric_limits<std::uint32_t>::max();
+            slot.plaintext.clear();
+        }
+        other.plaintext_size_ = 0U;
+        other.position_ = 0U;
+    }
+    return *this;
+}
+
+void PackageReader::release_slot(const std::size_t slot) noexcept {
+    if (slot >= cache_.size()) {
+        return;
+    }
+    wipe_bytes(cache_[slot].plaintext);
+    cache_[slot].plaintext.clear();
+    cache_[slot].index = std::numeric_limits<std::uint32_t>::max();
+    last_used_[slot] = 0U;
+}
+
+void PackageReader::clear_cache() noexcept {
+    for (std::size_t slot = 0U; slot < cache_.size(); ++slot) {
+        release_slot(slot);
+    }
+    clock_ = 0U;
+}
+
 Result<bool> PackageReader::seek(const std::uint64_t offset) {
+    if (revoked()) {
+        clear_cache();
+        return VaultError{VaultErrorCode::AuthenticationFailed,
+            "the vault was locked; reopen it to read this package"};
+    }
     if (offset > plaintext_size_) {
         position_ = plaintext_size_;
         return true;
@@ -418,14 +744,19 @@ void PackageReader::note_access(const std::size_t slot) noexcept {
     last_used_[slot] = ++clock_;
 }
 
-Result<std::vector<unsigned char>> PackageReader::chunk(const std::uint32_t index) {
+Result<const std::vector<unsigned char>*> PackageReader::chunk(const std::uint32_t index) {
+    if (revoked()) {
+        clear_cache();
+        return VaultError{VaultErrorCode::AuthenticationFailed,
+            "the vault was locked; reopen it to read this package"};
+    }
     if (index >= header_.chunk_count) {
         return package_error("read chunk", "chunk index is out of range");
     }
     for (std::size_t slot = 0U; slot < cache_.size(); ++slot) {
         if (cache_[slot].index == index) {
             note_access(slot);
-            return cache_[slot].plaintext;
+            return &cache_[slot].plaintext;
         }
     }
 
@@ -462,13 +793,22 @@ Result<std::vector<unsigned char>> PackageReader::chunk(const std::uint32_t inde
             victim = slot;
         }
     }
+    // Zeroise the evicted chunk before the vector may reallocate: assigning a
+    // different-sized vector frees the old buffer, and an unzeroised free
+    // leaves readable media bytes on the heap.
+    release_slot(victim);
     cache_[victim].index = index;
     cache_[victim].plaintext = std::move(plaintext.value());
     note_access(victim);
-    return cache_[victim].plaintext;
+    return &cache_[victim].plaintext;
 }
 
 Result<std::size_t> PackageReader::read(const std::span<unsigned char> destination) {
+    if (revoked()) {
+        clear_cache();
+        return VaultError{VaultErrorCode::AuthenticationFailed,
+            "the vault was locked; reopen it to read this package"};
+    }
     std::size_t total = 0U;
     while (total < destination.size() && position_ < plaintext_size_) {
         const auto index = static_cast<std::uint32_t>(position_ / header_.chunk_size);
@@ -479,10 +819,11 @@ Result<std::size_t> PackageReader::read(const std::span<unsigned char> destinati
         if (!chunk_plaintext) {
             return chunk_plaintext.error();
         }
-        const auto available = chunk_plaintext.value().size() - offset_in_chunk;
+        const auto& bytes = *chunk_plaintext.value();
+        const auto available = bytes.size() - offset_in_chunk;
         const auto take = std::min<std::size_t>(
             destination.size() - total, available);
-        std::copy_n(chunk_plaintext.value().begin() + offset_in_chunk, take,
+        std::copy_n(bytes.begin() + offset_in_chunk, take,
             destination.begin() + static_cast<std::ptrdiff_t>(total));
         position_ += take;
         total += take;

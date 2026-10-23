@@ -182,12 +182,12 @@ fun PeerScreen(onClose: () -> Unit) {
     val childFiles = files.filter { it.folderId == current }.sortedBy { it.name.lowercase() }
     val upParent = if (current == 0L) null else folders.firstOrNull { it.id == current }?.parentId ?: 0L
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Mvp.window)) {
         Column(Modifier.fillMaxSize()) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF101014))
+                    .background(Mvp.window)
                     .statusBarsPadding()
                     .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -212,7 +212,7 @@ fun PeerScreen(onClose: () -> Unit) {
                     )
                     Text(
                         "Disconnect",
-                        color = Color(0xFFFF6B6B),
+                        color = Mvp.errorText,
                         fontSize = 14.sp,
                         modifier = Modifier
                             .clickable {
@@ -288,7 +288,7 @@ fun PeerScreen(onClose: () -> Unit) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF101014))
+                    .background(Mvp.window)
                     .navigationBarsPadding()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -355,7 +355,7 @@ private fun PeerCrumbs(pc: String, folders: List<FolderEntry>, current: Long, en
 private fun PeerCrumb(text: String, current: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Text(
         text,
-        color = if (current) Color.White else Mvp.accent,
+        color = if (current) Mvp.title else Mvp.accent,
         fontSize = 13.sp,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -373,15 +373,27 @@ private fun PeerFolderTile(name: String, picked: Boolean, onClick: () -> Unit, o
         Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .background(Color(0xFF161618))
+            .background(Mvp.tileBg)
             .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
-        Icon(
-            painterResource(R.drawable.files_folder),
-            contentDescription = null,
-            tint = Color(0xFF4FA6F7),
-            modifier = Modifier.align(Alignment.Center).fillMaxSize().padding(22.dp),
-        )
+        // Same filled folder on a tinted chip as the library tiles, so a folder
+        // in the phone's browser and a folder in the library look like the same
+        // kind of thing.
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .size(56.dp)
+                .clip(RoundedCornerShape(percent = 32))
+                .background(Mvp.accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painterResource(R.drawable.ic_folder_filled),
+                contentDescription = null,
+                tint = Mvp.accent,
+                modifier = Modifier.size(30.dp),
+            )
+        }
         Text(
             name,
             color = Color.White,
@@ -490,7 +502,7 @@ private fun PickedMark() {
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                painterResource(R.drawable.checkbig),
+                painterResource(R.drawable.ic_lucide_check),
                 contentDescription = null,
                 tint = Color.White,
                 modifier = Modifier.size(14.dp),
@@ -509,6 +521,7 @@ private fun CopyTargetDialog(onPick: (Long) -> Unit, onDismiss: () -> Unit) {
         }
     }
     Dialog(onDismissRequest = onDismiss) {
+        BlurredDialogWindow()
         MvpCard(Modifier.fillMaxWidth()) {
             MvpTitle("Copy into")
             MvpDescription("Pick a place in your library. Copied folders keep their structure.")

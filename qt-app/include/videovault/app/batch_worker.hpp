@@ -54,7 +54,7 @@ public slots:
     void exportPackage(
         std::shared_ptr<videovault::core::Vault> vault,
         std::shared_ptr<std::filesystem::path> destination,
-        std::shared_ptr<std::string> password,
+        std::shared_ptr<videovault::core::Secret> password,
         std::shared_ptr<std::vector<videovault::core::Vault::PackageItem>> files,
         std::shared_ptr<std::vector<std::string>> directories,
         bool compress);
@@ -62,7 +62,7 @@ public slots:
     void importPackage(
         std::shared_ptr<videovault::core::Vault> vault,
         std::shared_ptr<std::filesystem::path> source,
-        std::shared_ptr<std::string> password,
+        std::shared_ptr<videovault::core::Secret> password,
         std::int64_t folder_id);
 
     // Copies folders and files out of a swapped phone's library, one file at

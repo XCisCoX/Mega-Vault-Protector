@@ -9,6 +9,7 @@ set(MVP_ANDROID_PREFIX "/repo/out/android-arm64/prefix" CACHE PATH
 
 # Repo layout: android/app/src/main/cpp -> ../../../../../core
 set(CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../core")
+add_subdirectory(${CORE_SRC}/../extensions ${CMAKE_CURRENT_BINARY_DIR}/extensions)
 
 add_library(mvpcore SHARED
     jni_bridge.cpp
@@ -17,6 +18,8 @@ add_library(mvpcore SHARED
     ${CORE_SRC}/src/media.cpp
     ${CORE_SRC}/src/metadata.cpp
     ${CORE_SRC}/src/package.cpp
+    ${CORE_SRC}/src/secret.cpp
+    ${CORE_SRC}/src/share_package.cpp
     ${CORE_SRC}/src/vault.cpp
     ${CORE_SRC}/src/version.cpp
 )
@@ -35,7 +38,8 @@ target_compile_definitions(mvpcore PRIVATE
     MVP_VERSION_STRING="${MVP_VERSION}"
 )
 
-target_link_libraries(mvpcore
+target_link_libraries(mvpcore PRIVATE
+    MegaVaultExtensions
     ${MVP_ANDROID_PREFIX}/lib/libsodium.a
     ${MVP_ANDROID_PREFIX}/lib/libargon2.a
     ${MVP_ANDROID_PREFIX}/lib/libsqlcipher.a

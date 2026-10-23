@@ -233,11 +233,115 @@ bool known_archive(const unsigned char* data, const std::size_t size) {
     return size >= 6 && std::memcmp(data, seven, 6) == 0;
 }
 
+// A package received through sync is untrusted even if its transport digest
+// matches. Authenticate and validate the entire stream before importing any
+// file or creating folders. This uses bounded chunk memory, not a plaintext
+// copy of the complete archive. The caller then rewinds the encrypted file.
+Result<bool> validate_records(
+    std::istream& in,
+    crypto_secretstream_xchacha20poly1305_state state) {
+    struct WipeState {
+        crypto_secretstream_xchacha20poly1305_state& state;
+        ~WipeState() { sodium_memzero(&state, sizeof(state)); }
+    } wipe_state{state};
+    bool saw_final = false;
+    bool active = false;
+    std::uint64_t expected = 0;
+    std::uint64_t written = 0;
+    for (;;) {
+        unsigned char tag = 0;
+        auto record = pull_record(state, in, &tag, &saw_final);
+        if (!record) return record.error();
+        auto& plain = record.value();
+        struct WipeRecord {
+            std::vector<unsigned char>& bytes;
+            ~WipeRecord() { sodium_memzero(bytes.data(), bytes.size()); }
+        } wipe_record{plain};
+        if (plain.empty()) return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+        const auto kind = static_cast<Record>(plain[0]);
+        if (kind != Record::End && tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL) {
+            return fail(VaultErrorCode::PackageModified, "The package ended before its final record.");
+        }
+        if (kind == Record::File || kind == Record::Directory || kind == Record::End) {
+            if (active && written != expected) {
+                return fail(VaultErrorCode::PackageModified, "A file in the package is the wrong size.");
+            }
+            active = false;
+        }
+        if (kind == Record::File || kind == Record::Directory) {
+            const std::size_t tail = kind == Record::File ? 8U : 0U;
+            if (plain.size() < 3U + tail) {
+                return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+            }
+            const auto length = read_u16(plain.data() + 1);
+            if (plain.size() != 3U + length + tail) {
+                return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+            }
+            const std::string path(reinterpret_cast<const char*>(plain.data() + 3), length);
+            if (!valid_relative(path)) {
+                return fail(VaultErrorCode::PackageModified, "The package contains an unsafe path.");
+            }
+            if (kind == Record::File) {
+                active = true;
+                expected = read_u64(plain.data() + 3 + length);
+                written = 0;
+            }
+        } else if (kind == Record::Chunk) {
+            if (!active || plain.size() < 6 || plain[1] > 1) {
+                return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+            }
+            const auto full = read_u32(plain.data() + 2);
+            if (full > kChunkBytes || full > expected - written) {
+                return fail(VaultErrorCode::PackageModified, "A file in the package is larger than it claims.");
+            }
+            const auto stored = plain.size() - 6;
+            if (plain[1] == 0) {
+                if (stored != full) return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+            } else {
+                std::vector<unsigned char> raw(full);
+                uLongf count = full;
+                const int status = uncompress(raw.data(), &count, plain.data() + 6,
+                    static_cast<uLong>(stored));
+                sodium_memzero(raw.data(), raw.size());
+                if (status != Z_OK || count != full) {
+                    return fail(VaultErrorCode::PackageModified, "The package is damaged.");
+                }
+            }
+            written += full;
+        } else if (kind == Record::End) {
+            if (plain.size() != 1 || tag != crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                || in.peek() != std::char_traits<char>::eof()) {
+                return fail(VaultErrorCode::PackageModified, "The package is incomplete or has trailing data.");
+            }
+            return true;
+        } else {
+            return fail(VaultErrorCode::UnsupportedPackageVersion, "This package uses an unknown record.");
+        }
+    }
+}
+
 } // namespace
 
 Result<bool> Vault::export_package(
     const std::filesystem::path& destination,
     const std::string_view password,
+    const std::vector<PackageItem>& files,
+    const std::vector<std::string>& directories,
+    const bool compress,
+    const std::function<void(double)>& progress) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return fail(VaultErrorCode::InvalidArgument,
+            "The package password is too long or secure memory is unavailable.");
+    }
+    auto result = export_package(destination, *secret, files, directories, compress, progress);
+    secret->wipe();
+    return result;
+}
+
+Result<bool> Vault::export_package(
+    const std::filesystem::path& destination,
+    const Secret& password,
     const std::vector<PackageItem>& files,
     const std::vector<std::string>& directories,
     const bool compress,
@@ -284,7 +388,7 @@ Result<bool> Vault::export_package(
 
     std::array<unsigned char, 16> salt{};
     internal::random_bytes(salt);
-    auto key = internal::derive_master_key(password, salt, kPackageKdf);
+    auto key = internal::derive_master_key(password.view(), salt, kPackageKdf);
     if (!key) {
         return key.error();
     }
@@ -389,6 +493,23 @@ Result<int> Vault::import_package(
     const std::function<void(double)>& progress,
     const std::function<void(std::int64_t, const std::string&, std::uint64_t, std::int64_t)>& on_file,
     const std::function<void(std::int64_t, std::int64_t, const std::string&)>& on_folder) {
+    auto secret = Secret::from_utf8(password);
+    if (!secret) {
+        return fail(VaultErrorCode::InvalidArgument,
+            "The package password is too long or secure memory is unavailable.");
+    }
+    auto result = import_package(source, *secret, folder_id, progress, on_file, on_folder);
+    secret->wipe();
+    return result;
+}
+
+Result<int> Vault::import_package(
+    const std::filesystem::path& source,
+    const Secret& password,
+    const std::int64_t folder_id,
+    const std::function<void(double)>& progress,
+    const std::function<void(std::int64_t, const std::string&, std::uint64_t, std::int64_t)>& on_file,
+    const std::function<void(std::int64_t, std::int64_t, const std::string&)>& on_folder) {
     auto crypto = internal::initialize_crypto();
     if (!crypto) {
         return crypto.error();
@@ -427,7 +548,7 @@ Result<int> Vault::import_package(
     if (!read_exact(in, salt.data(), salt.size())) {
         return fail(VaultErrorCode::PackageModified, "The package is incomplete.");
     }
-    auto key = internal::derive_master_key(password, salt, kdf);
+    auto key = internal::derive_master_key(password.view(), salt, kdf);
     if (!key) {
         return key.error();
     }
@@ -439,6 +560,13 @@ Result<int> Vault::import_package(
     if (crypto_secretstream_xchacha20poly1305_init_pull(&state, header, key.value().data()) != 0) {
         return fail(VaultErrorCode::CryptoFailure, "The package could not be decrypted.");
     }
+
+    const auto records_start = in.tellg();
+    auto validated = validate_records(in, state);
+    if (!validated) return validated.error();
+    in.clear();
+    in.seekg(records_start);
+    if (!in) return fail(VaultErrorCode::PackageModified, "The package could not be read again.");
 
     std::error_code size_error;
     const auto file_size = std::filesystem::file_size(source, size_error);
@@ -485,9 +613,21 @@ Result<int> Vault::import_package(
     };
 
     std::error_code mkdir_error;
-    const auto scratch = std::filesystem::temp_directory_path(mkdir_error) / "mvp-pkg";
-    std::filesystem::create_directories(scratch, mkdir_error);
-    std::array<unsigned char, 8> unique{};
+    // Transient plaintext belongs to the destination vault's security boundary,
+    // not a shared OS temp directory (notably /tmp on Android/Linux). Windows
+    // inherits the vault directory's ACL; use a private user-owned vault root.
+    const auto scratch = root_ / ".import-staging";
+    std::filesystem::create_directory(scratch, mkdir_error);
+    if (mkdir_error || std::filesystem::is_symlink(scratch, mkdir_error)
+        || mkdir_error || !std::filesystem::is_directory(scratch, mkdir_error) || mkdir_error) {
+        return fail(VaultErrorCode::PermissionDenied, "A private package staging directory could not be created.");
+    }
+#if !defined(_WIN32)
+    std::filesystem::permissions(scratch, std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace, mkdir_error);
+    if (mkdir_error) return fail(VaultErrorCode::PermissionDenied, "Package staging permissions could not be restricted.");
+#endif
+    std::array<unsigned char, 16> unique{};
     internal::random_bytes(unique);
     std::string unique_name;
     for (const auto byte : unique) {
@@ -496,7 +636,18 @@ Result<int> Vault::import_package(
         unique_name.push_back(hex[byte & 0x0F]);
     }
     const auto scratch_dir = scratch / unique_name;
-    std::filesystem::create_directories(scratch_dir, mkdir_error);
+    if (!std::filesystem::create_directory(scratch_dir, mkdir_error) || mkdir_error) {
+        return fail(VaultErrorCode::PermissionDenied, "A unique package staging directory could not be created.");
+    }
+#if !defined(_WIN32)
+    std::filesystem::permissions(scratch_dir, std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace, mkdir_error);
+    if (mkdir_error) {
+        std::error_code ignored;
+        std::filesystem::remove(scratch_dir, ignored);
+        return fail(VaultErrorCode::PermissionDenied, "Package staging permissions could not be restricted.");
+    }
+#endif
     struct ScratchCleanup {
         std::filesystem::path path;
         ~ScratchCleanup() {
@@ -529,7 +680,10 @@ Result<int> Vault::import_package(
             return folder.error();
         }
         bool already = false;
-        auto imported = import_file(current.temp, {}, folder.value(), &already);
+        // A package import can be resumed after a disconnect, so identical
+        // content resolves onto the item already received instead of stacking
+        // a second copy of every record on a retry.
+        auto imported = import_file(current.temp, {}, folder.value(), &already, true);
         std::error_code ignored;
         std::filesystem::remove(current.temp, ignored);
         const auto relative = current.relative;

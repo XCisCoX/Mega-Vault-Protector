@@ -53,6 +53,20 @@ Examples of security-sensitive behavior include:
 
 These examples guide reporting; they do not establish that these components have been audited or are free of vulnerabilities. The README describes the current security model and platform-specific behavior, including the Android PDF renderer's plaintext cache requirement. Report unexpected exposure or behavior that exceeds those documented requirements.
 
+### Existing plaintext note staging
+
+Desktop note saves currently stage the UTF-8 note body in `<system temporary directory>/mvp-notes/<sanitized note filename>` before importing it into the encrypted vault. `MainWindow::saveOpenText` in `qt-app/src/main_window.cpp` obtains that root with `std::filesystem::temp_directory_path()` and uses `noteFileName` to sanitize the title. This is a file-import staging step, not an in-memory-only save or an encrypted cache.
+
+The file exists during writing and import. The code attempts to remove it after import returns (whether successful or an error result), and after a short write. Removal errors are not checked, and an exception or process crash before removal can bypass cleanup. Ordinary deletion is not secure erasure. The plaintext body and filename may therefore be exposed to software or users with access to the temporary location, and residual data may remain. If checking for leftovers, close the application first, preserve needed data, and inspect the `mvp-notes` directory under the system temporary directory; do not assume it is empty after a failed save. This existing exception does not authorize new plaintext staging elsewhere.
+
+### Cloud server trust boundary
+
+`MegaVaultCloud` is a trusted vault endpoint, not a server that stores only opaque ciphertext. The first successful cloud sign-in unlocks the vault on the server; the server retains the vault password in a `std::string` in process memory while it runs to check later sign-ins. Session expiration does not lock that server-side vault or discard the retained password. Trust the host and its administrators with the password, keys, and decrypted content, and protect process memory and crash dumps accordingly.
+
+Authenticated cloud clients can delete files and folders from the shared vault. LAN peer-sharing read-only permissions do not apply to cloud deletion. Keep independent backups and see [docs/cloud-ssl.md](docs/cloud-ssl.md) for TLS, fingerprint verification, and safe proxy configuration.
+
+Cloud clients also keep decrypted local copies: the desktop writes them under Qt's application cache location in `cloud/`, while Android uses `cacheDir/cloud/`. Partial downloads use a `.part` suffix. These files are not encrypted vault packages; the downloaders do not delete each completed file when its viewer closes. Desktop cloud opening hands the cached file to the system's associated application, which may create additional copies or history. Do not extend the local-vault in-memory playback claim to cloud caches.
+
 ## Responsible testing
 
 Test only on systems, devices, vaults, and networks you own or have explicit permission to assess. Use sample data and backups. Avoid disrupting other users, accessing their information, or testing against another person's shared vault without permission.
@@ -73,7 +87,7 @@ Reports will be handled as privately as reasonably possible, but absolute confid
 
 Check [GitHub Releases](https://github.com/XCisCoX/Mega-Vault-Protector/releases) and the repository's [Security page](https://github.com/XCisCoX/Mega-Vault-Protector/security) for published fixes and advisories. Follow the instructions accompanying an update, especially when storage compatibility or migration is involved.
 
-Keep backups before testing or installing changes that affect vault storage. For Android, do not uninstall the application as a troubleshooting step without first preserving data you need: uninstalling can remove the application's local vault. The README describes signing-key changes that may require reinstallation; plan data preservation before proceeding.
+Keep backups before testing or installing changes that affect vault storage. Current published Android release APKs use the same project release-signing key and can update an installation signed with that key without uninstalling. Older CI APKs from before October 14, 2026 used changing debug keys; switching from one of those installations to the release key can require a one-time uninstall and reinstall. Local or fork debug builds may also have a different signer. **Before any uninstall, preserve and verify a separate copy of the vault and any data you need: uninstalling can remove the application's local vault.** Do not uninstall as a routine troubleshooting or update step. See [Android signing](docs/ANDROID-BUILD.md#signing-android-releases) for the signing workflow.
 
 If a vulnerability affects sharing, disabling the affected sharing session may reduce exposure while a fix is prepared. Specific mitigations should be confirmed for the reported issue rather than assumed to solve every problem.
 

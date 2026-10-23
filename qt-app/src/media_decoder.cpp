@@ -262,6 +262,12 @@ public:
         if (position_ >= plaintext_size_) {
             return AVERROR_EOF;
         }
+        if (!memory_.isEmpty()) {
+            const auto count = std::min<std::uint64_t>(static_cast<std::uint64_t>(size), plaintext_size_ - position_);
+            std::memcpy(buffer, memory_.constData() + position_, static_cast<std::size_t>(count));
+            position_ += count;
+            return static_cast<int>(count);
+        }
         const auto got = cache_.read(
             vault_, video_id_, static_cast<std::int64_t>(position_), buffer,
             static_cast<std::size_t>(size), plaintext_size_);
@@ -303,6 +309,7 @@ public:
     }
 
     void set_plaintext_size(const std::uint64_t size) { plaintext_size_ = size; }
+    void set_memory(const QByteArray& memory) { memory_ = memory; plaintext_size_ = static_cast<std::uint64_t>(memory.size()); }
 
 private:
     std::shared_ptr<videovault::core::Vault> vault_;
@@ -310,6 +317,7 @@ private:
     std::uint64_t plaintext_size_{0};
     std::uint64_t position_{0};
     StreamCache cache_;
+    QByteArray memory_;
 };
 
 int source_read_packet(void* opaque, unsigned char* buffer, const int size) {
@@ -348,7 +356,7 @@ public:
         const std::shared_ptr<videovault::core::Vault>& vault,
         const std::int64_t video_id,
         QString* error,
-        const char* name_hint) {
+        const char* name_hint, const QByteArray* memory = nullptr) {
         close();
 
         // The package plaintext size for the AVIO size callback. The encrypted
@@ -356,6 +364,8 @@ public:
         // overhead); using it would skew SEEK_END/AVSEEK_SIZE and the stream
         // cache's EOF clamping. The original imported size is the plaintext
         // byte count.
+        std::uint64_t plaintext_size = memory ? static_cast<std::uint64_t>(memory->size()) : 0;
+        if (!memory) {
         auto package = vault->package_path(video_id);
         if (!package) {
             if (error != nullptr) {
@@ -363,29 +373,20 @@ public:
             }
             return false;
         }
-        std::error_code size_error;
-        const auto package_size =
-            std::filesystem::file_size(package.value(), size_error);
-        if (size_error) {
+        const auto size = vault->video_size(video_id);
+        if (!size) {
             if (error != nullptr) {
-                *error = QStringLiteral("The video package is missing.");
+                *error = QStringLiteral("Unable to read the video size.");
             }
             return false;
         }
-        std::uint64_t plaintext_size = package_size;
-        auto videos = vault->list_videos();
-        if (videos) {
-            for (const auto& video : videos.value()) {
-                if (video.id == video_id) {
-                    plaintext_size = video.original_size;
-                    break;
-                }
-            }
+        plaintext_size = size.value();
         }
 
         handle_ = std::make_unique<FormatHandle>(
             FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});
         handle_->source.set_plaintext_size(plaintext_size);
+        if (memory) handle_->source.set_memory(*memory);
 
         // Each attempt gets a fresh AVIO. A failed avformat_open_input() has
         // already consumed the previous buffer, and it frees the format
@@ -1040,6 +1041,11 @@ bool MediaDecoder::open(
     QString* error,
     const char* name_hint) {
     return impl_->open(vault, video_id, error, name_hint);
+}
+
+bool MediaDecoder::open_memory(const QByteArray& bytes, QString* error) {
+    prepare_for_audio();
+    return impl_->open({}, 0, error, "music.flac", &bytes);
 }
 
 bool MediaDecoder::is_open() const { return impl_->is_open(); }

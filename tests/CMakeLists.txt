@@ -102,3 +102,63 @@ set_target_properties(VideoVaultCoreRecordTests PROPERTIES FOLDER "Tests")
 mvp_copy_runtime_dlls(VideoVaultCoreRecordTests)
 
 add_test(NAME VideoVaultCore.Records COMMAND VideoVaultCoreRecordTests)
+
+# The encrypted package boundary used by self-hosted sync. The sender and
+# receiver use different local vault passwords and share only a package secret.
+add_executable(VideoVaultSyncPackageTests sync_packages.cpp)
+target_link_libraries(VideoVaultSyncPackageTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultSyncPackageTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultSyncPackageTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultSyncPackageTests)
+add_test(NAME VideoVaultCore.SyncPackages COMMAND VideoVaultSyncPackageTests)
+
+# Provider audio enters through the shared memory-only import boundary on every
+# platform. The test generates its audio fixture in RAM, never as a source file.
+add_executable(VideoVaultPluginMemoryTests plugin_memory.cpp)
+target_link_libraries(VideoVaultPluginMemoryTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultPluginMemoryTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultPluginMemoryTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultPluginMemoryTests)
+add_test(NAME VideoVaultCore.PluginMemory COMMAND VideoVaultPluginMemoryTests)
+
+find_package(Threads REQUIRED)
+add_executable(MegaVaultExtensionTests extension_runtime.cpp)
+target_link_libraries(MegaVaultExtensionTests PRIVATE MegaVaultExtensions Threads::Threads)
+add_test(NAME VideoVault.ExtensionRuntime COMMAND MegaVaultExtensionTests)
+set_tests_properties(VideoVault.ExtensionRuntime PROPERTIES TIMEOUT 20)
+
+# Memory-security regression suite. It reads this process's own committed memory
+# to prove that a hard lock leaves no usable master key behind, so it needs the
+# core's internal headers (SensitiveBuffer / PackageReader / derive_master_key).
+# It writes only to throwaway temporary vaults and never prints a secret.
+add_executable(VideoVaultSecurityMemoryTests security_memory.cpp)
+target_link_libraries(VideoVaultSecurityMemoryTests PRIVATE VideoVault::Core Threads::Threads)
+target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+    "${CMAKE_SOURCE_DIR}/core/src")
+if(WIN32)
+    target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+        "${MVP_VCPKG_PREFIX}/include")
+elseif(ANDROID)
+    target_include_directories(VideoVaultSecurityMemoryTests PRIVATE
+        ${MVP_DEP_INCLUDE_DIRS})
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SECMEM_SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    target_link_libraries(VideoVaultSecurityMemoryTests PRIVATE PkgConfig::SECMEM_SODIUM)
+endif()
+target_compile_features(VideoVaultSecurityMemoryTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultSecurityMemoryTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultSecurityMemoryTests)
+add_test(NAME VideoVaultCore.SecurityMemory COMMAND VideoVaultSecurityMemoryTests)
+set_tests_properties(VideoVaultCore.SecurityMemory PROPERTIES TIMEOUT 300)
+
+# Progressive (streamed) provider import: bytes are encrypted into the vault as
+# they arrive (no plaintext staging file, no whole-track buffer), and only a
+# complete stream becomes a library item with provider provenance.
+add_executable(VideoVaultStreamImportTests stream_import.cpp)
+target_link_libraries(VideoVaultStreamImportTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultStreamImportTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultStreamImportTests PROPERTIES FOLDER "Tests")
+mvp_copy_runtime_dlls(VideoVaultStreamImportTests)
+add_test(NAME VideoVaultCore.StreamImport COMMAND VideoVaultStreamImportTests)
+set_tests_properties(VideoVaultCore.StreamImport PROPERTIES TIMEOUT 180)

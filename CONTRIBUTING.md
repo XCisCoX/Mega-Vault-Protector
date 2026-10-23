@@ -25,7 +25,7 @@ Keep discussions respectful and focused on the work. Explain disagreements with 
 
 Screenshots and recordings are optional. Use disposable vaults and sample data. Never upload passwords, encryption keys, private files, secret record values, or sharing-session QR codes.
 
-For accessibility barriers, also describe your input method or assistive technology and the control or screen involved. See [accessibility.md](accessibility.md) for reporting guidance.
+For accessibility barriers, also describe your input method or assistive technology and the control or screen involved. See [ACCESSIBILITY.md](ACCESSIBILITY.md) for reporting guidance.
 
 ## Security reports
 
@@ -69,7 +69,7 @@ The Windows configure preset contains machine-specific paths for Qt, vcpkg, the 
 
 ```text
 cmake --preset vs2022-x64
-cmake --build --preset vs2022-x64-debug --target VideoVaultCoreTests VideoVaultApp
+cmake --build --preset vs2022-x64-debug
 ctest --preset vs2022-x64-debug --output-on-failure
 ```
 
@@ -86,12 +86,12 @@ Follow [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md) for the native dependencie
 | Directory | Responsibility |
 | --- | --- |
 | `core/` | Encryption, vault database, encrypted packages, streaming, metadata, tags, folders, and records |
-| `qt-app/` | Windows and Linux interfaces, viewers, playback, sharing, and transfers |
-| `android/` | Android interface, JNI integration, and platform behavior |
+| `qt-app/` | Windows and Linux interfaces, viewers, playback, record editor, text notes, LAN sharing and transfers, cloud server and browser, and updater |
+| `android/` | Android interface, JNI integration, cloud client, updater, and platform behavior |
 | `tests/` | Headless automated test suites |
-| `scripts/` | Build and dependency tooling |
+| `scripts/` | Build and dependency tooling, release-version selection, and Linux packaging |
 | `third_party/` | Dependency overlays |
-| `docs/` | Build documentation, screenshots, and project assets |
+| `docs/` | Architecture, Android build and signing, cloud TLS setup, screenshots, and project assets |
 | `.github/` | CI and release workflows |
 
 ## Implementation expectations
@@ -111,15 +111,17 @@ Use the existing cryptographic libraries and established project primitives. Do 
 
 Changes to package formats, database layouts, key handling, or password changes must explain compatibility with existing vaults, failure behavior, and any migration or recovery requirements. Add tests for the affected behavior.
 
-Avoid introducing plaintext files, logs, or caches containing private content. If a platform API requires a temporary plaintext file, document its purpose, location, lifetime, cleanup, and security implications. The Android PDF renderer's existing cache requirement is not permission to create additional plaintext copies elsewhere.
+Avoid introducing plaintext files, logs, or caches containing private content. If a platform API requires a temporary plaintext file, document its purpose, location, lifetime, cleanup, and security implications. Existing exceptions are not permission to create additional plaintext copies elsewhere.
 
-For sharing changes, preserve certificate verification and the permission boundaries described in the README. Remote browsing and copying must not accidentally grant permission to rename, move, or delete another device's files.
+The desktop note-save path is an existing exception, not an in-memory-only save: `MainWindow::saveOpenText` in `qt-app/src/main_window.cpp` writes the UTF-8 body to `<system temporary directory>/mvp-notes/<sanitized note filename>` so it can call the core's file-import API. The temporary root comes from `std::filesystem::temp_directory_path()` (not a fixed `/tmp` path), and `noteFileName` sanitizes the title. The plaintext file exists during writing and import. The code attempts ordinary deletion after import returns, including an import-error result, and after a short write; it does not check removal errors. A crash or exception before removal, or failed removal, can leave plaintext behind. Deletion is not secure erasure; the filename and body are outside vault encryption while staged. See [SECURITY.md](SECURITY.md) for the exposure and cleanup warning, and the README for the separate Android PDF cache exception.
+
+For LAN sharing changes, preserve certificate verification and the permission boundaries described in the README. LAN remote browsing and copying must not accidentally grant permission to rename, move, or delete another device's files. Cloud access has a different trust boundary: `MegaVaultCloud` unlocks the vault on the server and retains its password in process memory, and authenticated cloud clients can delete shared files and folders. Do not apply LAN read-only assumptions to cloud operations; see [docs/cloud-ssl.md](docs/cloud-ssl.md).
 
 ### Accessibility
 
 User-facing changes should support meaningful control labels, visible keyboard focus, predictable navigation, readable scaled text, and understandable errors. Provide alternatives when an action relies on a gesture or precise pointer movement.
 
-Follow [accessibility.md](accessibility.md). Include the checks performed and any known gaps in the pull request; do not claim screen reader support or accessibility conformance based only on a successful build.
+Follow [ACCESSIBILITY.md](ACCESSIBILITY.md). Include the checks performed and any known gaps in the pull request; do not claim screen reader support or accessibility conformance based only on a successful build.
 
 ## Testing your change
 

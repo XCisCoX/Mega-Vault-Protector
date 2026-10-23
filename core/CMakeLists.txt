@@ -85,6 +85,7 @@ add_library(VideoVaultCore STATIC
     src/media.cpp
     src/metadata.cpp
     src/package.cpp
+    src/secret.cpp
     src/share_package.cpp
     src/vault.cpp
     src/version.cpp

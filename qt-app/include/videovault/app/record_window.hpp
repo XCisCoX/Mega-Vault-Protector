@@ -2,14 +2,18 @@
 
 #include "videovault/app/record_document.hpp"
 
-#include <QFrame>
+#include <QByteArray>
+#include <QSet>
+#include <QColor>
+#include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <vector>
 
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -20,109 +24,159 @@ class QVBoxLayout;
 
 namespace videovault::core {
 class Vault;
-struct VaultError;
-} // namespace videovault::core
+}
 
 namespace videovault::app {
 
-// One key/value row: a name, a value, and a persisted "secret" flag.
+// The editor for one record file: an ordered list of records, each a title plus a
+// nested body of typed values.
 //
-// Deliberately not a QObject: the window wires it up with callbacks, so no
-// extra moc pass is needed for a helper type. Masking never loses data -- the
-// real value lives in the model, and the editor only holds dots while masked,
-// so a masked row can be saved or copied without leaking or corrupting.
-class RecordFieldCard final : public QFrame {
-public:
-    explicit RecordFieldCard(QWidget* parent = nullptr);
-
-    void setField(const RecordField& field);
-    RecordField field() const { return field_; }
-    void setEditable(bool editable);
-    bool matches(const QString& needle) const;
-    void focusName();
-
-    std::function<void()> onChanged;
-    std::function<void(RecordFieldCard*)> onRemove;
-    std::function<void(const QString& name, const QString& value, bool secret)> onCopy;
-
-protected:
-    void resizeEvent(QResizeEvent* event) override;
-
-private:
-    void applyMask();
-    void refreshKind();
-    void adjustValueHeight();
-    void notifyChanged();
-
-    QLineEdit* name_{nullptr};
-    QLabel* badge_{nullptr};
-    QPlainTextEdit* value_{nullptr};
-    QPushButton* reveal_{nullptr};
-    QPushButton* secret_{nullptr};
-    QPushButton* copy_{nullptr};
-    QPushButton* remove_{nullptr};
-
-    RecordField field_;
-    bool revealed_{false};
-    bool updating_{false};
-    bool editable_{true};
-};
-
-// The record editor. Loads and saves through the core's ordinary item API, so
-// a record behaves exactly like an imported file everywhere else in the app.
+// Nothing here talks to Windows: prompts are drawn inside the window that owns this
+// page through InWindowSheet, which is the same prompt the library uses to rename an
+// item. Content transitions (read, save, migrate) run off the GUI thread and come
+// back through a watcher.
 class RecordWindow final : public QWidget {
     Q_OBJECT
+
 public:
     explicit RecordWindow(QWidget* parent = nullptr);
 
-    // Loads the record off the UI thread and populates the editor.
-    void openRecord(std::shared_ptr<core::Vault> vault, std::int64_t record_id,
-        const QString& title);
+    // `folderId` is where the item lives, so a template saved from this record lands
+    // beside it rather than at the library root.
+    void openRecord(std::shared_ptr<core::Vault> vault, std::int64_t recordId,
+        const QString& itemName, std::int64_t folderId = 0);
 
 signals:
     void closeRequested();
-    // The stored content changed: the gallery may need to repaint (the display
-    // name can change here).
     void saved();
+    // A template item was created, so the library has one more item in it.
+    void templateSaved(const QString& name);
+
+protected:
+    void changeEvent(QEvent* event) override;
+    // Escape clears the filter when there is one, otherwise it closes the page.
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
+    // A position inside the document: the record, then the member/element index at
+    // each level. Resolved on demand, so a rebuild cannot invalidate it.
+    struct NodePath {
+        int entry{-1};
+        QVector<int> steps;
+    };
+
+    // What a prompt came back with.
+    struct NodeDraft {
+        ValueType type{ValueType::String};
+        QString key;
+        QString value;
+    };
+
     void buildInterface();
+    void applyStyle();
+
     void load();
     void fill(const RecordDocument& document);
-    void updateEmptyState();
-    void applySearch();
-    void addField(const RecordField& field, bool focus);
-    void removeCard(RecordFieldCard* card);
+    void showLegacy(const QByteArray& bytes, int version);
+    void showUnreadable(const QByteArray& bytes);
+    void migrate();
+
+    void rebuild();
+    void buildEntry(int entryIndex, QVBoxLayout* layout);
+    void buildChildren(QWidget* host, QVBoxLayout* layout, const NodePath& path,
+        const RecordNode& node, int depth, const QString& collapseKey, bool showAll);
+    void buildRow(QWidget* parent, QVBoxLayout* layout, const NodePath& path,
+        const RecordNode& node, int depth, const QString& collapseKey, const QString& key,
+        bool showAll);
+
+    RecordNode* resolve(const NodePath& path);
+    RecordNode* resolveParent(const NodePath& path, QString* key);
+    QString pathText(const NodePath& path) const;
+
+    // Prompts, all drawn in-window.
+    bool promptNode(const QString& heading, bool withKey, NodeDraft* draft);
+    bool promptText(const QString& heading, const QString& message, const QString& initial,
+        QString* out);
+    bool confirm(const QString& heading, const QString& message, const QString& action);
+
+    void addChild(const NodePath& parent);
+    void editNode(const NodePath& path);
+    void renameNode(const NodePath& path);
+    void removeNode(const NodePath& path);
+    void copyNode(const NodePath& path);
+
+    void addEntry();
+    void renameEntry(int entryIndex);
+    void removeEntry(int entryIndex);
+    void moveEntry(int entryIndex, int delta);
+
+    // Captures an object row as a template: one part of a record.
+    void beginSaveAsTemplate(const NodePath& path);
+    // Captures a whole record as a template. A record here is one entry, not the document.
+    void beginSaveAsTemplateEntry(int entryIndex);
+    // Asks for the template's name, then writes it to the store.
+    void promptSaveTemplate(const RecordEntry& entry, const QString& defaultName);
+    void writeTemplate(const QString& name, const RecordEntry& entry);
+    // Inserts a template's structure into an object row, as a new nested object.
+    void beginInsertTemplate(const NodePath& parent);
+    void promptInsertTemplate(const NodePath& parent, const RecordEntry& templateEntry);
+
     void markChanged();
     void refreshDirty();
-    void setEditable(bool editable);
-    RecordDocument collect() const;
     void save();
     void revert();
-    void copyValue(const QString& name, const QString& value, bool secret);
-    void setStatus(const QString& message, bool problem);
+    // True when the document differs from what was last read or saved.
+    [[nodiscard]] bool isDirty() const;
+    // Closes, asking first if there are unsaved edits.
+    void requestClose();
+    // Reorders the records by title; the old order comes back through Revert.
+    void sortEntries(bool ascending);
+    void writeContent(const QByteArray& bytes, const QString& success,
+        const std::function<void()>& after);
+
     void setBusy(bool busy);
-    void updateCount();
+    void setStatus(const QString& message, bool problem);
+    void updateEmptyState();
+    void copyToClipboard(const QString& text, bool secret, const QString& note);
 
     std::shared_ptr<core::Vault> vault_;
+    std::int64_t folderId_{0};
     std::int64_t recordId_{0};
-    QByteArray loaded_;      // bytes as stored, for change detection
-    bool editable_{true};    // false when the content is not a record we can write
+    QString itemName_;
+    RecordDocument document_;
+    QByteArray loaded_;
+    QByteArray legacy_;
+    bool editable_{false};
+    QSet<QString> collapsed_;
+    QSet<QString> revealed_;
 
-    QLineEdit* titleEdit_{nullptr};
-    QLineEdit* searchEdit_{nullptr};
-    QScrollArea* scroll_{nullptr};
-    QWidget* cardHost_{nullptr};
-    QVBoxLayout* cardLayout_{nullptr};
-    QLabel* emptyHint_{nullptr};
-    QLabel* status_{nullptr};
-    QLabel* countLabel_{nullptr};
-    QPushButton* addButton_{nullptr};
-    QPushButton* saveButton_{nullptr};
-    QPushButton* revertButton_{nullptr};
     QTimer* clipboardTimer_{nullptr};
     QString clipboardValue_;
-    std::vector<RecordFieldCard*> cards_;
+    QString rowHoverStyle_;
+    // setStyleSheet() posts another StyleChange; without these two the handler
+    // below re-entered itself until the stack died (creating a record in light
+    // theme crashed the app).
+    bool restyling_{false};
+    QColor styledWindowColor_;
+    QString disclosureColor_;
+    int actionColumn_{0};
+
+    QLineEdit* search_{nullptr};
+    QString query_;
+    QLabel* fileName_{nullptr};
+    QLabel* countLabel_{nullptr};
+    QLabel* status_{nullptr};
+    QLabel* errorHint_{nullptr};
+    QLabel* legacyLabel_{nullptr};
+    QPushButton* addRecordButton_{nullptr};
+    QPushButton* saveButton_{nullptr};
+    QPushButton* revertButton_{nullptr};
+    QPushButton* migrateButton_{nullptr};
+    QWidget* legacyBar_{nullptr};
+    QScrollArea* scroll_{nullptr};
+    QWidget* host_{nullptr};
+    QVBoxLayout* hostLayout_{nullptr};
+    QPlainTextEdit* raw_{nullptr};
 };
 
 } // namespace videovault::app

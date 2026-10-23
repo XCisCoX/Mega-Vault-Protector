@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>MegaVault · Your files</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<script src="/vendor/sodium.js" defer></script>
+<script src="/vendor/sodium-wrappers.js" defer></script>
+<script src="/package-crypto.js" defer></script>
+<script src="/files-model.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to files</a>
+<div class="gate" id="auth">
+  <section class="gate-brand">
+    <a class="wordmark" href="/" aria-label="MegaVault home"><span class="mark" aria-hidden="true">M</span> MegaVault</a>
+    <p class="eyebrow">A little more space for your life</p>
+    <h1>Your files,<br>wherever you are.</h1>
+    <p class="lead">One home for the things you want to keep. Add files, find your favourites, and pick up on another device.</p>
+    <div class="gate-art" aria-hidden="true"><div class="art-folder">↗<span>Made for your everyday.</span></div><div class="art-card">♪<span>Every little moment.</span></div></div>
+    <p class="hint">Files are encrypted in your browser before upload. File names, folders, sizes and tags are visible to your server.</p>
+  </section>
+  <section class="gate-panel" aria-label="Your account">
+    <div class="card auth-card">
+      <h2>Make yourself at home</h2><p class="hint">Sign in to your MegaVault account.</p>
+      <div class="tabs" role="tablist" aria-label="Account access">
+        <button class="tab is-active" id="tab-login" role="tab" type="button" aria-selected="true" aria-controls="login-form">Sign in</button>
+        <button class="tab" id="tab-register" role="tab" type="button" aria-selected="false" aria-controls="register-form">Create account</button>
+      </div>
+      <form id="login-form" class="stack" autocomplete="on">
+        <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required maxlength="190" placeholder="you@example.com"></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required maxlength="200" placeholder="Account password"></label>
+        <button class="button primary block" type="submit">Sign in</button>
+        <p class="hint" id="signup-hint">New here? <button class="link" id="switch-button" type="button">Create an account</button></p>
+      </form>
+      <form id="register-form" class="stack" hidden autocomplete="on">
+        <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required maxlength="190" placeholder="you@example.com"></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="200" placeholder="At least 10 characters"></label>
+        <label class="field"><span>Repeat password</span><input name="confirm" type="password" autocomplete="new-password" required minlength="10" maxlength="200"></label>
+        <button class="button primary block" type="submit">Create account</button>
+        <p class="hint">Your account password signs you in. A separate file password encrypts your files; keep it somewhere safe.</p>
+      </form>
+    </div>
+    <p id="auth-status" class="hint" role="status">Connecting securely…</p>
+  </section>
+</div>
+<div class="shell" id="app" hidden>
+  <aside class="sidebar">
+    <a class="wordmark" href="/" aria-label="MegaVault home"><span class="mark" aria-hidden="true">M</span><span>MegaVault</span></a>
+    <div class="library-picker">
+      <label for="library-select" class="eyebrow">Your library</label>
+      <select id="library-select" data-testid="library-select" aria-label="Selected library"></select>
+      <div class="library-actions"><button class="link" id="create-library" type="button">＋ Create library</button><button class="icon-button" id="rename-library" type="button" aria-label="Rename library" title="Rename library">✎</button></div>
+    </div>
+    <nav class="nav" aria-label="Your library">
+      <button class="nav-item is-active" data-view="files" type="button"><span aria-hidden="true">▤</span>Files</button>
+      <button class="nav-item" data-view="photos" type="button"><span aria-hidden="true">▧</span>Photos</button>
+      <button class="nav-item" data-view="music" type="button"><span aria-hidden="true">♫</span>Music</button>
+      <button class="nav-item" data-view="trash" type="button"><span aria-hidden="true">♲</span>Trash</button>
+    </nav>
+    <div class="nav secondary" aria-label="Account">
+      <button class="nav-item" data-view="devices" type="button"><span aria-hidden="true">▣</span>Devices</button>
+      <button class="nav-item" data-view="settings" type="button"><span aria-hidden="true">⚙</span>Settings</button>
+    </div>
+    <div class="sidebar-foot">
+      <label class="hint" for="usage-meter">Storage</label><progress id="usage-meter" max="100" value="0" aria-label="Storage used"></progress><p class="hint tiny" id="usage-label">Loading storage…</p>
+      <div class="account-foot"><div class="avatar" aria-hidden="true">M</div><span class="who" id="who"></span><button class="icon-button" id="signout" type="button" aria-label="Sign out" title="Sign out">↪</button></div>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <header class="topbar"><div><p class="eyebrow" id="library-name">Your library</p><h1 id="view-title">Files</h1></div><div class="topbar-actions"><span class="badge" id="lock-status">Locked</span><button class="button" id="lock-library" type="button">Unlock files</button></div></header>
+    <div class="connection-banner" id="connection" role="status" hidden>You’re offline. Your files will be here when you reconnect.</div>
+    <section id="view-files" class="view" aria-label="File browser">
+      <div class="file-toolbar">
+        <label class="search"><span aria-hidden="true">⌕</span><input id="files-search" data-testid="files-search" type="search" aria-label="Search files" placeholder="Search this library"></label>
+        <button class="button primary" id="add-files" type="button"><span aria-hidden="true">＋ </span>Add files</button>
+        <input id="file-picker" data-testid="file-picker" class="visually-hidden" type="file" multiple tabindex="-1" aria-label="Choose files to upload">
+      </div>
+      <div class="browse-bar"><nav id="breadcrumbs" class="breadcrumbs" aria-label="Folder breadcrumbs"></nav><div class="view-options"><label class="sort-label"><span class="visually-hidden">Sort files</span><select id="files-sort" aria-label="Sort files"><option value="name">Name A–Z</option><option value="name-desc">Name Z–A</option><option value="updated">Recently changed</option><option value="size">Largest first</option></select></label><div class="segmented" role="group" aria-label="File view"><button id="list-view" class="icon-button is-active" aria-label="List view" aria-pressed="true" type="button">☰</button><button id="grid-view" class="icon-button" aria-label="Grid view" aria-pressed="false" type="button">▦</button></div><button class="icon-button" id="refresh-files" type="button" aria-label="Refresh files" title="Refresh files">↻</button></div></div>
+      <div class="selection-bar" id="selection-bar" hidden><span id="selected-name"></span><div class="selection-actions" id="selection-actions"></div><button class="icon-button" id="clear-selection" type="button" aria-label="Clear selection">×</button></div>
+      <div id="drop-zone" class="file-surface" aria-label="Files; drop files here to upload">
+        <div class="list-heading" id="list-heading" aria-hidden="true"><span>Name</span><span>Size</span><span>Modified</span><span></span></div>
+        <div id="file-list" class="file-list" role="list" aria-label="Files"></div>
+        <div class="empty-state" id="files-empty" role="status"><span class="empty-icon" id="empty-icon" aria-hidden="true">▤</span><h2 id="empty-title">Loading your files…</h2><p id="empty-text">Just a moment.</p><button class="button" id="empty-action" type="button" hidden>Try again</button></div>
+        <div class="drop-hint" aria-hidden="true">Drop files to add them to this library</div>
+      </div>
+      <footer class="browser-foot"><span id="file-count" aria-live="polite">Loading…</span><span>Browser uploads: up to 128 MiB per file · encrypted before upload</span></footer>
+    </section>
+    <section class="view" id="view-devices" hidden>
+      <div class="section-intro"><h2>Stay connected</h2><p class="hint">Manage app connections. Revoke a device to stop its access to this server.</p></div>
+      <div class="panel" id="device-list"></div>
+      <div class="panel"><h2>Connect your apps</h2><p class="hint">In MegaVault Protect, open Sync settings, use this server address, sign in, and select the same library. The app also needs the file password used for its packages. Older app versions may require manual device credentials below. QR pairing is not available.</p><div class="copy-row"><code id="server-url"></code><button class="button" id="copy-url" type="button">Copy address</button></div></div>
+      <details class="panel"><summary>Advanced · manual device setup</summary><p class="hint">For an app that asks for a bearer token, create one per device and paste it into that app’s sync settings. You can revoke it above.</p><form id="token-form" class="toolbar"><label class="field grow"><span>Device name</span><input name="label" required maxlength="60" placeholder="My laptop"></label><button class="button" type="submit">Issue token</button></form><div id="new-token" hidden><p class="hint">Shown once. Copy it now, then dismiss it.</p><div class="copy-row"><code id="token-value" class="token-value"></code><button class="button" id="copy-token" type="button">Copy</button><button class="button" id="dismiss-token" type="button">Dismiss</button></div></div></details>
+    </section>
+    <section class="view" id="view-settings" hidden>
+      <div class="panel"><h2>Your account</h2><p id="account-email"></p><p class="hint" id="account-created"></p><label class="field theme-field"><span>Appearance</span><select id="theme-select"><option value="system">Use system setting</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div>
+      <form class="panel stack" id="password-form"><h2>Change account password</h2><p class="hint">This signs out other browsers. It does not change your file password or re-encrypt existing files.</p><div class="field-row"><label class="field grow"><span>Current password</span><input name="current" type="password" autocomplete="current-password" required maxlength="200"></label><label class="field grow"><span>New password</span><input name="next" type="password" autocomplete="new-password" required minlength="10" maxlength="200"></label></div><button class="button align-start" type="submit">Update password</button></form>
+      <div class="panel"><h2>File security</h2><p class="hint">Your file password is kept in this page’s memory until you lock, switch libraries, or sign out. Locking stops transfers and closes previews. Your account password cannot recover the password of existing native or browser packages. File names, folders, sizes and tags remain visible to the server.</p><button class="button" id="settings-lock" type="button">Lock files</button></div>
+      <div class="panel"><h2>Browser sessions</h2><p class="hint">End every browser session, including this one. App connections are managed separately in Devices.</p><button class="button" id="signout-all" type="button">Sign out everywhere</button></div>
+      <details class="panel danger"><summary>Delete library or account</summary><p class="hint">Deletion is permanent. Local app libraries are not removed, but files stored only here cannot be recovered.</p><div class="toolbar"><button class="button danger" id="delete-library" type="button">Delete selected library…</button><button class="button danger" id="delete-account" type="button">Delete this account…</button></div></details>
+    </section>
+    <section class="transfer-tray" id="transfer-tray" aria-label="File transfers" hidden><header><h2>Transfers</h2><span id="transfer-summary" role="status"></span><button class="button small" id="clear-transfers" type="button">Clear finished</button></header><div id="transfer-list"></div></section>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="modal" class="modal-card" aria-labelledby="modal-title" aria-describedby="modal-text"><form id="modal-form" class="stack"><h2 id="modal-title">Confirm</h2><p id="modal-text" class="hint"></p><label class="field" id="modal-field"><span id="modal-label">Name</span><input id="modal-input" autocomplete="off"></label><p id="modal-error" class="error-text" role="alert" hidden></p><div class="modal-actions"><button class="button" id="modal-cancel" type="button">Cancel</button><button class="button primary" id="modal-ok" type="submit">Continue</button></div></form></dialog>
+<dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title"><header><h2 id="preview-title">Preview</h2><button class="button" id="close-preview" type="button">Close preview</button></header><div id="preview-content"></div></dialog>
+</body>
+</html>

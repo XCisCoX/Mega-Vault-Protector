@@ -1,0 +1,1 @@
+{"mvp_record":3,"template":true,"name":"API key","entries":[{"title":"Placeholder Service","body":{"API key":"","Expires":"","Service":""},"secret":["API key"],"generate":[{"path":"API key","kind":"password","length":40},{"path":"Expires","kind":"date"}]}]}

@@ -6,11 +6,34 @@ plugins {
 
 android {
     namespace = "org.megavideoprotect.app"
+    sourceSets.getByName("main").assets.srcDir("../../plugins")
+    // Lucide VectorDrawables generated from assets/icons/lucide by tools/icons/generate.py
+    sourceSets.getByName("main").res.srcDir("../../assets/icons/android")
     compileSdk = 36
     // The SDK image ships no build-tools; the app build script provides a
     // 35.0.0 shim (zipalign/apksigner via apt + source.properties). AGP 8.13
     // refuses anything below its minimum build-tools revision (35.0.0).
     buildToolsVersion = "35.0.0"
+
+    // Release signing. CI decodes the project keystore from the repository
+    // secrets and points MVP_KEYSTORE at it. Android only replaces an installed
+    // app when the new APK carries the same certificate as the old one, so this
+    // key has to stay the same for every release — see android-signing/ next to
+    // the repository, not inside it. Without the variables the release build is
+    // simply unsigned, which local `assembleDebug` work never notices.
+    val keystorePath = System.getenv("MVP_KEYSTORE") ?: ""
+    signingConfigs {
+        if (keystorePath.isNotBlank()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                // PKCS#12, the format openssl exports and apksigner reads.
+                storeType = "PKCS12"
+                storePassword = System.getenv("MVP_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("MVP_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("MVP_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
 
     // The SDK image ships NDK 30.0.14904198; AGP's default ndkVersion (27.x)
     // is not installed and cannot be downloaded on this network.
@@ -50,6 +73,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // An unsigned release APK cannot update an installed copy, so the
+            // workflow hands the keystore in and then checks the signature.
+            if (keystorePath.isNotBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -77,6 +105,8 @@ android {
 }
 
 dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
     implementation(platform("androidx.compose:compose-bom:2025.05.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

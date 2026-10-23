@@ -1,3 +1,4 @@
+#include "videovault/app/icons.hpp"
 #include "videovault/app/share_server.hpp"
 #include "videovault/app/share_tls.hpp"
 #include "videovault/app/glass.hpp"
@@ -148,7 +149,9 @@ bool writeRaw(TlsChannel* socket, const char* data, int size) {
         const qint64 wrote = socket->write(data + off, size - off);
         if (wrote <= 0) return false;
         off += static_cast<int>(wrote);
-        if (!socket->waitForBytesWritten(20000)) return false;
+        // TlsChannel::write already flushed to the socket, so a false wait means
+        // there is nothing pending — not that this chunk failed.
+        socket->waitForBytesWritten(20000);
     }
     return true;
 }
@@ -1216,9 +1219,9 @@ void ShareServer::showDialog(QWidget* parent) {
         "  background: #1c1c1e; color: white; border: none; border-radius: 12px;"
         "  min-height: 36px; padding: 0 12px; }"
         "QFrame#shareSheet QComboBox QAbstractItemView {"
-        "  background: #1c1c1e; color: white; selection-background-color: #3390ec; }"
-        "QPushButton#shareDone { background: transparent; border: none; color: #3390ec; min-height: 32px; }"
-        "QPushButton#shareCopy { background: transparent; border: none; color: #3390ec; min-height: 32px; padding: 0 4px; }"
+        "  background: #1c1c1e; color: white; selection-background-color: #2672c8; }"
+        "QPushButton#shareDone { background: transparent; border: none; color: #2672c8; min-height: 32px; }"
+        "QPushButton#shareCopy { background: transparent; border: none; color: #2672c8; min-height: 32px; padding: 0 4px; }"
         "QPushButton#shareStop { background: #2c1518; border: none; color: #ff6b6b; border-radius: 14px; min-height: 40px; }"));
     auto* layout = new QVBoxLayout(sheet);
     layout->setContentsMargins(22, 16, 22, 18);
@@ -1231,6 +1234,7 @@ void ShareServer::showDialog(QWidget* parent) {
     title->setFont(titleFont);
     title->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
     auto* done = new QPushButton(QStringLiteral("Done"), sheet);
+    icons::withText(done, QStringLiteral("check"));
     done->setObjectName(QStringLiteral("shareDone"));
     done->setCursor(Qt::PointingHandCursor);
     done->setFocusPolicy(Qt::NoFocus);
@@ -1270,6 +1274,7 @@ void ShareServer::showDialog(QWidget* parent) {
     address->setFont(bodyFont);
     address->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
     auto* copy = new QPushButton(QStringLiteral("Copy"), addressBar);
+    icons::withText(copy, QStringLiteral("copy"));
     copy->setObjectName(QStringLiteral("shareCopy"));
     copy->setCursor(Qt::PointingHandCursor);
     copy->setFocusPolicy(Qt::NoFocus);
@@ -1329,6 +1334,7 @@ void ShareServer::showDialog(QWidget* parent) {
     QObject::connect(done, &QPushButton::clicked, dialog, &QWidget::close);
 
     auto* stop = new QPushButton(QStringLiteral("Stop sharing"), sheet);
+    icons::withText(stop, QStringLiteral("wifi-off"));
     stop->setObjectName(QStringLiteral("shareStop"));
     stop->setCursor(Qt::PointingHandCursor);
     stop->setFocusPolicy(Qt::NoFocus);

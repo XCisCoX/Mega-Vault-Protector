@@ -5,7 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -51,10 +53,10 @@ object FolderPicker {
         Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
             .setData(Uri.parse("package:${context.packageName}"))
 
-    /** Starting points, best first. */
+    /** Storage root first. Downloads is only a fallback if the root cannot be read. */
     fun roots(): List<File> = listOfNotNull(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
         Environment.getExternalStorageDirectory(),
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
@@ -62,8 +64,23 @@ object FolderPicker {
 
     fun children(dir: File): List<File> =
         (dir.listFiles() ?: emptyArray())
-            .filter { it.isDirectory && !it.name.startsWith(".") }
+            .filter { it.isDirectory }
             .sortedBy { it.name.lowercase() }
+
+    /** Document URI for the shared-storage root, used to open the system picker there. */
+    fun storageRootUri(): Uri = DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:",
+    )
+}
+
+/** System file picker opened on the storage root instead of Downloads. */
+class OpenDocumentsAtRoot : ActivityResultContracts.OpenMultipleDocuments() {
+    override fun createIntent(context: Context, input: Array<String>): Intent =
+        super.createIntent(context, input).putExtra(
+            DocumentsContract.EXTRA_INITIAL_URI,
+            FolderPicker.storageRootUri(),
+        )
 }
 
 /** Folder browser: tap to descend, ".." to go up, then "Use this folder". */
@@ -77,6 +94,7 @@ fun FolderPickerDialog(
     var granted by remember { mutableStateOf(FolderPicker.hasAccess()) }
 
     Dialog(onDismissRequest = onDismiss) {
+        BlurredDialogWindow()
         MvpCard(Modifier.fillMaxWidth()) {
             MvpTitle("Choose vault folder")
             MvpDescription(dir?.absolutePath ?: "No storage is accessible yet")

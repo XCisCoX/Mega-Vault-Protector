@@ -163,19 +163,20 @@ int main() {
         }
     }
 
-    // Content deduplication matches import_file: identical bytes reuse the row.
+    // Identical record bytes import as their own item, like any other import.
     {
         const auto again = vault.import_bytes(asBytes(first_record), "Another title");
-        if (!again || again.value() != first.value()) {
-            return fail("Re-importing identical record bytes must return the existing id.");
+        if (!again || again.value() == first.value()) {
+            return fail("Re-importing identical record bytes must create its own item.");
         }
     }
 
     // The gallery lists records like any other item, with size and name.
     {
         const auto videos = vault.list_videos();
-        if (!videos || videos.value().size() != 2U) {
-            return fail("The gallery must list both records.");
+        // Two records plus the independent copy imported above.
+        if (!videos || videos.value().size() != 3U) {
+            return fail("The gallery must list every record.");
         }
         const auto* listed = findVideo(videos.value(), first.value());
         if (listed == nullptr) {
@@ -253,7 +254,10 @@ int main() {
         if (std::filesystem::exists(before_package.value(), ignored)) {
             return fail("The replaced package file must be removed.");
         }
-        if (countPackages(root) != 3U) {
+        // Three records (two authored plus the independent copy) and their
+        // replacements: the count is the item count, not the item count minus
+        // replacements, so an orphan would still show up here.
+        if (countPackages(root) != 4U) {
             return fail("Replacement must not leave an orphan package behind.");
         }
 

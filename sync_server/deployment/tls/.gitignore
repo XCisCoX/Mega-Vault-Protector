@@ -1,0 +1,3 @@
+# Generated locally for the Caddy-to-relay hop; see ../README.md step 2.
+# Never commit these.
+*.pem
