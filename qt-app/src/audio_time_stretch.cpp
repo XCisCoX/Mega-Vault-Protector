@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 
 #if MVP_HAVE_AVFILTER
 extern "C" {
@@ -149,7 +151,7 @@ struct AudioTimeStretch::Impl {
             return out;
         }
         if (draining) {
-            av_buffersrc_add_frame_flags(source, nullptr, 0);
+            (void)av_buffersrc_add_frame_flags(source, nullptr, 0);
             pull(&out);
             return out;
         }
