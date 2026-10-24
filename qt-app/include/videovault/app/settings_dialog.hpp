@@ -12,6 +12,10 @@ class QListWidget;
 class QPushButton;
 class QStackedWidget;
 
+namespace videovault::app {
+class FrostedBar;
+}
+
 template <typename T>
 class QFutureWatcher;
 
@@ -100,6 +104,8 @@ private:
     QListWidget* navigationList_{nullptr};
     QComboBox* navigationCombo_{nullptr};
     QStackedWidget* navigationPages_{nullptr};
+    // Frosted band behind the header: the library's signature surface.
+    class FrostedBar* settingsHeader_{nullptr};
 
     QLabel* status_{nullptr};
     QPushButton* checkUpdatesButton_{nullptr};

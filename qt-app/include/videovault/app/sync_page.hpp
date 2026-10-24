@@ -47,6 +47,11 @@ class SyncEngine;
 class SyncPage final : public QWidget {
     Q_OBJECT
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
+public:
+
 public:
     SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidget* parent = nullptr);
 
@@ -117,6 +122,8 @@ private:
     QPushButton* recycle_{nullptr};
     QPushButton* purgeButton_{nullptr};
     QWidget* confirmBar_{nullptr};
+    // Frosted band behind the header (library signature surface).
+    QWidget* headerGlass_{nullptr};
     QLabel* confirmText_{nullptr};
     QPushButton* confirmDelete_{nullptr};
     QPushButton* confirmCancel_{nullptr};

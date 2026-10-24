@@ -1,6 +1,10 @@
 #include "videovault/app/icons.hpp"
 #include "videovault/app/sync_page.hpp"
 
+#include "videovault/app/glass.hpp"
+
+#include <QResizeEvent>
+
 #include "videovault/app/sync_engine.hpp"
 #include "videovault/core/vault.hpp"
 
@@ -147,6 +151,17 @@ QString rowStyle(const char* name) {
 
 } // namespace
 
+void SyncPage::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (headerGlass_ == nullptr) {
+        return;
+    }
+    const QWidget* bar = findChild<QWidget*>(QStringLiteral("syncBar"));
+    const int height = bar != nullptr ? bar->geometry().bottom() + 1 : 52;
+    headerGlass_->setGeometry(0, 0, width(), std::max(1, height));
+    headerGlass_->update();
+}
+
 SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidget* parent)
     : QWidget(parent), engine_(engine), vault_(std::move(vault)) {
     setObjectName(QStringLiteral("syncPage"));
@@ -161,11 +176,11 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     // -- header: Back, the page name, and who is signed in -----------------
     auto* bar = new QWidget(this);
     bar->setObjectName(QStringLiteral("syncBar"));
-    bar->setAttribute(Qt::WA_StyledBackground, true);
+    // Transparent header over the frosted band: the same glass material the
+    // library header uses, instead of a flat alternate-base strip.
+    bar->setAttribute(Qt::WA_StyledBackground, false);
+    bar->setAutoFillBackground(false);
     bar->setFixedHeight(52);
-    bar->setStyleSheet(QStringLiteral(
-        "QWidget#syncBar { background: palette(alternate-base);"
-        " border-bottom: 1px solid palette(midlight); }"));
     auto* barLayout = new QHBoxLayout(bar);
     barLayout->setContentsMargins(16, 0, 16, 0);
     barLayout->setSpacing(10);
@@ -234,6 +249,11 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     hostLayout->addStretch(1);
     scroll->setWidget(host);
     root->addWidget(scroll, 1);
+    // Frosted band behind the header, sampling the page that scrolls under it.
+    headerGlass_ = videovault::app::attachHeaderGlass(this, scroll, 160);
+    headerGlass_->setGeometry(0, 0, width(), bar->height());
+    headerGlass_->lower();
+    bar->raise();
 
     columnLayout->addStretch(1);
 

@@ -500,6 +500,50 @@ struct GalleryPerformanceTestAccess {
         return failures == 0 ? 0 : 1;
     }
 
+    // The library's frosted header is the app's signature surface; the music,
+    // settings and sync pages must carry the same band rather than a flat fill.
+    static int glassChrome() {
+        int failures = 0;
+        const auto check = [&failures](bool condition, const char* message) {
+            if (!condition) {
+                std::fprintf(stderr, "FAIL %s\n", message);
+                ++failures;
+            }
+        };
+        {
+            MusicLibraryPage music;
+            music.resize(900, 600);
+            music.show();
+            QApplication::processEvents();
+            auto* glass = dynamic_cast<videovault::app::FrostedBar*>(
+                music.findChild<QWidget*>(QStringLiteral("headerGlass")));
+            check(glass != nullptr, "the music page has a frosted header band");
+            if (glass != nullptr) {
+                check(glass->height() >= 40, "the music band covers the header height");
+                check(glass->height() <= 120, "the music band does not cover the list");
+                check(glass->hasSample(), "the music band blurs the content beneath it");
+                auto* header = music.findChild<QWidget*>(QStringLiteral("musicLibraryHeader"));
+                check(header != nullptr && glass->geometry().bottom() >= header->geometry().bottom(),
+                    "the band sits behind the whole header");
+            }
+        }
+        {
+            SettingsDialog settings(nullptr, nullptr);
+            settings.resize(900, 640);
+            settings.show();
+            QApplication::processEvents();
+            auto* glass = dynamic_cast<videovault::app::FrostedBar*>(
+                settings.findChild<QWidget*>(QStringLiteral("headerGlass")));
+            check(glass != nullptr, "settings has a frosted header band");
+            if (glass != nullptr) {
+                check(glass->width() == settings.width(), "the settings band spans the dialog");
+                check(glass->height() >= 40, "the settings band covers the header height");
+            }
+        }
+        std::printf("Glass chrome checks done (%d failure(s)).\n", failures);
+        return failures == 0 ? 0 : 1;
+    }
+
     static int sheetLayout() {
         int failures = 0;
         const auto check = [&failures](bool condition, const char* message) {
@@ -1481,6 +1525,8 @@ int main(int argc, char** argv) {
         return videovault::app::GalleryPerformanceTestAccess::shareUnlock();
     if (qEnvironmentVariableIsSet("MVP_AUTH_LAYOUT_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::authLayout();
+    if (qEnvironmentVariableIsSet("MVP_GLASS_CHROME_TEST"))
+        return videovault::app::GalleryPerformanceTestAccess::glassChrome();
     if (qEnvironmentVariableIsSet("MVP_SHEET_KEYS_TEST"))
         return videovault::app::GalleryPerformanceTestAccess::sheetKeys();
     if (qEnvironmentVariableIsSet("MVP_SHEET_LAYOUT_TEST"))

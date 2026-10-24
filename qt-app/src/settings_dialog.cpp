@@ -1,5 +1,7 @@
 #include "videovault/app/settings_dialog.hpp"
 
+#include "videovault/app/glass.hpp"
+
 #include "videovault/app/secure_input.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 #include "videovault/app/plugin_host.hpp"
@@ -169,13 +171,20 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(20, 16, 20, 12);
     outer->setSpacing(12);
-    auto* header = new QHBoxLayout;
+    // The header is its own widget so the frosted band can sit exactly behind
+    // it: the same glass material as the library header.
+    auto* headerHost = new QWidget(this);
+    headerHost->setObjectName(QStringLiteral("settingsHeader"));
+    headerHost->setAttribute(Qt::WA_StyledBackground, false);
+    headerHost->setAutoFillBackground(false);
+    auto* header = new QHBoxLayout(headerHost);
+    header->setContentsMargins(0, 0, 0, 0);
     auto* back = action(QStringLiteral("‹ Back"), QStringLiteral("settingsBack"), this);
     connect(back, &QPushButton::clicked, this, &SettingsDialog::reject);
     header->addWidget(back);
-    auto* title = new QLabel(QStringLiteral("Settings"), this);
+    auto* title = new QLabel(QStringLiteral("Settings"), headerHost);
     QFont titleFont = title->font(); titleFont.setPointSize(21); titleFont.setBold(true); title->setFont(titleFont);
-    header->addWidget(title); header->addStretch(); outer->addLayout(header);
+    header->addWidget(title); header->addStretch(); outer->addWidget(headerHost);
     auto* body = new QHBoxLayout;
     body->setSpacing(16);
     auto* nav = new QListWidget(this);
@@ -199,6 +208,22 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
     navCombo->hide();
     outer->addWidget(navCombo);
     outer->addLayout(body, 1);
+    // Behind the header: the frosted band, sampling whichever section scroll is
+    // currently shown. Lowered so the Back button and title stay on top.
+    settingsHeader_ = videovault::app::attachHeaderGlass(this, nullptr, 160);
+    settingsHeader_->lower();
+    headerHost->raise();
+    connect(pages, &QStackedWidget::currentChanged, this, [this](int) {
+        if (settingsHeader_ == nullptr || navigationPages_ == nullptr) {
+            return;
+        }
+        settingsHeader_->follow(
+            qobject_cast<QAbstractScrollArea*>(navigationPages_->currentWidget()));
+        settingsHeader_->update();
+    });
+    if (auto* first = qobject_cast<QAbstractScrollArea*>(pages->currentWidget())) {
+        settingsHeader_->follow(first);
+    }
     // Each section is built in whatever order its controls need; the sidebar is
     // assembled afterwards from this list, so the navigation order is explicit
     // instead of an accident of construction order.
@@ -684,6 +709,12 @@ void SettingsDialog::setStatus(const QString& message, bool error) {
 }
 void SettingsDialog::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    if (settingsHeader_ != nullptr) {
+        const QWidget* host = findChild<QWidget*>(QStringLiteral("settingsHeader"));
+        const int height = host != nullptr ? host->geometry().bottom() + 1 : 56;
+        settingsHeader_->setGeometry(0, 0, width(), std::max(1, height));
+        settingsHeader_->update();
+    }
     if (navigationList_ == nullptr || navigationCombo_ == nullptr
         || navigationPages_ == nullptr) {
         return;

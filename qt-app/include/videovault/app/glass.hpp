@@ -124,6 +124,15 @@ public:
         connect(timer_, &QTimer::timeout, this, [this] { rebuild(); });
     }
 
+    // Static pages do not animate as much as the gallery, so they can refresh
+    // less often: each rebuild is a three-pass blur of a strip.
+    void setRefreshInterval(const int milliseconds) {
+        timer_->setInterval(std::max(40, milliseconds));
+    }
+
+    // True once the bar has a blurred sample (headless regression hook).
+    [[nodiscard]] bool hasSample() const noexcept { return !blurred_.isNull(); }
+
     void follow(QAbstractScrollArea* area) {
         if (area_ == area && scrollConnection_) {
             return;
@@ -222,5 +231,22 @@ private:
     QTimer* timer_{nullptr};
     QMetaObject::Connection scrollConnection_;
 };
+
+// Puts the signature frosted band behind a page header. The band samples the
+// content that scrolls under it, so a page other than the gallery gets the same
+// glass edge instead of a flat header fill. The caller sizes it on resize.
+inline FrostedBar* attachHeaderGlass(QWidget* host, QAbstractScrollArea* area,
+                                     const int refreshMs = 140) {
+    if (host == nullptr) {
+        return nullptr;
+    }
+    auto* bar = new FrostedBar(FrostedBar::Band::Top, host);
+    bar->setObjectName(QStringLiteral("headerGlass"));
+    bar->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    bar->setRefreshInterval(refreshMs);
+    bar->lower();
+    bar->follow(area);
+    return bar;
+}
 
 } // namespace videovault::app

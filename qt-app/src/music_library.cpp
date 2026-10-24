@@ -22,6 +22,8 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QListWidget>
+
+#include "videovault/app/glass.hpp"
 #include <QPainter>
 #include <QPalette>
 #include <QPainterPath>
@@ -183,6 +185,17 @@ public:
 
 } // namespace
 
+void MusicLibraryPage::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (headerGlass_ == nullptr) {
+        return;
+    }
+    const QWidget* header = findChild<QWidget*>(QStringLiteral("musicLibraryHeader"));
+    const int height = header != nullptr ? header->geometry().bottom() + 1 : 64;
+    headerGlass_->setGeometry(0, 0, width(), std::max(1, height));
+    headerGlass_->update();
+}
+
 MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("musicLibraryPage"));
     setAttribute(Qt::WA_StyledBackground, true);
@@ -193,7 +206,10 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
 
     auto* header = new QWidget(this);
     header->setObjectName(QStringLiteral("musicLibraryHeader"));
-    header->setAttribute(Qt::WA_StyledBackground, true);
+    // The header itself stays transparent: the frosted band behind it is the
+    // signature surface, and it samples the track list scrolling underneath.
+    header->setAttribute(Qt::WA_StyledBackground, false);
+    header->setAutoFillBackground(false);
     auto* headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(16, 12, 16, 12);
     headerLayout->setSpacing(12);
@@ -245,6 +261,7 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
 
     headerLayout->addWidget(playAll_);
     root->addWidget(header);
+
     auto* filters = new QWidget(this);
     auto* filterLayout = new QHBoxLayout(filters);
     filterLayout->setContentsMargins(16, 8, 16, 8);
@@ -336,6 +353,11 @@ MusicLibraryPage::MusicLibraryPage(QWidget* parent) : QWidget(parent) {
     list_->setItemDelegate(new TrackRowDelegate(list_));
     list_->setStyleSheet(QStringLiteral("QListWidget#musicTracks { outline: none; }"));
     root->addWidget(list_, 1);
+    // The frosted band goes under the header widgets, and samples the list that
+    // scrolls behind it - the same material as the library header.
+    headerGlass_ = videovault::app::attachHeaderGlass(this, list_, 140);
+    headerGlass_->lower();
+    header->raise();
     connect(list_, &QListWidget::itemSelectionChanged, this, &MusicLibraryPage::updateActions);
     connect(list_->verticalScrollBar(), &QScrollBar::valueChanged, this,
         [this] { startCoverLoads(); });

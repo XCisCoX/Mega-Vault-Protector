@@ -471,6 +471,9 @@ if(MVP_BUILD_TESTS)
     add_test(NAME share_unlock COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(share_unlock PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_SHARE_UNLOCK_TEST=1" TIMEOUT 60)
+    add_test(NAME glass_chrome COMMAND VideoVaultGalleryPerformanceTests)
+    set_tests_properties(glass_chrome PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_GLASS_CHROME_TEST=1" TIMEOUT 60)
     add_test(NAME sheet_keys COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(sheet_keys PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_SHEET_KEYS_TEST=1" TIMEOUT 60)

@@ -12,6 +12,7 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QResizeEvent;
 class QListWidgetItem;
 class QPushButton;
 class QTimer;
@@ -39,6 +40,9 @@ public:
 
 signals:
     void closed();
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     struct Track {
@@ -78,6 +82,8 @@ private:
     void editSelectedTrack(int direction); // 0 removes, -1/+1 moves in stored order.
     void updateActions();
     void showError(const QString& message);
+    // Frosted band behind the header (the signature surface from the library).
+    QWidget* headerGlass_{nullptr};
     void runPlaylistEdit(std::function<QString()> work);
     [[nodiscard]] const Playlist* playlistById(std::int64_t id) const;
     void openPlaylist(std::int64_t id);
