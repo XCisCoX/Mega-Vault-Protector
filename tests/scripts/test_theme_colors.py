@@ -22,7 +22,9 @@ EXEMPT = {"theme.cpp", "player_window.cpp", "pdf_window.cpp", "music_window.cpp"
 # Semantic colours that stay identical in both themes on purpose (accent blue,
 # its hover, and the light-theme error red). They are declared here instead of
 # in theme.cpp so the transform never rewrites them.
-INVARIANT = {"#3390ec", "#4ba0f5", "#5aa6f0", "#c62828"}
+# Keep the library's primary/hover blues invariant, matching the existing
+# accentBackground rule in theme.cpp (which also preserves white button text).
+INVARIANT = {"#2672c8", "#2168b8", "#3390ec", "#4ba0f5", "#5aa6f0", "#c62828"}
 
 DECLARATION = re.compile(r"(?<![\w-])(color|background(?:-color)?|border(?:-[a-z]+)?)\s*:\s*([^;{}\"]+)")
 COLOR_TOKEN = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|\bwhite\b", re.IGNORECASE)
