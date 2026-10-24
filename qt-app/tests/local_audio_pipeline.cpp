@@ -120,7 +120,13 @@ int main(int argc, char** argv) {
         // A 44.1-kHz seek rounds to an input frame; allow one stereo output
         // frame, not the previous 1000-sample tolerance, after resampling.
         CHECK(afterSeek.size() + 2U >= expected && afterSeek.size() <= expected + 2U);
-        CHECK(!afterSeek.empty() && afterSeek[afterSeek.size() / 2] == 4000);
+        // Every input sample is 4000, so the retained audio must be that
+        // constant. Compare with a couple of LSB, never exact equality:
+        // libswresample rounds a DC input to 3999 on FFmpeg 4.4 and to 4000
+        // on FFmpeg 6/7, and a silent gap or stale preroll would be obvious
+        // against this band.
+        CHECK(!afterSeek.empty() && std::all_of(afterSeek.begin(), afterSeek.end(),
+            [](std::int16_t sample) { return sample >= 3994 && sample <= 4006; }));
     }
     std::cout << "Mixed-rate: 44100 Hz -> 48000 Hz stereo, exact 96000 samples including resampler drain; repeated partial-packet seeks passed.\n";
     for (std::uint64_t ticket=2; ticket<26; ++ticket) {
