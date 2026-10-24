@@ -649,6 +649,8 @@ public:
         audio_codec_.reset();
         scaler_.reset();
         swr_.reset();
+        rgb_frame_.reset();
+        rgb_width_ = rgb_height_ = 0;
         audio_blocks_.clear();
         resident_audio_samples_ = 0;
         pending_packet_.reset();
@@ -945,23 +947,40 @@ private:
         if (output_width <= 0 || output_height <= 0) {
             return QImage();
         }
-        // Convert directly into the image shared with the presentation queue.
-        // An intermediate AVFrame plus image.copy() doubled each RGB frame's
-        // allocation and memory traffic (particularly costly at 4K/60 fps).
-        QImage image(output_width, output_height, QImage::Format_RGB32);
-        if (image.isNull()) return image;
-        std::uint8_t* output[4] = {image.bits(), nullptr, nullptr, nullptr};
-        const int strides[4] = {image.bytesPerLine(), 0, 0, 0};
+        // swscale writes whole vector-width chunks, so the last row of the
+        // destination can be filled past `width * 4` bytes. A tightly packed
+        // QImage has no trailing slack: writing there corrupts the heap, and a
+        // 426-pixel-wide picture (1704-byte rows) took the whole application
+        // down on release. Convert into a frame allocated by libavutil, whose
+        // linesize is aligned and padded, then take one owned copy.
+        if (!rgb_frame_ || rgb_width_ != output_width || rgb_height_ != output_height) {
+            rgb_frame_.reset(av_frame_alloc());
+            if (!rgb_frame_) return QImage();
+            rgb_frame_->format = AV_PIX_FMT_BGRA;
+            rgb_frame_->width = output_width;
+            rgb_frame_->height = output_height;
+            if (av_frame_get_buffer(rgb_frame_.get(), 32) < 0) {
+                rgb_frame_.reset();
+                return QImage();
+            }
+            rgb_width_ = output_width;
+            rgb_height_ = output_height;
+        }
+        if (av_frame_make_writable(rgb_frame_.get()) < 0) return QImage();
         if (sws_scale(scaler_.get(), source->data, source->linesize, 0, source->height,
-            output, strides) <= 0) return QImage();
+            rgb_frame_->data, rgb_frame_->linesize) <= 0) {
+            return QImage();
+        }
         if (format_has_alpha_or_palette(src_fmt)) {
             // Format_RGB32 is painted with the alpha byte on Windows, so a
             // transparent PNG would show as holes instead of the picture.
-            composite_bgra(image.bits(), image.bytesPerLine(), output_width, output_height);
+            composite_bgra(rgb_frame_->data[0], rgb_frame_->linesize[0],
+                output_width, output_height);
         }
-        // swscale's BGRA conversion supplies opaque alpha for non-alpha input;
-        // do not walk every video pixel again just to write the same byte.
-        return image;
+        // copy() is load-bearing: it detaches from the reusable conversion
+        // buffer and gives the picture its own tightly packed allocation.
+        return QImage(rgb_frame_->data[0], output_width, output_height,
+            rgb_frame_->linesize[0], QImage::Format_RGB32).copy();
     }
 
     // The player tells the decoder the surface size so sws converts straight
@@ -1076,6 +1095,11 @@ public:
     AvCodecPtr audio_codec_;
     SwsPtr scaler_;
     SwrPtr swr_;
+    // Reusable aligned conversion target. libavutil pads its linesize, so
+    // swscale's vector-width tail writes stay inside the allocation.
+    AvFramePtr rgb_frame_;
+    int rgb_width_{0};
+    int rgb_height_{0};
     struct AudioBlock {
         std::int64_t start;
         std::vector<std::int16_t> samples;

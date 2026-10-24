@@ -377,9 +377,13 @@ bool writeFixture(const std::filesystem::path& path, const int audioDelayMs = 0,
 // fixture above is all-keyframes, which makes seeking trivially correct;
 // this one exercises the sparse-keyframe seek path (the reported bug).
 bool writeMp4Fixture(const std::filesystem::path& path, const int keyframeInterval = 15,
-    const int bFrames = 0, const int audioDurationMs = 3000, const int videoDelayMs = 0) {
-    constexpr int kWidth = 160;
-    constexpr int kHeight = 120;
+    const int bFrames = 0, const int audioDurationMs = 3000, const int videoDelayMs = 0,
+    const int width = 160, const int height = 120) {
+    // Widths whose RGB32 row (width * 4) is not a multiple of 16 bytes are the
+    // interesting case: swscale's vectorised paths may write the filled tail of
+    // the last row, so a tightly sized destination is an out-of-bounds write.
+    const int kWidth = width;
+    const int kHeight = height;
     constexpr int kFps = 15;
     constexpr int kFrames = 45; // 3.0 s
 
@@ -760,6 +764,46 @@ int main() {
     if (!writeMp4Fixture(delayedVideoFixture, 15, 0, 3000, 2000)) return fail("Generate delayed-video fixture.");
     const auto delayedVideoId = created.value().import_file(delayedVideoFixture);
     if (!delayedVideoId) return fail("Import delayed-video fixture.");
+
+    // 426 px wide: an RGB32 row is 1704 bytes, which is not a 16-byte multiple,
+    // so swscale's filled tail can run past the last row of the destination.
+    // Converting straight into a tightly packed QImage therefore corrupts the
+    // heap and takes the whole application down when the picture is released.
+    const auto oddWidthFixture = temp.path() / L"odd-width.mp4";
+    if (!writeMp4Fixture(oddWidthFixture, 15, 0, 3450, 0, 426, 240)) {
+        return fail("Generate the odd-width fixture.");
+    }
+    const auto oddWidthId = created.value().import_file(oddWidthFixture);
+    if (!oddWidthId) return fail("Import the odd-width MP4.");
+    {
+        auto oddVault = Vault::open(root, "playback test password");
+        if (!oddVault) return fail("Reopen the vault for the odd-width conversion test.");
+        videovault::app::MediaDecoder oddDecoder;
+        QString oddError;
+        if (!oddDecoder.open(std::make_shared<Vault>(std::move(oddVault.value())),
+            oddWidthId.value(), &oddError)) {
+            return fail("Open the odd-width fixture.");
+        }
+        int converted = 0;
+        for (int pass = 0; pass < 3; ++pass) {
+            if (oddDecoder.seek_to(0) < 0) return fail("Seek the odd-width fixture.");
+            std::vector<QImage> pictures;
+            while (true) {
+                videovault::app::DecodedFrame frame;
+                const auto step = oddDecoder.decode_next_video_frame(&frame);
+                if (step == videovault::app::DecodeStep::End) break;
+                if (step != videovault::app::DecodeStep::VideoFrame) continue;
+                if (frame.image.width() != 426 || frame.image.height() != 240) {
+                    return fail("A converted picture must keep the source resolution.");
+                }
+                pictures.push_back(frame.image);
+                if (pictures.size() > 8U) pictures.erase(pictures.begin());
+                ++converted;
+            }
+        }
+        std::printf("Odd-width conversion: %d pictures at 426x240 released without heap damage.\n",
+            converted);
+    }
 
     // Three pictures at 0/15/30 seconds and 50 seconds of stereo PCM.
     // A bounded pull alone cannot bound PCM resident inside one demux call.
