@@ -692,9 +692,9 @@ public:
         if (last_seek_status_ < 0) {
             return false;
         }
-        // Drop packets the demuxer buffered before the seek; without this,
-        // av_read_frame keeps serving the pre-seek stream.
-        avformat_flush(handle_->format.get());
+        // The seek APIs already flush buffered packets before positioning the
+        // demuxer. A second avformat_flush here discards the newly established
+        // DTS origin of formats such as WAV, making valid seek PCM look old.
         if (video_codec_) {
             avcodec_flush_buffers(video_codec_.get());
         }

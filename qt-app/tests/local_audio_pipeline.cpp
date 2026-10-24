@@ -104,10 +104,18 @@ int main(int argc, char** argv) {
     CHECK(normalized[1000] == 4000);
     CHECK(mixed.seek(0));
     CHECK(decode(mixed) == normalized);
-    CHECK(mixed.seek(500));
-    const auto afterSeek = decode(mixed);
-    CHECK(afterSeek.size() >= 47000U && afterSeek.size() <= 49000U);
-    std::cout << "Mixed-rate: 44100 Hz -> 48000 Hz stereo, exact 96000 samples including resampler drain; EOF and midpoint seek passed.\n";
+    for (const int target : {500, 125, 345, 755, 990, 0}) {
+        CHECK(mixed.seek(target));
+        const auto afterSeek = decode(mixed);
+        const auto expected = static_cast<std::size_t>((1000 - target) * 48 * 2);
+        std::cout << "Seek " << target << " ms retained " << afterSeek.size()
+                  << " interleaved samples (expected " << expected << ").\n";
+        // A 44.1-kHz seek rounds to an input frame; allow one stereo output
+        // frame, not the previous 1000-sample tolerance, after resampling.
+        CHECK(afterSeek.size() + 2U >= expected && afterSeek.size() <= expected + 2U);
+        CHECK(!afterSeek.empty() && afterSeek[afterSeek.size() / 2] == 4000);
+    }
+    std::cout << "Mixed-rate: 44100 Hz -> 48000 Hz stereo, exact 96000 samples including resampler drain; repeated partial-packet seeks passed.\n";
     for (std::uint64_t ticket=2; ticket<26; ++ticket) {
         prefetch.request(vault, a.value(), "audio.wav", ticket*2);
         prefetch.request(vault, b.value(), "audio.wav", ticket*2+1);
