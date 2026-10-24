@@ -108,8 +108,15 @@ int main(int argc, char** argv) {
         CHECK(mixed.seek(target));
         const auto afterSeek = decode(mixed);
         const auto expected = static_cast<std::size_t>((1000 - target) * 48 * 2);
+        const auto peak = afterSeek.empty() ? 0
+            : *std::max_element(afterSeek.begin(), afterSeek.end());
+        const auto floor = afterSeek.empty() ? 0
+            : *std::min_element(afterSeek.begin(), afterSeek.end());
+        const auto middle = afterSeek.empty() ? 0 : afterSeek[afterSeek.size() / 2];
         std::cout << "Seek " << target << " ms retained " << afterSeek.size()
-                  << " interleaved samples (expected " << expected << ").\n";
+                  << " interleaved samples (expected " << expected
+                  << "), min " << floor << " max " << peak
+                  << " middle " << middle << ".\n";
         // A 44.1-kHz seek rounds to an input frame; allow one stereo output
         // frame, not the previous 1000-sample tolerance, after resampling.
         CHECK(afterSeek.size() + 2U >= expected && afterSeek.size() <= expected + 2U);
