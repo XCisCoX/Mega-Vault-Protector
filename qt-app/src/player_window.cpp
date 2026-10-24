@@ -442,6 +442,7 @@ void AudioSink::clear() {
     buffer_.clear();
     read_cursor_ = 0;
     consumedSamples_ = 0;
+    lastPull_ = {};
 }
 
 std::size_t AudioSink::buffered_samples() const {
@@ -454,6 +455,20 @@ std::uint64_t AudioSink::consumed_samples() const {
     return consumedSamples_;
 }
 
+AudioSink::ClockSnapshot AudioSink::clock_snapshot() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const auto age = consumedSamples_ > 0
+        ? std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - lastPull_).count() : 0;
+    return {consumedSamples_, age};
+}
+
+void AudioSink::resume_clock() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    // Suspended time must not be mistaken for audio played between pulls.
+    lastPull_ = std::chrono::steady_clock::now();
+}
+
 qint64 AudioSink::readData(char* data, qint64 maxSize) {
     std::lock_guard<std::mutex> guard(mutex_);
     const auto byte_count = static_cast<std::size_t>(std::max<qint64>(maxSize, 0));
@@ -464,6 +479,7 @@ qint64 AudioSink::readData(char* data, qint64 maxSize) {
         std::memcpy(data, buffer_.data() + read_cursor_, take);
         read_cursor_ += take / sizeof(std::int16_t);
         consumedSamples_ += take / sizeof(std::int16_t);
+        lastPull_ = std::chrono::steady_clock::now();
         // The device reads from the front forever. Dropping the consumed
         // prefix is what keeps a long playlist from holding every sample.
         if (read_cursor_ > 8192U && read_cursor_ * 2U > buffer_.size()) {
@@ -977,6 +993,7 @@ PlayerWindow::PlayerWindow(
     surfaceSize_ = surface_->size();
 
     timer_.setInterval(16);
+    timer_.setTimerType(Qt::PreciseTimer);
     connect(&timer_, &QTimer::timeout, this, [this] { tick(); });
     if (stillImage) {
         playStill(vault, video_id);
@@ -1035,6 +1052,7 @@ void PlayerWindow::resetPlayback(std::shared_ptr<videovault::core::Vault> vault,
     }
     audioSetupDone_ = false;
     audioReady_.store(false);
+    playbackPrimed_.store(false);
     audioSampleRate_.store(0);
     audioChannels_.store(0);
     audioBaseMs_.store(-1);
@@ -1777,6 +1795,7 @@ void PlayerWindow::workerLoop() {
     std::int64_t wallBase = 0, wallStart = 0, master = 0;
     std::int64_t tailStart = -1, tailBase = 0;
     bool eof = false;
+    std::int64_t prerollTarget = -1;
     std::deque<DecodedFrame> pending;
     workerAudioSerial_ = audioSeekSerial_.load();
     // The PCM timeline starts at the media start; the sink is empty here.
@@ -1793,9 +1812,10 @@ void PlayerWindow::workerLoop() {
             // The picture follows the audible PCM position (device pulls minus
             // its own buffer lead). Both sides advance on one device clock, so
             // a slow decoder stall freezes the picture instead of drifting it.
+            const auto audioClock = sink->clock_snapshot();
             master = std::max<std::int64_t>(master, video_pacing::audibleMs(
-                base, sink->consumed_samples(), channels, rate,
-                audioDeviceBufferMs_.load()));
+                base, audioClock.samples, channels, rate,
+                audioDeviceBufferMs_.load(), audioClock.sincePullMs));
             wallBase = master;
             wallStart = clock.elapsed();
         } else {
@@ -1812,7 +1832,10 @@ void PlayerWindow::workerLoop() {
         std::int64_t target = 0;
         {
             std::lock_guard<std::mutex> guard(audioPipelineMutex_);
-            seek = seekRequested_.exchange(false);
+            // Never decode a new epoch until the UI has stopped the device
+            // and cleared its old PCM. This also covers worker-origin repeats.
+            seek = deviceAudioSerial_.load() == audioSeekSerial_.load()
+                && seekRequested_.exchange(false);
             if (seek) {
                 target = seekTargetMs_.load();
                 workerAudioSerial_ = audioSeekSerial_.load();
@@ -1832,15 +1855,26 @@ void PlayerWindow::workerLoop() {
                 seekErrorPending_.store(true);
                 // A failed seek did not move the decoder: do not relabel its
                 // remaining samples/frame timestamps as the requested target.
-                target = playheadMs_.load();
+                target = master;
             } else {
                 // Decode references normally all the way to target; the decoder
                 // trims only pre-target PCM, retaining the boundary packet tail.
+                prerollTarget = target;
                 DecodedFrame frame;
-                while (!quit_.load() && workerAudioSerial_ == audioSeekSerial_.load()
-                    && decoder_.decode_next_video_frame(&frame)) {
+                while (!quit_.load() && workerAudioSerial_ == audioSeekSerial_.load()) {
+                    const auto step = decoder_.decode_next_video_frame(&frame);
+                    if (step == DecodeStep::End) { eof = true; break; }
+                    // Do not wait here for a far-future picture while paused:
+                    // preserve bounded post-target audio and resume preroll in
+                    // the normal playback loop after the sink can consume it.
+                    if (step == DecodeStep::AudioReady) {
+                        playbackPrimed_.store(true);
+                        break;
+                    }
                     if (frame.pts_ms >= target && frameSizeMatches(frame)) {
                         pending.push_back(std::move(frame));
+                        playbackPrimed_.store(true);
+                        prerollTarget = -1;
                         break;
                     }
                 }
@@ -1852,6 +1886,7 @@ void PlayerWindow::workerLoop() {
                 // to the cleared sink is the new audio origin.
                 audioBaseMs_.store(target);
                 master = wallBase = target;
+                playheadMs_.store(target);
                 wallStart = clock.elapsed();
                 audioSeekPending_.store(false);
                 if (!pending.empty()) {
@@ -1871,7 +1906,11 @@ void PlayerWindow::workerLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        if (workerAudioSerial_ != audioSeekSerial_.load()) continue;
+        if (workerAudioSerial_ != audioSeekSerial_.load()
+            || deviceAudioSerial_.load() != workerAudioSerial_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
         feedAudio();
         auto now = masterPosition();
         auto* sink = audioSinkAtomic_.load();
@@ -1882,33 +1921,38 @@ void PlayerWindow::workerLoop() {
 
         // Bounded lookahead keeps demuxing audio while a future picture waits.
         // Never skip compressed packets/reference decoding. Only presentation
-        // of superseded pictures is skipped below. One decoder call may add
-        // an interleave burst of PCM; it is drained before another call.
+        // of superseded pictures is skipped below. Sparse video/audio tails
+        // yield with bounded PCM and resume only as the sink makes room.
         const bool audioHungry = maxPcm > 0 && buffered < maxPcm / 2U
             && !audioDeviceFailed_.load();
         if (!eof && (pending.size() < 8U || audioHungry)
             && (pending.empty() || pending.back().pts_ms < now + 200 || audioHungry)
             && (maxPcm == 0 || buffered < maxPcm || audioDeviceFailed_.load())) {
             DecodedFrame frame;
-            if (decoder_.decode_next_video_frame(&frame)) {
+            const auto step = decoder_.decode_next_video_frame(&frame);
+            if (step != DecodeStep::End) playbackPrimed_.store(true);
+            if (step == DecodeStep::VideoFrame) {
                 if (workerAudioSerial_ != audioSeekSerial_.load()) continue;
-                if (frameSizeMatches(frame)) {
+                if (frame.pts_ms >= prerollTarget && frameSizeMatches(frame)) {
+                    prerollTarget = -1;
                     noteLoopFrame(frame.image, frame.pts_ms);
                     pending.push_back(std::move(frame));
                 }
                 // A hungry audio device may have forced a decode while the
                 // picture queue was full; discard pictures already superseded.
                 while (pending.size() > 8U && pending[1].pts_ms <= now) pending.pop_front();
-            } else {
+            } else if (step == DecodeStep::End) {
                 eof = true;
             }
+            // AudioReady feeds PCM but must never set eof.
             feedAudio(); // includes PCM produced by the final EOF/drain call
             now = masterPosition();
         }
 
         // At EOF let the device's final buffer drain, then allow video-only
         // tails to finish. Never declare ended at demux EOF and truncate PCM.
-        if (eof && (!sink || sink->buffered_samples() == 0U || audioDeviceFailed_.load())) {
+        if (eof && decoder_.buffered_audio_samples() == 0U
+            && (!sink || sink->buffered_samples() == 0U || audioDeviceFailed_.load())) {
             if (tailStart < 0) { tailStart = clock.elapsed(); tailBase = now; }
             now = std::max<std::int64_t>(now, tailBase + clock.elapsed() - tailStart);
         } else {
@@ -1968,7 +2012,27 @@ void PlayerWindow::publishFrame(const QImage& image, const std::int64_t pts_ms) 
         std::lock_guard<std::mutex> guard(frameMutex_);
         latestFrame_ = image;
     }
-    frameDirty_.store(true);
+    // Present on arrival, not on the unrelated 16 ms controls timer. Two
+    // independently phased timers otherwise turn 60 fps into uneven repeats
+    // and dropped pictures. Coalesce into one latest-frame notification so a
+    // busy UI never accumulates a backlog of stale frames.
+    if (!frameDirty_.exchange(true)) {
+        QMetaObject::invokeMethod(this, [this] { presentLatestFrame(); }, Qt::QueuedConnection);
+    }
+}
+
+void PlayerWindow::presentLatestFrame() {
+    if (!frameDirty_.exchange(false)) return;
+    QImage image;
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        image = latestFrame_;
+    }
+    if (image.isNull()) return;
+    lastFrame_ = image;
+    surface_->setFrame(image);
+    if (topOverlay_ != nullptr) topOverlay_->update();
+    if (controlsOverlay_ != nullptr) controlsOverlay_->update();
 }
 
 void PlayerWindow::restartFromStart() {
@@ -2085,32 +2149,52 @@ void PlayerWindow::feedAudio() {
     if (sink == nullptr) {
         return;
     }
-    if (workerAudioSerial_ != audioSeekSerial_.load()) {
+    std::unique_lock<std::mutex> guard(audioPipelineMutex_);
+    if (workerAudioSerial_ != audioSeekSerial_.load()
+        || deviceAudioSerial_.load() != workerAudioSerial_) {
         // A seek was requested: discard PCM decoded from the old position
         // instead of appending it to the cleared sink under the new origin.
         (void)decoder_.take_audio_samples();
         return;
     }
-    auto samples = decoder_.take_audio_samples();
+    if (audioDeviceFailed_.load()) {
+        (void)decoder_.take_audio_samples();
+        return;
+    }
+    const int rate = audioSampleRate_.load();
+    const int channels = audioChannels_.load();
+    const auto capacity = static_cast<std::size_t>(std::max(0, rate))
+        * static_cast<std::size_t>(std::max(0, channels)) / 2U;
+    const auto buffered = sink->buffered_samples();
+    if (buffered >= capacity) return;
+    auto samples = decoder_.take_audio_samples(capacity - buffered);
     if (!samples.empty()) {
         noteLoopAudio(samples.data(), samples.size());
         sink->append(samples.data(), samples.size());
     }
-    // Backpressure: never let the sink buffer more than ~1 s of audio while
-    // the decoder catches up after a stall or seek.
-    const int rate = audioSampleRate_.load();
-    if (rate > 0 && sink->buffered_samples() > static_cast<std::size_t>(rate)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    }
 }
 
 void PlayerWindow::requestSeek(const std::int64_t target_ms) {
+    std::lock_guard<std::mutex> guard(audioPipelineMutex_);
     seekTargetMs_.store(target_ms);
+    playbackPrimed_.store(false);
     audioSeekPending_.store(true);
     // Bump the epoch before the request is visible: PCM the decoder produces
     // from the pre-seek position must not be labelled with the new timeline.
     audioSeekSerial_.fetch_add(1);
     seekRequested_.store(true);
+}
+
+void PlayerWindow::resetAudioForSeek() {
+    const auto serial = audioSeekSerial_.load();
+    if (deviceAudioSerial_.load() == serial) return;
+    // UI thread only. Stop native pulls BEFORE resetting the sample counter.
+    // Never hold the pipeline lock across a Qt audio call.
+    if (audioOutput_ != nullptr) audioOutput_->stop();
+    std::lock_guard<std::mutex> guard(audioPipelineMutex_);
+    if (audioSink_ != nullptr) audioSink_->clear();
+    audioRestartAttempts_ = 0;
+    deviceAudioSerial_.store(serial);
 }
 
 void PlayerWindow::doSeek(const std::int64_t target_ms) {
@@ -2119,16 +2203,7 @@ void PlayerWindow::doSeek(const std::int64_t target_ms) {
     // the video had finished would force a restart from 0.
     ended_.store(false);
     requestSeek(target_ms);
-    if (audioSink_ != nullptr) {
-        audioSink_->clear();
-    }
-    if (audioOutput_ != nullptr) {
-        audioOutput_->stop();
-        audioOutput_->start(audioSink_);
-        if (!playing_.load()) {
-            audioOutput_->suspend();
-        }
-    }
+    resetAudioForSeek();
     audioOffsetMs_ = target_ms;
     playheadMs_.store(target_ms);
     positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
@@ -2140,9 +2215,7 @@ void PlayerWindow::togglePlayPause() {
     if (ended_.load()) {
         ended_.store(false);
         requestSeek(0);
-        if (audioSink_ != nullptr) {
-            audioSink_->clear();
-        }
+        resetAudioForSeek();
     }
     playing_.store(!playing_.load());
     playIconPlaying_ = playing_.load();
@@ -2151,6 +2224,7 @@ void PlayerWindow::togglePlayPause() {
     updateCenterButton();
     if (playing_.load()) {
         rebaseRequested_.store(true);
+        if (audioSink_ != nullptr) audioSink_->resume_clock();
         if (audioOutput_ != nullptr) {
             audioOutput_->resume();
         }
@@ -2683,6 +2757,8 @@ void PlayerWindow::tick() {
         QTimer::singleShot(3500, this, [this] { surface_->clearOverlay(); });
     }
 
+    resetAudioForSeek();
+
     // Create the audio device once the worker has opened the stream.
     if (!audioSetupDone_ && audioReady_.load()) {
         audioSetupDone_ = true;
@@ -2709,14 +2785,22 @@ void PlayerWindow::tick() {
         // before the first decoded picture lets audio run ahead of the video.
     }
 
-    // Hold the audio device until the first picture is on screen: otherwise
-    // the PCM clock starts running while the decoder is still opening, and the
-    // audio leads the video for the whole file. Audio-only streams have no
-    // picture to wait for.
-    const bool audioPrimed = videoWidth_.load() <= 0 || !lastFrame_.isNull();
+    // Wait for decoded data, not for a picture already on screen. The first
+    // picture can legitimately have a future PTS, or demux can yield bounded
+    // audio first: waiting for its paint would deadlock the audio master that
+    // must advance to make that picture due.
+    const bool audioPrimed = videoWidth_.load() <= 0 || playbackPrimed_.load();
     // QAudioOutput parks in IdleState (and stops pulling) after an empty read;
     // wake it while there may be fresh samples.
+    if (audioOutput_ != nullptr && audioOutput_->state() == QAudio::ActiveState) {
+        // Count consecutive failures, not every successful refill over the
+        // lifetime of a movie. Otherwise the sixth underrun abandons the audio
+        // master and lets video run on wall time while sound is still playing.
+        audioRestartAttempts_ = 0;
+    }
     if (audioOutput_ != nullptr && playing_.load() && audioPrimed
+        && !audioSeekPending_.load()
+        && audioSink_ != nullptr && audioSink_->buffered_samples() > 0
         && !audioDeviceFailed_.load()
         && (audioOutput_->state() == QAudio::IdleState
             || audioOutput_->state() == QAudio::StoppedState)) {
@@ -2741,23 +2825,7 @@ void PlayerWindow::tick() {
     }
 
     // Paint the latest frame from the worker.
-    if (frameDirty_.exchange(false)) {
-        QImage image;
-        {
-            std::lock_guard<std::mutex> guard(frameMutex_);
-            image = latestFrame_;
-        }
-        if (!image.isNull()) {
-            lastFrame_ = image;
-            surface_->setFrame(image);
-            if (topOverlay_ != nullptr) {
-                topOverlay_->update();
-            }
-            if (controlsOverlay_ != nullptr) {
-                controlsOverlay_->update();
-            }
-        }
-    }
+    presentLatestFrame();
 
     // Seek-bar range becomes known once the worker reports the duration.
     const std::int64_t duration = durationMs_.load();

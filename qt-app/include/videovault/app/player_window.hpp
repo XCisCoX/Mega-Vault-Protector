@@ -20,6 +20,7 @@ class QVariantAnimation;
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,12 @@ public:
     std::size_t buffered_samples() const;
     // PCM actually pulled by QAudioOutput, not decoded/queued PCM. Reset on clear.
     std::uint64_t consumed_samples() const;
+    struct ClockSnapshot {
+        std::uint64_t samples;
+        std::int64_t sincePullMs;
+    };
+    ClockSnapshot clock_snapshot() const;
+    void resume_clock();
 
     qint64 readData(char* data, qint64 maxSize) override;
     qint64 writeData(const char* data, qint64 maxSize) override;
@@ -60,6 +67,7 @@ private:
     std::vector<std::int16_t> buffer_;
     std::size_t read_cursor_{0};
     std::uint64_t consumedSamples_{0};
+    std::chrono::steady_clock::time_point lastPull_{};
 };
 
 // Video display surface: paints the latest frame directly (no QPixmap
@@ -397,8 +405,10 @@ private:
     void resetPlayback(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id, bool startVideo);
     void workerLoop();
     void publishFrame(const QImage& image, std::int64_t pts_ms);
+    void presentLatestFrame();
     void feedAudio();
     void requestSeek(std::int64_t target_ms);
+    void resetAudioForSeek();
     void doSeek(std::int64_t target_ms);
     void togglePlayPause();
     void seekRelative(std::int64_t delta_ms);
@@ -519,7 +529,7 @@ private:
     std::mutex audioPipelineMutex_;
     std::atomic<std::uint64_t> audioSeekSerial_{0};
     std::uint64_t workerAudioSerial_{0}; // worker only
-    std::uint64_t deviceAudioSerial_{0}; // UI only
+    std::atomic<std::uint64_t> deviceAudioSerial_{0}; // UI reset acknowledgement
     std::atomic<bool> audioSeekPending_{false};
     std::atomic<bool> audioDeviceFailed_{false};
     std::atomic<std::int64_t> audioBaseMs_{-1};
@@ -542,6 +552,7 @@ private:
     std::atomic<int> audioSampleRate_{0};
     std::atomic<int> audioChannels_{0};
     std::atomic<bool> audioReady_{false};
+    std::atomic<bool> playbackPrimed_{false};
     // Video pixel dimensions reported by the decoder once open succeeds
     // (worker writes; the UI reads them once to fit the window to the video).
     std::atomic<int> videoWidth_{0};

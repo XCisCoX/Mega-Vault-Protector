@@ -15,6 +15,9 @@ namespace videovault::app {
 
 class ByteSource;
 
+// AudioReady is backpressure/progress, never end-of-stream. Drain PCM and retry.
+enum class DecodeStep { VideoFrame, AudioReady, End };
+
 // A decoded video frame with its presentation time (ms).
 struct DecodedFrame {
     QImage image;
@@ -105,18 +108,26 @@ public:
     // Returns 0 on success or a negative AVERROR code on failure.
     [[nodiscard]] int seek_to(std::int64_t ms);
 
-    // Decodes packets until the next video frame is produced (audio packets
-    // append s16le PCM to the internal buffer). Returns false at EOF or on
-    // decode failure.
-    bool decode_next_video_frame(DecodedFrame* frame);
+    // Resident interleaved PCM has a soft cap: at most one decoded audio frame
+    // may cross it. Timestamp silence remains sparse and is not resident PCM.
+    static constexpr std::size_t kMaxResidentAudioSamples = 1U << 20;
+    std::size_t resident_audio_samples() const;
+    std::size_t buffered_audio_samples() const;
+
+    // Returns AudioReady when PCM must be drained before demux can continue.
+    // Only VideoFrame initializes `frame`; End means both codecs are drained.
+    [[nodiscard]] DecodeStep decode_next_video_frame(DecodedFrame* frame);
 
     // Decodes until at least `min_samples` interleaved PCM samples are buffered,
-    // or the file ends. Returns false when no samples were produced.
+    // or the file ends. Requests are clamped to the resident cap.
+    // Returns false when no samples are available.
     bool pump_audio(int min_samples, std::int64_t* pts_ms);
 
     // Interleaved s16le PCM decoded since the last call, in the format
     // reported by audio_sample_rate()/audio_channels().
-    std::vector<std::int16_t> take_audio_samples();
+    // Timestamp gaps become silence, overlaps/preroll are trimmed. A bounded
+    // pull lets the player keep a short queue even across a long silent gap.
+    std::vector<std::int16_t> take_audio_samples(std::size_t max_samples = 1U << 20);
 
     void close();
 

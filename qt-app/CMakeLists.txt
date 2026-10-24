@@ -631,8 +631,33 @@ if(MVP_BUILD_TESTS)
     endif()
     target_compile_features(VideoVaultPlaybackTests PRIVATE cxx_std_20)
     set_target_properties(VideoVaultPlaybackTests PROPERTIES FOLDER "Tests")
+    add_test(NAME video_playback COMMAND VideoVaultPlaybackTests)
+    set_tests_properties(video_playback PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
 
     mvp_copy_runtime_dlls(VideoVaultPlaybackTests)
+
+    # Explicit native hardware measurement only; deliberately NOT a CTest.
+    # Build/run VideoVaultVideoPerformanceTests manually on a visible desktop.
+    add_executable(VideoVaultVideoPerformanceTests EXCLUDE_FROM_ALL
+        tests/video_performance.cpp
+        src/player_window.cpp src/media_decoder.cpp src/icons.cpp
+        include/videovault/app/player_window.hpp
+        include/videovault/app/media_decoder.hpp
+        resources/icons.qrc resources/telegram_player.qrc)
+    target_include_directories(VideoVaultVideoPerformanceTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultVideoPerformanceTests PRIVATE VideoVault::Core
+        Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Multimedia Qt5::Concurrent ${MVP_FFMPEG_LIBS})
+    if(WIN32 OR MINGW)
+        target_include_directories(VideoVaultVideoPerformanceTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+        target_link_libraries(VideoVaultVideoPerformanceTests PRIVATE dwmapi)
+    elseif(ANDROID)
+        target_include_directories(VideoVaultVideoPerformanceTests PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+    endif()
+    target_compile_features(VideoVaultVideoPerformanceTests PRIVATE cxx_std_20)
+    set_target_properties(VideoVaultVideoPerformanceTests PROPERTIES AUTOMOC ON AUTORCC ON FOLDER "Tests")
+    mvp_copy_runtime_dlls(VideoVaultVideoPerformanceTests)
 
     # Headless check of the record content format: the JSON container, the
     # routing marker and the inferred value kinds that the record editor and

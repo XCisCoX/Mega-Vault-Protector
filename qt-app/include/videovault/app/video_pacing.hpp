@@ -43,12 +43,19 @@ inline int clampLeadMs(const int deviceBufferBytes, const int bytesPerSecond) {
 // not established yet.
 inline std::int64_t audibleMs(const std::int64_t baseMs,
                               const std::uint64_t consumedSamples,
-                              const int channels, const int rate, const int leadMs) {
+                              const int channels, const int rate, const int leadMs,
+                              const std::int64_t sincePullMs = 0) {
     if (baseMs < 0 || channels <= 0 || rate <= 0) {
         return baseMs;
     }
-    return baseMs + pulledMs(consumedSamples, channels, rate)
-        - std::clamp(leadMs, 0, kMaxLeadMs);
+    const auto lead = std::clamp(leadMs, 0, kMaxLeadMs);
+    // Native audio backends pull in chunks, not at the video refresh rate.
+    // Interpolate only PCM already handed to the device, never past its end.
+    // This smooths a stepped device clock without becoming a drifting wall
+    // clock; a starved device stops after its queued audio actually drains.
+    const auto interpolation = consumedSamples > 0
+        ? std::clamp<std::int64_t>(sincePullMs, 0, lead) : 0;
+    return baseMs + pulledMs(consumedSamples, channels, rate) - lead + interpolation;
 }
 
 } // namespace videovault::app::video_pacing

@@ -28,13 +28,121 @@ extern "C" {
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
 
+using videovault::app::DecodeStep;
+
 namespace videovault::app {
 struct PlayerWindowTestAccess {
     static bool videoWorkerStarted(const PlayerWindow& player) { return player.worker_.joinable(); }
+    static bool checkDelayedFirstPicture(const std::shared_ptr<core::Vault>& vault, std::int64_t id) {
+        PlayerWindow player(vault, id, QStringLiteral("delayed first picture regression"));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            QApplication::processEvents();
+            if (player.playheadMs_.load() >= 2000 && !player.surface_->frame().isNull()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return false;
+    }
+    static bool checkFrameDelivery(const std::shared_ptr<core::Vault>& vault) {
+        PlayerWindow player(vault, -1, QStringLiteral("frame delivery regression"));
+        player.quit_.store(true);
+        player.worker_.join();
+        player.timer_.stop();
+        player.openFailed_.store(false);
+        QImage picture(32, 32, QImage::Format_RGB32);
+        picture.fill(Qt::green);
+        std::thread producer([&] { player.publishFrame(picture, 17); });
+        producer.join();
+        QApplication::processEvents();
+        return !player.surface_->frame().isNull()
+            && player.surface_->frame().pixelColor(0, 0) == QColor(Qt::green);
+    }
+    static bool checkRecoveryBudget(PlayerWindow& player) {
+        if (!player.audioOutput_ || player.audioOutput_->state() != QAudio::ActiveState) {
+            std::printf("No active audio backend: hardware recovery check skipped.\n");
+            return true;
+        }
+        std::printf("Real audio backend active: %llu PCM samples consumed.\n",
+            static_cast<unsigned long long>(player.audioSink_->consumed_samples()));
+        player.audioRestartAttempts_ = 5;
+        player.tick();
+        return player.audioRestartAttempts_ == 0 && !player.audioDeviceFailed_.load();
+    }
+    static bool checkRepeatAudioReset(const std::shared_ptr<core::Vault>& vault) {
+        PlayerWindow player(vault, -1, QStringLiteral("audio epoch regression"));
+        player.quit_.store(true);
+        player.worker_.join();
+        player.timer_.stop();
+        player.openFailed_.store(false);
+        player.audioSink_ = new AudioSink(&player);
+        player.audioSinkAtomic_.store(player.audioSink_);
+        const std::int16_t pcm[] = {101, 102, 103, 104};
+        player.audioSink_->append(pcm, 4);
+        char pulled[4];
+        player.audioSink_->read(pulled, sizeof(pulled));
+        // Repeat/restart comes from the decode worker and bypasses doSeek.
+        player.requestSeek(0);
+        player.tick();
+        return player.audioSink_->consumed_samples() == 0
+            && player.audioSink_->buffered_samples() == 0;
+    }
+    static bool checkPausedSeeking(PlayerWindow& player) {
+        const auto spin = [](int ms) {
+            const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            while (std::chrono::steady_clock::now() < end) {
+                QApplication::processEvents();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        };
+        if (!player.playing_.load()) player.togglePlayPause();
+        player.togglePlayPause();
+        // Several rapid requests must converge on the last seek, without
+        // resuming the audio device behind a paused picture.
+        for (const auto target : {200, 2500, 700, 1600}) player.doSeek(target);
+        spin(350);
+        if (player.audioSeekPending_.load() || player.playing_.load()
+            || player.playheadMs_.load() != 1600
+            || (player.audioSink_ && player.audioSink_->consumed_samples() != 0)) return false;
+        player.togglePlayPause();
+        spin(450);
+        return player.playheadMs_.load() > 1600 && player.playheadMs_.load() < 2400;
+    }
+    static bool checkRepeatedPlayback(PlayerWindow& player) {
+        player.repeatWatch_.store(2);
+        player.restartFromStart();
+        const auto first = player.audioSeekSerial_.load();
+        auto observed = first;
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < end) {
+            QApplication::processEvents();
+            const auto serial = player.audioSeekSerial_.load();
+            if (serial != observed && !player.audioSeekPending_.load()) {
+                if (player.playheadMs_.load() > 500) {
+                    std::fprintf(stderr, "Repeat epoch %llu -> %llu committed at %lld ms.\n",
+                        static_cast<unsigned long long>(first), static_cast<unsigned long long>(serial),
+                        static_cast<long long>(player.playheadMs_.load()));
+                    return false;
+                }
+                observed = serial;
+                if (observed >= first + 2) {
+                    player.repeatWatch_.store(0);
+                    std::printf("Real worker repeated twice with a reset audio-master clock.\n");
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::fprintf(stderr, "Repeat timeout: epochs %llu -> %llu, position %lld, playing %d, pending %d.\n",
+            static_cast<unsigned long long>(first), static_cast<unsigned long long>(player.audioSeekSerial_.load()),
+            static_cast<long long>(player.playheadMs_.load()), int(player.playing_.load()),
+            int(player.audioSeekPending_.load()));
+        return false;
+    }
 };
 }
 
@@ -115,11 +223,13 @@ videovault::core::Argon2Parameters testParameters() {
 
 // Writes a Matroska fixture with an MJPEG video stream (64x64, 10 fps,
 // 20 frames) and a PCM s16le audio stream (48 kHz stereo, 0.1 s per frame).
-bool writeFixture(const std::filesystem::path& path) {
+bool writeFixture(const std::filesystem::path& path, const int audioDelayMs = 0,
+    const int startMs = 0, const int audioFrames = 20, const int videoStride = 1,
+    const int videoFrames = 20) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 64;
     constexpr int kFps = 10;
-    constexpr int kFrames = 20;
+    const int kFrames = videoFrames;
     constexpr int kAudioRate = 48000;
     constexpr int kAudioChannels = 2;
     constexpr int kSamplesPerFrame = kAudioRate / kFps; // 4800
@@ -142,7 +252,7 @@ bool writeFixture(const std::filesystem::path& path) {
 
     // 440 Hz tone, s16le stereo.
     std::vector<std::int16_t> tone(
-        static_cast<std::size_t>(kSamplesPerFrame) * kAudioChannels * kFrames);
+        static_cast<std::size_t>(kSamplesPerFrame) * kAudioChannels * audioFrames);
     for (std::size_t i = 0; i < tone.size() / kAudioChannels; ++i) {
         const auto value = static_cast<std::int16_t>(
             8000.0 * std::sin(2.0 * 3.141592653589793 * 440.0 * i / kAudioRate));
@@ -215,22 +325,26 @@ bool writeFixture(const std::filesystem::path& path) {
 
     AVPacket* packet = av_packet_alloc();
     bool success = true;
-    for (int frame = 0; frame < kFrames; ++frame) {
-        sws_scale(scaler, src_slices, src_strides, 0, kHeight, yuv->data, yuv->linesize);
-        yuv->pts = av_rescale_q(frame, source_tb, video_tb);
-        if (avcodec_send_frame(codec, yuv) < 0
-            || avcodec_receive_packet(codec, packet) < 0) {
-            success = false;
-            break;
+    for (int frame = 0; frame < audioFrames; ++frame) {
+        if (frame % videoStride == 0 && frame / videoStride < kFrames) {
+            sws_scale(scaler, src_slices, src_strides, 0, kHeight, yuv->data, yuv->linesize);
+            yuv->pts = av_rescale_q(frame, source_tb, video_tb);
+            if (avcodec_send_frame(codec, yuv) < 0
+                || avcodec_receive_packet(codec, packet) < 0) {
+                success = false;
+                break;
+            }
+            packet->stream_index = video_stream->index;
+            packet->pts = av_rescale_q(frame, source_tb, video_tb)
+                + av_rescale_q(startMs, AVRational{1, 1000}, video_tb);
+            packet->dts = packet->pts;
+            if (av_interleaved_write_frame(format, packet) < 0) {
+                success = false;
+                break;
+            }
+            av_packet_unref(packet);
+            src_slices[0] += frame_size;
         }
-        packet->stream_index = video_stream->index;
-        packet->pts = av_rescale_q(frame, source_tb, video_tb);
-        packet->dts = packet->pts;
-        if (av_write_frame(format, packet) < 0) {
-            success = false;
-            break;
-        }
-        av_packet_unref(packet);
 
         const auto audio_offset = static_cast<std::size_t>(frame) * kSamplesPerFrame * kAudioChannels;
         packet->data = reinterpret_cast<std::uint8_t*>(
@@ -238,15 +352,15 @@ bool writeFixture(const std::filesystem::path& path) {
         packet->size = kSamplesPerFrame * kAudioChannels * 2;
         packet->stream_index = audio_stream->index;
         packet->pts = av_rescale_q(
-            static_cast<std::int64_t>(frame) * kSamplesPerFrame,
+            static_cast<std::int64_t>(frame) * kSamplesPerFrame
+                + static_cast<std::int64_t>(audioDelayMs + startMs) * kAudioRate / 1000,
             AVRational{1, kAudioRate}, audio_tb);
         packet->dts = packet->pts;
-        if (av_write_frame(format, packet) < 0) {
+        if (av_interleaved_write_frame(format, packet) < 0) {
             success = false;
             break;
         }
         av_packet_unref(packet);
-        src_slices[0] += frame_size;
     }
     av_write_trailer(format);
     avio_close(format->pb);
@@ -262,12 +376,13 @@ bool writeFixture(const std::filesystem::path& path) {
 // frames — plus AAC audio: the shape of real user videos. The Matroska/MJPEG
 // fixture above is all-keyframes, which makes seeking trivially correct;
 // this one exercises the sparse-keyframe seek path (the reported bug).
-bool writeMp4Fixture(const std::filesystem::path& path) {
+bool writeMp4Fixture(const std::filesystem::path& path, const int keyframeInterval = 15,
+    const int bFrames = 0, const int audioDurationMs = 3000, const int videoDelayMs = 0) {
     constexpr int kWidth = 160;
     constexpr int kHeight = 120;
     constexpr int kFps = 15;
     constexpr int kFrames = 45; // 3.0 s
-    constexpr int kGop = 15;    // keyframe every 1.0 s
+
     constexpr int kAudioRate = 48000;
     constexpr int kAudioChannels = 2;
     constexpr int kAacSamples = 1024;
@@ -296,8 +411,8 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
     vcodec->height = kHeight;
     vcodec->time_base = AVRational{1, kFps};
     vcodec->pix_fmt = AV_PIX_FMT_YUV420P;
-    vcodec->gop_size = kGop;
-    vcodec->max_b_frames = 0;
+    vcodec->gop_size = keyframeInterval;
+    vcodec->max_b_frames = bFrames;
     if (avcodec_open2(vcodec, venc, nullptr) < 0) {
         avcodec_free_context(&vcodec);
         return false;
@@ -310,6 +425,7 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
     }
     AVCodecContext* acodec = avcodec_alloc_context3(aenc);
     acodec->sample_rate = kAudioRate;
+    acodec->time_base = AVRational{1, kAudioRate};
     acodec->bit_rate = 128000;
     videovault::core::ffmpeg_compat::default_channels(acodec, kAudioChannels);
     acodec->sample_fmt = AV_SAMPLE_FMT_FLTP;
@@ -368,6 +484,17 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
     AVPacket* packet = av_packet_alloc();
     bool success = true;
 
+    const auto writeVideoPacket = [&] {
+        packet->stream_index = video_stream->index;
+        av_packet_rescale_ts(packet, vcodec->time_base, video_tb);
+        const auto delay = av_rescale_q(videoDelayMs, AVRational{1, 1000}, video_tb);
+        packet->pts += delay;
+        packet->dts += delay;
+        const bool wrote = av_write_frame(format, packet) >= 0;
+        av_packet_unref(packet);
+        return wrote;
+    };
+
     auto encode_audio_chunk = [&](const std::int64_t start_sample) {
         for (int ch = 0; ch < kAudioChannels; ++ch) {
             auto* samples = reinterpret_cast<float*>(aframe->data[ch]);
@@ -393,41 +520,47 @@ bool writeMp4Fixture(const std::filesystem::path& path) {
         return true;
     };
 
+    std::int64_t nextAudioSample = 0;
     for (int frame = 0; frame < kFrames; ++frame) {
         sws_scale(scaler, src_slices, src_strides, 0, kHeight, yuv->data, yuv->linesize);
-        yuv->pts = av_rescale_q(frame, source_tb, video_tb);
-        if (avcodec_send_frame(vcodec, yuv) < 0
-            || avcodec_receive_packet(vcodec, packet) < 0) {
+        yuv->pts = frame; // codec time base, not the muxer's rewritten time base
+        if (avcodec_send_frame(vcodec, yuv) < 0) {
             success = false;
             break;
         }
-        packet->stream_index = video_stream->index;
-        packet->pts = av_rescale_q(frame, source_tb, video_tb);
-        packet->dts = packet->pts;
-        if (av_write_frame(format, packet) < 0) {
-            success = false;
-            break;
+        while (avcodec_receive_packet(vcodec, packet) == 0) {
+            if (!writeVideoPacket()) {
+                success = false;
+                break;
+            }
         }
-        av_packet_unref(packet);
+        if (!success) break;
 
-        const auto start_sample = static_cast<std::int64_t>(frame) * kAacSamples;
-        if (!encode_audio_chunk(start_sample)) {
-            success = false;
-            break;
+        // One 1024-sample AAC packet is NOT one 15 fps picture. Generate a
+        // full, matching audio duration rather than a 960 ms soundtrack.
+        const auto audioEnd = static_cast<std::int64_t>(frame + 1) * kAudioRate / kFps;
+        while (nextAudioSample < audioEnd) {
+            if (!encode_audio_chunk(nextAudioSample)) {
+                success = false;
+                break;
+            }
+            nextAudioSample += kAacSamples;
         }
+        if (!success) break;
         src_slices[0] += frame_size;
+    }
+
+    // Optional long AAC tail: video packet cadence must not dictate how much
+    // resident audio a single decoder call is allowed to accumulate.
+    while (success && nextAudioSample < static_cast<std::int64_t>(audioDurationMs) * kAudioRate / 1000) {
+        success = encode_audio_chunk(nextAudioSample);
+        nextAudioSample += kAacSamples;
     }
 
     // Flush both encoders.
     avcodec_send_frame(vcodec, nullptr);
     while (avcodec_receive_packet(vcodec, packet) == 0) {
-        packet->stream_index = video_stream->index;
-        packet->pts = av_rescale_q(packet->pts, source_tb, video_tb);
-        packet->dts = packet->pts;
-        if (av_write_frame(format, packet) < 0) {
-            success = false;
-        }
-        av_packet_unref(packet);
+        if (!writeVideoPacket()) success = false;
     }
     avcodec_send_frame(acodec, nullptr);
     while (avcodec_receive_packet(acodec, packet) == 0) {
@@ -469,8 +602,11 @@ int checkSeek(videovault::app::MediaDecoder& decoder, const char* label,
     int frames = 0;
     for (int guard = 0; guard < 300; ++guard) {
         videovault::app::DecodedFrame frame;
-        if (!decoder.decode_next_video_frame(&frame)) {
-            break;
+        const auto step = decoder.decode_next_video_frame(&frame);
+        if (step == DecodeStep::End) break;
+        if (step == DecodeStep::AudioReady) {
+            (void)decoder.take_audio_samples();
+            continue;
         }
         if (first_pts < 0) {
             first_pts = frame.pts_ms;
@@ -600,6 +736,96 @@ int main() {
         return fail("Importing the MP4 fixture must succeed.");
     }
 
+    const auto longGopFixture = temp.path() / L"long-gop.mp4";
+    if (!writeMp4Fixture(longGopFixture, 45, 2)) return fail("Generate long-GOP/B-frame MP4.");
+    const auto longGopId = created.value().import_file(longGopFixture);
+    if (!longGopId) return fail("Import long-GOP MP4.");
+
+    const auto aacTailFixture = temp.path() / L"aac-tail.mp4";
+    if (!writeMp4Fixture(aacTailFixture, 45, 2, 50000)) return fail("Generate long AAC tail.");
+    const auto aacTailId = created.value().import_file(aacTailFixture);
+    if (!aacTailId) return fail("Import long AAC tail.");
+
+    const auto delayedFixture = temp.path() / L"delayed-audio.mkv";
+    if (!writeFixture(delayedFixture, 2000)) return fail("Generate delayed-audio fixture.");
+    const auto delayedId = created.value().import_file(delayedFixture);
+    if (!delayedId) return fail("Import delayed-audio fixture.");
+
+    const auto shiftedFixture = temp.path() / L"shifted-timestamps.mkv";
+    if (!writeFixture(shiftedFixture, 0, 3000)) return fail("Generate nonzero-origin fixture.");
+    const auto shiftedId = created.value().import_file(shiftedFixture);
+    if (!shiftedId) return fail("Import nonzero-origin fixture.");
+
+    const auto delayedVideoFixture = temp.path() / L"delayed-video.mp4";
+    if (!writeMp4Fixture(delayedVideoFixture, 15, 0, 3000, 2000)) return fail("Generate delayed-video fixture.");
+    const auto delayedVideoId = created.value().import_file(delayedVideoFixture);
+    if (!delayedVideoId) return fail("Import delayed-video fixture.");
+
+    // Three pictures at 0/15/30 seconds and 50 seconds of stereo PCM.
+    // A bounded pull alone cannot bound PCM resident inside one demux call.
+    const auto tailFixture = temp.path() / L"audio-tail.mkv";
+    if (!writeFixture(tailFixture, 0, 0, 500, 150, 3)) return fail("Generate audio-tail fixture.");
+    const auto tailId = created.value().import_file(tailFixture);
+    if (!tailId) return fail("Import audio-tail fixture.");
+    auto tailVault = Vault::open(root, "playback test password");
+    videovault::app::MediaDecoder tailDecoder;
+    QString tailError;
+    if (!tailVault || !tailDecoder.open(std::make_shared<Vault>(std::move(tailVault.value())),
+        tailId.value(), &tailError)) return fail("Open audio-tail fixture.");
+    videovault::app::DecodedFrame tailFrame;
+    for (const int target : {0, 10555, 345, 45000, 0}) {
+        if (tailDecoder.seek_to(target) < 0) return fail("Seek sparse video/audio tail.");
+        if (tailDecoder.resident_audio_samples() != 0) return fail("Seek must release resident PCM.");
+        std::size_t pcmCount = 0, peak = 0;
+        int frames = 0, yields = 0;
+        bool yieldedBetweenPictures = false;
+        bool ended = false;
+        for (int guard = 0; guard < 10000; ++guard) {
+            const auto step = tailDecoder.decode_next_video_frame(&tailFrame);
+            peak = std::max(peak, tailDecoder.resident_audio_samples());
+            if (peak > videovault::app::MediaDecoder::kMaxResidentAudioSamples + 9600U)
+                return fail("A single decode call must yield before resident PCM exceeds its cap.");
+            if (step == DecodeStep::VideoFrame) ++frames;
+            if (step == DecodeStep::AudioReady) {
+                ++yields;
+                yieldedBetweenPictures |= frames > 0 && frames < 3;
+                // Without draining, a repeated call must yield, not grow or
+                // report EOF. Partial pulls retain full-block accounting.
+                const auto before = tailDecoder.resident_audio_samples();
+                if (tailDecoder.decode_next_video_frame(&tailFrame) != DecodeStep::AudioReady
+                    || tailDecoder.resident_audio_samples() != before)
+                    return fail("Audio backpressure must retain pending audio without demuxing.");
+            }
+            pcmCount += tailDecoder.take_audio_samples(8192).size();
+            if (step == DecodeStep::End) { ended = true; break; }
+        }
+        while (tailDecoder.buffered_audio_samples() > 0)
+            pcmCount += tailDecoder.take_audio_samples(8192).size();
+        const auto expected = static_cast<std::size_t>(50000 - target) * 96;
+        if (!ended || pcmCount != expected || tailDecoder.resident_audio_samples() != 0
+            || (target == 0 && (frames != 3 || yields == 0 || !yieldedBetweenPictures))) {
+            std::fprintf(stderr, "Tail seek %d: frames=%d yields=%d PCM=%zu expected=%zu peak=%zu\n",
+                target, frames, yields, pcmCount, expected, peak);
+            return fail("Sparse video/long audio tails must yield without losing PCM or video.");
+        }
+        std::printf("Bounded tail seek %d: %d frames, %d yields, %zu PCM, peak %zu samples.\n",
+            target, frames, yields, pcmCount, peak);
+    }
+    tailDecoder.close();
+    // The audio-only API shares the same engine, including oversized requests.
+    tailDecoder.prepare_for_audio();
+    auto audioTailVault = Vault::open(root, "playback test password");
+    if (!audioTailVault || !tailDecoder.open(std::make_shared<Vault>(std::move(audioTailVault.value())),
+        tailId.value(), &tailError)) return fail("Open audio-only tail fixture.");
+    std::size_t audioOnlyCount = 0;
+    while (tailDecoder.pump_audio(std::numeric_limits<int>::max(), nullptr)) {
+        if (tailDecoder.resident_audio_samples() > videovault::app::MediaDecoder::kMaxResidentAudioSamples + 9600U)
+            return fail("Oversized pump request must be clamped to resident PCM cap.");
+        audioOnlyCount += tailDecoder.take_audio_samples(8192).size();
+    }
+    if (audioOnlyCount != 50000U * 96U) return fail("Bounded audio-only pump must preserve every sample.");
+    tailDecoder.close();
+
     videovault::app::MediaDecoder decoder;
     QString open_error;
     if (!decoder.open(
@@ -634,8 +860,11 @@ int main() {
     bool first_frame_valid = false;
     for (int guard = 0; guard < 60; ++guard) {
         videovault::app::DecodedFrame frame;
-        if (!decoder.decode_next_video_frame(&frame)) {
-            break;
+        const auto step = decoder.decode_next_video_frame(&frame);
+        if (step == DecodeStep::End) break;
+        if (step == DecodeStep::AudioReady) {
+            (void)decoder.take_audio_samples();
+            continue;
         }
         if (video_frames == 0) {
             first_frame_valid = !frame.image.isNull()
@@ -661,8 +890,11 @@ int main() {
     bool post_seek_at_target = false;
     for (int guard = 0; guard < 30; ++guard) {
         videovault::app::DecodedFrame frame;
-        if (!decoder.decode_next_video_frame(&frame)) {
-            break;
+        const auto step = decoder.decode_next_video_frame(&frame);
+        if (step == DecodeStep::End) break;
+        if (step == DecodeStep::AudioReady) {
+            (void)decoder.take_audio_samples();
+            continue;
         }
         if (post_seek_frames == 0 && frame.pts_ms < 950) {
             return fail("The first post-seek frame must be at or near the seek target.");
@@ -685,7 +917,7 @@ int main() {
     }
     decoder.set_display_size(32, 32);
     videovault::app::DecodedFrame small;
-    if (!decoder.decode_next_video_frame(&small)
+    if (decoder.decode_next_video_frame(&small) != DecodeStep::VideoFrame
         || small.image.isNull()
         || small.image.width() != 32
         || small.image.height() != 32) {
@@ -694,6 +926,105 @@ int main() {
 
     std::printf("Playback decode checks succeeded (%d frames, %zu audio samples).\n",
         video_frames, samples.size());
+
+    // Match the real worker: decode reference pictures from the preceding
+    // keyframe, but queue audio only from the exact target, including the
+    // boundary packet's tail. Counting PCM catches offsets hidden by a seek
+    // bar that advances correctly while playing old sound.
+    for (const std::int64_t target : {1055, 345, 1750, 0}) {
+        if (decoder.seek_to(target) < 0) return fail("PCM seek must succeed.");
+        std::size_t count = 0;
+        videovault::app::DecodedFrame frame;
+        while (decoder.decode_next_video_frame(&frame) != DecodeStep::End) {
+            count += decoder.take_audio_samples().size();
+        }
+        count += decoder.take_audio_samples().size();
+        const auto expected = static_cast<std::size_t>((2000 - target) * 48 * 2);
+        if (count != expected) {
+            std::fprintf(stderr, "Seek audio at %lld ms: %zu samples, expected %zu (offset %.1f ms).\n",
+                static_cast<long long>(target), count, expected,
+                (static_cast<double>(count) - expected) / 96.0);
+            return fail("Seek must remove preroll PCM without losing the boundary packet tail.");
+        }
+    }
+    std::printf("Sample-exact PCM seek/preroll checks succeeded.\n");
+    decoder.close();
+
+    auto aacTailVault = Vault::open(root, "playback test password");
+    videovault::app::MediaDecoder aacTailDecoder;
+    if (!aacTailVault || !aacTailDecoder.open(std::make_shared<Vault>(std::move(aacTailVault.value())),
+        aacTailId.value(), &open_error)) return fail("Open encrypted AAC tail.");
+    std::size_t aacPcm = 0, aacPeak = 0;
+    int aacFrames = 0, aacYields = 0;
+    bool aacEnded = false;
+    for (int guard = 0; guard < 10000; ++guard) {
+        const auto step = aacTailDecoder.decode_next_video_frame(&tailFrame);
+        aacPeak = std::max(aacPeak, aacTailDecoder.resident_audio_samples());
+        if (step == DecodeStep::VideoFrame) ++aacFrames;
+        if (step == DecodeStep::AudioReady) ++aacYields;
+        aacPcm += aacTailDecoder.take_audio_samples(8192).size();
+        if (step == DecodeStep::End) { aacEnded = true; break; }
+    }
+    while (aacTailDecoder.buffered_audio_samples() > 0)
+        aacPcm += aacTailDecoder.take_audio_samples(8192).size();
+    // AAC pads the last input to a 1024-frame boundary. Initial encoder delay
+    // is timestamped before zero and trimmed, not counted as soundtrack.
+    constexpr std::size_t expectedAacPcm = ((50000U * 48U + 1023U) / 1024U) * 1024U * 2U;
+    if (!aacEnded || aacFrames != 45 || aacYields == 0 || aacPcm != expectedAacPcm
+        || aacPeak > videovault::app::MediaDecoder::kMaxResidentAudioSamples + 2048U
+        || aacTailDecoder.resident_audio_samples() != 0) {
+        std::fprintf(stderr, "AAC tail: %d frames, %d yields, %zu PCM expected %zu, peak %zu.\n",
+            aacFrames, aacYields, aacPcm, expectedAacPcm, aacPeak);
+        return fail("Long AAC tail and reordered video must both survive bounded codec draining.");
+    }
+    std::printf("Bounded AAC tail: %d frames, %d yields, %zu PCM, peak %zu samples.\n",
+        aacFrames, aacYields, aacPcm, aacPeak);
+    aacTailDecoder.close();
+
+    auto delayedVault = Vault::open(root, "playback test password");
+    videovault::app::MediaDecoder delayedDecoder;
+    if (!delayedVault || !delayedDecoder.open(
+        std::make_shared<Vault>(std::move(delayedVault.value())), delayedId.value(), &open_error)) {
+        return fail("Open delayed-audio fixture.");
+    }
+    for (const auto target : {0, 345, 1345}) {
+        if (delayedDecoder.seek_to(target) < 0) return fail("Seek delayed-audio fixture.");
+        std::vector<std::int16_t> pcm;
+        videovault::app::DecodedFrame frame;
+        while (delayedDecoder.decode_next_video_frame(&frame) != DecodeStep::End) {
+            auto part = delayedDecoder.take_audio_samples();
+            pcm.insert(pcm.end(), part.begin(), part.end());
+        }
+        auto tail = delayedDecoder.take_audio_samples();
+        pcm.insert(pcm.end(), tail.begin(), tail.end());
+        const auto silent = static_cast<std::size_t>(std::max(0, 2000 - target)) * 96;
+        if (pcm.size() != static_cast<std::size_t>(4000 - target) * 96
+            || !std::all_of(pcm.begin(), pcm.begin() + std::min(silent, pcm.size()),
+                [](std::int16_t sample) { return sample == 0; })) {
+            return fail("Audio timestamps must retain the two-second delay, including after seeks.");
+        }
+    }
+    delayedDecoder.close();
+    std::printf("Timestamped audio delay and seek checks succeeded.\n");
+
+    auto shiftedVault = Vault::open(root, "playback test password");
+    videovault::app::MediaDecoder shiftedDecoder;
+    if (!shiftedVault || !shiftedDecoder.open(
+        std::make_shared<Vault>(std::move(shiftedVault.value())), shiftedId.value(), &open_error)) {
+        return fail("Open shifted timestamp fixture.");
+    }
+    videovault::app::DecodedFrame shiftedFrame;
+    if (shiftedDecoder.decode_next_video_frame(&shiftedFrame) != DecodeStep::VideoFrame || shiftedFrame.pts_ms != 0) {
+        return fail("Nonzero container timestamps must share a zero-based playback origin.");
+    }
+    if (shiftedDecoder.seek_to(1055) < 0) return fail("Seek shifted timestamp fixture.");
+    std::size_t shiftedPcm = 0;
+    while (shiftedDecoder.decode_next_video_frame(&shiftedFrame) != DecodeStep::End) {
+        shiftedPcm += shiftedDecoder.take_audio_samples().size();
+    }
+    shiftedPcm += shiftedDecoder.take_audio_samples().size();
+    if (shiftedPcm != 90720) return fail("Shifted timestamps must seek to the same sample-exact target.");
+    shiftedDecoder.close();
 
     // --- Strict post-seek verification on the interframe MP4 fixture. This
     // is the shape of real user videos; the MJPEG fixture above is
@@ -733,6 +1064,46 @@ int main() {
     }
 
     std::printf("MP4 interframe seek checks succeeded.\n");
+    decoder2.close();
+
+    auto longGopVault = Vault::open(root, "playback test password");
+    videovault::app::MediaDecoder longGopDecoder;
+    if (!longGopVault || !longGopDecoder.open(
+        std::make_shared<Vault>(std::move(longGopVault.value())), longGopId.value(), &open_error)) {
+        return fail("Open long-GOP fixture through the encrypted decoder.");
+    }
+    int bFrameCount = 0;
+    videovault::app::DecodedFrame bFrame;
+    for (;;) {
+        const auto step = longGopDecoder.decode_next_video_frame(&bFrame);
+        (void)longGopDecoder.take_audio_samples();
+        if (step == DecodeStep::End) break;
+        if (step == DecodeStep::VideoFrame) ++bFrameCount;
+    }
+    if (bFrameCount != 45) {
+        std::fprintf(stderr, "B-frame decode returned %d of 45 pictures.\n", bFrameCount);
+        return fail("Reordered video frames must all be drained at EOF.");
+    }
+    for (const std::int64_t target : {2255, 500, 1750, 0}) {
+        if (longGopDecoder.seek_to(target) < 0) return fail("AAC seek must succeed.");
+        std::size_t count = 0;
+        videovault::app::DecodedFrame frame;
+        while (longGopDecoder.decode_next_video_frame(&frame) != DecodeStep::End) {
+            count += longGopDecoder.take_audio_samples().size();
+        }
+        count += longGopDecoder.take_audio_samples().size();
+        const double remainingMs = static_cast<double>(count) / 96.0;
+        // AAC padding/container rounding can add a partial packet, not seconds
+        // of sound from the preceding keyframe (0 ms in this entire fixture).
+        if (std::abs(remainingMs - (3000 - target)) > 80) {
+            std::fprintf(stderr, "Long-GOP AAC seek %lld ms leaves %.1f ms of sound.\n",
+                static_cast<long long>(target), remainingMs);
+            return fail("Sparse-keyframe seek must not retain seconds of old AAC sound.");
+        }
+        std::printf("  Long-GOP AAC seek %lld ms: %.1f ms of sound remains.\n",
+            static_cast<long long>(target), remainingMs);
+    }
+    longGopDecoder.close();
 
     // PNG is a single-frame image with no filename on the custom AVIO. The
     // viewer must still open it (image2 is extension-keyed) and return an
@@ -776,7 +1147,7 @@ int main() {
             return fail("A PNG must open as the png codec.");
         }
         videovault::app::DecodedFrame png_frame;
-        if (!png_decoder.decode_next_video_frame(&png_frame)
+        if (png_decoder.decode_next_video_frame(&png_frame) != DecodeStep::VideoFrame
             || png_frame.image.isNull()
             || png_frame.image.width() < 1
             || png_frame.image.height() < 1
@@ -797,6 +1168,19 @@ int main() {
     char player_name[] = "megavaultprotect-headless-player-test";
     char* player_argv[1] = {player_name};
     QApplication player_app(player_argc, player_argv);
+
+    auto epochVault = Vault::open(root, "playback test password");
+    if (!epochVault) return fail("Reopen fixture for audio epoch tests.");
+    auto epochShared = std::make_shared<Vault>(std::move(epochVault.value()));
+    if (!videovault::app::PlayerWindowTestAccess::checkDelayedFirstPicture(epochShared, delayedVideoId.value())) {
+        return fail("A future first video timestamp must not deadlock the audio-master startup gate.");
+    }
+    if (!videovault::app::PlayerWindowTestAccess::checkFrameDelivery(epochShared)) {
+        return fail("A due frame must reach the surface without waiting for the controls timer.");
+    }
+    if (!videovault::app::PlayerWindowTestAccess::checkRepeatAudioReset(epochShared)) {
+        return fail("Worker-originated repeat must reset the PCM counter and discard old audio.");
+    }
 
     const auto spin = [&player_app](const std::chrono::milliseconds duration) {
         const auto deadline = std::chrono::steady_clock::now() + duration;
@@ -823,6 +1207,9 @@ int main() {
     // Let playback start from the beginning.
     spin(std::chrono::milliseconds(1500));
     const int pos_before = slider->value();
+    if (!videovault::app::PlayerWindowTestAccess::checkRecoveryBudget(player)) {
+        return fail("Successful audio playback must reset the consecutive failure budget.");
+    }
     if (pos_before < 200) {
         std::fprintf(stderr, "Playback must start advancing (slider %d ms).\n", pos_before);
         return EXIT_FAILURE;
@@ -857,6 +1244,12 @@ int main() {
 
     std::printf("Headless player seek checks succeeded (%d -> %d -> %d -> %d ms).\n",
         pos_before, pos_after, pos_later, pos_back);
+    if (!videovault::app::PlayerWindowTestAccess::checkPausedSeeking(player)) {
+        return fail("Rapid paused seeks must keep audio paused, retain the last target and resume in sync.");
+    }
+    if (!videovault::app::PlayerWindowTestAccess::checkRepeatedPlayback(player)) {
+        return fail("Repeated playback must reset its clock on every loop.");
+    }
     }
 
     // A real RGB photo, not a 1x1 test pattern, opened in the actual window.
@@ -974,9 +1367,10 @@ int main() {
                 return fail("A real PNG must open in the viewer.");
             }
             videovault::app::DecodedFrame sample_frame;
-            if (!sample_decoder.decode_next_video_frame(&sample_frame)
+            if (sample_decoder.decode_next_video_frame(&sample_frame) != DecodeStep::VideoFrame
                 || sample_frame.image.isNull()
-                || sample_frame.image.pixelColor(0, 0).alpha() != 255) {
+                || sample_frame.image.pixelColor(0, 0).alpha() != 255
+                || sample_frame.image.constBits()[3] != 255) {
                 std::fprintf(stderr, "Decode failed for %ls (%dx%d codec %s)\n",
                     sample.c_str(), sample_decoder.video_width(),
                     sample_decoder.video_height(),

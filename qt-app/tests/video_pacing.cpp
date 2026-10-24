@@ -51,6 +51,18 @@ int main() {
     check(audibleMs(-1, 96000, kChannels, kRate, kLeadMs) == -1,
         "an unestablished PCM timeline stays unknown instead of inventing a position");
 
+    {
+        const std::uint64_t pulled = kRate * kChannels;
+        check(audibleMs(0, pulled, kChannels, kRate, 200, 16) == 816,
+            "chunked audio pulls interpolate smoothly between device callbacks");
+        check(audibleMs(0, pulled, kChannels, kRate, 200, 33) == 833,
+            "60fps picture scheduling is not quantized to audio-buffer chunks");
+        check(audibleMs(0, pulled, kChannels, kRate, 200, 900) == 1000,
+            "a stall cannot interpolate past the audio actually handed to the device");
+        check(audibleMs(0, 0, kChannels, kRate, 200, 900) == -200,
+            "no PCM means no invented playback during startup");
+    }
+
     // A 10-minute play at 48 kHz where the sound card is 0.5% slow. The wall
     // clock that used to drive the picture would be ~3 s ahead by the end; the
     // audio clock must stay with the device the user is actually listening to.

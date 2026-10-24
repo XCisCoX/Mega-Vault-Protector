@@ -10,6 +10,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
+#include <libavutil/cpu.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
@@ -24,6 +25,7 @@ extern "C" {
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
@@ -37,7 +39,6 @@ namespace videovault::app {
 namespace {
 
 constexpr std::size_t kAvioBufferSize = 128U * 1024U;
-constexpr std::int64_t kMaxAudioSamples = 1U << 20; // ~8.7 min of s16le stereo 48k
 constexpr std::uint64_t kDefaultStreamCacheBytes = 32U << 20; // 32 MiB
 
 // Same dark surface the gallery thumbnails are composited onto, so a
@@ -353,14 +354,16 @@ struct FormatHandle {
     AvFormatPtr format;
 };
 
-std::int64_t frame_pts_ms(const AVFrame* frame, const AVRational& time_base) {
+std::int64_t frame_pts_ms(const AVFrame* frame, const AVRational& time_base,
+    const std::int64_t origin_us = 0) {
     const std::int64_t pts = frame->best_effort_timestamp != AV_NOPTS_VALUE
         ? frame->best_effort_timestamp
         : frame->pts;
     if (pts == AV_NOPTS_VALUE) {
         return 0;
     }
-    return av_rescale_q(pts, time_base, AVRational{1, 1000});
+    return av_rescale_q(av_rescale_q(pts, time_base, AVRational{1, AV_TIME_BASE}) - origin_us,
+        AVRational{1, AV_TIME_BASE}, AVRational{1, 1000});
 }
 
 } // namespace
@@ -527,6 +530,9 @@ public:
             return false;
         }
 
+        // One shared origin preserves relative A/V offsets while files whose
+        // timestamps start at (say) 3 seconds still begin playback at zero.
+        timeline_start_us_ = raw_format->start_time != AV_NOPTS_VALUE ? raw_format->start_time : 0;
         for (unsigned int index = 0U; index < raw_format->nb_streams; ++index) {
             AVStream* stream = raw_format->streams[index];
             if (stream == nullptr || stream->codecpar == nullptr) {
@@ -550,6 +556,9 @@ public:
                 video_codec_.reset(avcodec_alloc_context3(decoder));
                 status = avcodec_parameters_to_context(
                     video_codec_.get(), stream->codecpar);
+                // Use codec-supported parallel decoding for high-resolution
+                // video. Bound frame-thread lookahead/memory on many-core PCs.
+                video_codec_->thread_count = std::clamp(av_cpu_count(), 1, 8);
                 if (status < 0 || avcodec_open2(video_codec_.get(), decoder, nullptr) < 0) {
                     if (error != nullptr) {
                         *error = QStringLiteral("Unable to open the video decoder.");
@@ -640,10 +649,17 @@ public:
         audio_codec_.reset();
         scaler_.reset();
         swr_.reset();
-        audio_samples_.clear();
+        audio_blocks_.clear();
+        resident_audio_samples_ = 0;
+        pending_packet_.reset();
+        audio_trim_before_ = 0;
+        audio_cursor_frames_ = audio_end_frames_ = 0;
+        audio_timeline_established_ = false;
         video_stream_ = -1;
+        demux_eof_ = false;
         audio_stream_ = -1;
         last_audio_pts_ms_ = 0;
+        timeline_start_us_ = 0;
         duration_ms_ = 0;
         video_width_ = 0;
         video_height_ = 0;
@@ -663,7 +679,8 @@ public:
             return false;
         }
         const auto target_ts = av_rescale_q(
-            ms, AVRational{1, 1000}, handle_->format->streams[timed_stream]->time_base);
+            av_rescale_q(ms, AVRational{1, 1000}, AVRational{1, AV_TIME_BASE}) + timeline_start_us_,
+            AVRational{1, AV_TIME_BASE}, handle_->format->streams[timed_stream]->time_base);
         // Backward seek lands on the keyframe at/before the target — the
         // classic, most compatible API; fall back to the range form.
         last_seek_status_ = av_seek_frame(
@@ -684,141 +701,126 @@ public:
         if (audio_codec_) {
             avcodec_flush_buffers(audio_codec_.get());
         }
-        audio_samples_.clear();
+        audio_blocks_.clear();
+        resident_audio_samples_ = 0;
+        pending_packet_.reset();
         last_audio_pts_ms_ = ms;
+        audio_trim_before_ = av_rescale_q(ms, AVRational{1, 1000},
+            AVRational{1, audio_sample_rate_ > 0 ? audio_sample_rate_ : 1});
+        audio_cursor_frames_ = audio_end_frames_ = audio_trim_before_;
+        audio_timeline_established_ = false;
+        demux_eof_ = false;
+        // Codec flush does not flush the resampler's delayed old samples.
+        if (swr_) {
+            swr_close(swr_.get());
+            last_seek_status_ = swr_init(swr_.get());
+            if (last_seek_status_ < 0) return false;
+        }
         return true;
     }
 
     bool pump_audio(const int min_samples, std::int64_t* pts_ms) {
-        if (!is_open() || !audio_codec_ || !swr_) {
-            return false;
+        if (!is_open() || !audio_codec_ || !swr_) return false;
+        const auto target = std::clamp<std::size_t>(
+            min_samples > 0 ? static_cast<std::size_t>(min_samples) : 1U,
+            1U, MediaDecoder::kMaxResidentAudioSamples);
+        DecodedFrame unused;
+        while (buffered_audio_samples() < target
+            && resident_audio_samples_ < MediaDecoder::kMaxResidentAudioSamples) {
+            if (decode_next_video_frame(&unused, target) != DecodeStep::VideoFrame) break;
         }
-        auto ready = [&]() {
-            if (pts_ms != nullptr) {
-                *pts_ms = last_audio_pts_ms_;
-            }
-            return !audio_samples_.empty();
-        };
-        if (min_samples > 0 && static_cast<int>(audio_samples_.size()) >= min_samples) {
-            return ready();
-        }
-        while (true) {
-            AvPacketPtr packet(av_packet_alloc());
-            const int read_status = av_read_frame(handle_->format.get(), packet.get());
-            if (read_status < 0) {
-                if (avcodec_send_packet(audio_codec_.get(), nullptr) >= 0) {
-                    while (true) {
-                        AvFramePtr decoded(av_frame_alloc());
-                        const int receive_status =
-                            avcodec_receive_frame(audio_codec_.get(), decoded.get());
-                        if (receive_status < 0) {
-                            break;
-                        }
-                        last_audio_pts_ms_ = frame_pts_ms(decoded.get(), audio_time_base_);
-                        append_audio(decoded.get());
-                    }
-                }
-                return ready();
-            }
-            if (packet->stream_index != audio_stream_) {
-                av_packet_unref(packet.get());
-                continue;
-            }
-            const int send_status = avcodec_send_packet(audio_codec_.get(), packet.get());
-            av_packet_unref(packet.get());
-            if (send_status < 0) {
-                continue;
-            }
-            while (true) {
-                AvFramePtr decoded(av_frame_alloc());
-                const int receive_status =
-                    avcodec_receive_frame(audio_codec_.get(), decoded.get());
-                if (receive_status == AVERROR(EAGAIN) || receive_status == AVERROR_EOF) {
-                    break;
-                }
-                if (receive_status < 0) {
-                    return ready();
-                }
-                last_audio_pts_ms_ = frame_pts_ms(decoded.get(), audio_time_base_);
-                append_audio(decoded.get());
-            }
-            if (min_samples <= 0 || static_cast<int>(audio_samples_.size()) >= min_samples) {
-                return ready();
-            }
-        }
+        if (pts_ms) *pts_ms = last_audio_pts_ms_;
+        return buffered_audio_samples() > 0;
     }
 
     int last_seek_status_{0};
 
-    bool decode_next_video_frame(DecodedFrame* frame) {
-        if (!is_open()) {
-            return false;
-        }
+    DecodeStep decode_next_video_frame(DecodedFrame* frame, const std::size_t audio_target = 0) {
+        if (!is_open()) return DecodeStep::End;
         while (true) {
-            AvPacketPtr packet(av_packet_alloc());
-            const int read_status = av_read_frame(handle_->format.get(), packet.get());
-            if (read_status < 0) {
-                // A one-packet PNG can stay inside the decoder until flush.
-                // Without this the viewer hits EOF and never shows the picture.
-                if (video_codec_ && avcodec_send_packet(video_codec_.get(), nullptr) >= 0) {
-                    AvFramePtr decoded(av_frame_alloc());
-                    if (avcodec_receive_frame(video_codec_.get(), decoded.get()) >= 0) {
-                        frame->image = convert_frame(decoded.get());
-                        frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_);
-                        frame->source_width = decoded->width;
-                        frame->source_height = decoded->height;
-                        return !frame->image.isNull();
-                    }
-                }
-                return false;
+            // Drain every frame from the previous packet BEFORE consuming a
+            // new packet. A yield leaves codec frames (and any EAGAIN packet)
+            // pending, so resuming cannot silently drop compressed audio.
+            if (resident_audio_samples_ >= MediaDecoder::kMaxResidentAudioSamples
+                || (audio_target > 0 && buffered_audio_samples() >= audio_target)) {
+                return DecodeStep::AudioReady;
             }
-            const int stream_index = packet->stream_index;
-            if (stream_index == video_stream_) {
-                const int send_status = avcodec_send_packet(video_codec_.get(), packet.get());
-                av_packet_unref(packet.get());
-                if (send_status < 0) {
-                    continue;
-                }
+            if (audio_codec_ && swr_) {
                 AvFramePtr decoded(av_frame_alloc());
-                const int receive_status = avcodec_receive_frame(video_codec_.get(), decoded.get());
-                if (receive_status == AVERROR(EAGAIN)) {
-                    continue;
-                }
-                if (receive_status < 0) {
-                    return false;
-                }
-                frame->image = convert_frame(decoded.get());
-                frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_);
-                frame->source_width = decoded->width;
-                frame->source_height = decoded->height;
-                return true;
-            }
-            if (stream_index == audio_stream_ && audio_codec_ && swr_) {
-                const int send_status = avcodec_send_packet(audio_codec_.get(), packet.get());
-                av_packet_unref(packet.get());
-                if (send_status < 0) {
-                    continue;
-                }
-                while (true) {
-                    AvFramePtr decoded(av_frame_alloc());
-                    const int receive_status = avcodec_receive_frame(audio_codec_.get(), decoded.get());
-                    if (receive_status == AVERROR(EAGAIN) || receive_status == AVERROR_EOF) {
-                        break;
-                    }
-                    if (receive_status < 0) {
-                        break;
-                    }
+                const int status = avcodec_receive_frame(audio_codec_.get(), decoded.get());
+                if (status >= 0) {
+                    last_audio_pts_ms_ = frame_pts_ms(decoded.get(), audio_time_base_, timeline_start_us_);
                     append_audio(decoded.get());
+                    continue;
                 }
-            } else {
-                av_packet_unref(packet.get());
             }
+            if (video_codec_) {
+                AvFramePtr decoded(av_frame_alloc());
+                const int status = avcodec_receive_frame(video_codec_.get(), decoded.get());
+                if (status >= 0) {
+                    frame->image = convert_frame(decoded.get());
+                    frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_, timeline_start_us_);
+                    frame->source_width = decoded->width;
+                    frame->source_height = decoded->height;
+                    return frame->image.isNull() ? DecodeStep::End : DecodeStep::VideoFrame;
+                }
+            }
+            if (demux_eof_) return DecodeStep::End;
+            if (!pending_packet_) {
+                pending_packet_.reset(av_packet_alloc());
+                if (av_read_frame(handle_->format.get(), pending_packet_.get()) < 0) {
+                    pending_packet_.reset();
+                    demux_eof_ = true;
+                    // Both receive loops reached EAGAIN before this read. Send
+                    // the drain packets once; later calls continue receiving.
+                    if (video_codec_) avcodec_send_packet(video_codec_.get(), nullptr);
+                    if (audio_codec_) avcodec_send_packet(audio_codec_.get(), nullptr);
+                    continue;
+                }
+            }
+            auto* codec = pending_packet_->stream_index == video_stream_ ? video_codec_.get()
+                : pending_packet_->stream_index == audio_stream_ ? audio_codec_.get() : nullptr;
+            const int status = codec ? avcodec_send_packet(codec, pending_packet_.get()) : 0;
+            if (status != AVERROR(EAGAIN)) pending_packet_.reset();
         }
     }
 
-    std::vector<std::int16_t> take_audio_samples() {
+    std::size_t resident_audio_samples() const { return resident_audio_samples_; }
+
+    std::size_t buffered_audio_samples() const {
+        return static_cast<std::size_t>(std::max<std::int64_t>(0,
+            audio_end_frames_ - audio_cursor_frames_)) * audio_channels_;
+    }
+
+    std::vector<std::int16_t> take_audio_samples(const std::size_t max_samples) {
         std::vector<std::int16_t> samples;
-        samples.swap(audio_samples_);
+        if (audio_channels_ <= 0) return samples;
+        const auto channels = static_cast<std::size_t>(audio_channels_);
+        const auto limit = std::min(max_samples, buffered_audio_samples()) / channels;
+        samples.reserve(limit * channels);
+        while (!audio_blocks_.empty() && samples.size() / channels < limit) {
+            const auto& block = audio_blocks_.front();
+            auto room = limit - samples.size() / channels;
+            if (block.start > audio_cursor_frames_) {
+                // Represent silence sparsely in the queue, materializing only
+                // the caller's budget. Even a very long gap cannot allocate a
+                // correspondingly huge PCM vector or block the UI.
+                const auto gap = static_cast<std::size_t>(block.start - audio_cursor_frames_);
+                const auto take = std::min(room, gap);
+                samples.insert(samples.end(), take * channels, 0);
+                audio_cursor_frames_ += static_cast<std::int64_t>(take);
+                continue;
+            }
+            const auto offset = static_cast<std::size_t>(audio_cursor_frames_ - block.start) * channels;
+            const auto take = std::min(room * channels, block.samples.size() - offset);
+            samples.insert(samples.end(), block.samples.begin() + offset,
+                block.samples.begin() + offset + take);
+            audio_cursor_frames_ += static_cast<std::int64_t>(take / channels);
+            if (offset + take == block.samples.size()) {
+                resident_audio_samples_ -= block.samples.size();
+                audio_blocks_.pop_front();
+            }
+        }
         return samples;
     }
 
@@ -943,34 +945,23 @@ private:
         if (output_width <= 0 || output_height <= 0) {
             return QImage();
         }
-        AvFramePtr rgb(av_frame_alloc());
-        rgb->format = AV_PIX_FMT_BGRA;
-        rgb->width = output_width;
-        rgb->height = output_height;
-        if (av_frame_get_buffer(rgb.get(), 0) < 0) {
-            return QImage();
-        }
-        sws_scale(scaler_.get(), source->data, source->linesize, 0, source->height,
-            rgb->data, rgb->linesize);
+        // Convert directly into the image shared with the presentation queue.
+        // An intermediate AVFrame plus image.copy() doubled each RGB frame's
+        // allocation and memory traffic (particularly costly at 4K/60 fps).
+        QImage image(output_width, output_height, QImage::Format_RGB32);
+        if (image.isNull()) return image;
+        std::uint8_t* output[4] = {image.bits(), nullptr, nullptr, nullptr};
+        const int strides[4] = {image.bytesPerLine(), 0, 0, 0};
+        if (sws_scale(scaler_.get(), source->data, source->linesize, 0, source->height,
+            output, strides) <= 0) return QImage();
         if (format_has_alpha_or_palette(src_fmt)) {
             // Format_RGB32 is painted with the alpha byte on Windows, so a
             // transparent PNG would show as holes instead of the picture.
-            composite_bgra(rgb->data[0], rgb->linesize[0], output_width, output_height);
-        } else {
-            // RGB PNGs have no alpha plane. swscale's BGRA output can leave
-            // that byte at 0, and Windows then paints the whole picture gone.
-            for (int y = 0; y < output_height; ++y) {
-                auto* row = rgb->data[0]
-                    + static_cast<std::size_t>(y) * static_cast<std::size_t>(rgb->linesize[0]);
-                for (int x = 0; x < output_width; ++x) {
-                    row[static_cast<std::size_t>(x) * 4U + 3U] = 255;
-                }
-            }
+            composite_bgra(image.bits(), image.bytesPerLine(), output_width, output_height);
         }
-        QImage image(
-            rgb->data[0], output_width, output_height,
-            rgb->linesize[0], QImage::Format_RGB32);
-        return image.copy();
+        // swscale's BGRA conversion supplies opaque alpha for non-alpha input;
+        // do not walk every video pixel again just to write the same byte.
+        return image;
     }
 
     // The player tells the decoder the surface size so sws converts straight
@@ -1025,6 +1016,14 @@ public:
     }
 
     void append_audio(const AVFrame* decoded) {
+        const auto pts = decoded->best_effort_timestamp != AV_NOPTS_VALUE
+            ? decoded->best_effort_timestamp : decoded->pts;
+        auto start = pts != AV_NOPTS_VALUE
+            ? av_rescale_q(pts, audio_time_base_, AVRational{1, audio_sample_rate_})
+                - av_rescale_q(timeline_start_us_, AVRational{1, AV_TIME_BASE},
+                    AVRational{1, audio_sample_rate_})
+                - swr_get_delay(swr_.get(), audio_sample_rate_)
+            : audio_end_frames_;
         std::uint8_t* output[1] = {nullptr};
         int out_linesize = 0;
         const int out_samples = av_rescale_rnd(
@@ -1038,31 +1037,55 @@ public:
             swr_.get(), output, out_samples,
             const_cast<const std::uint8_t**>(decoded->extended_data),
             decoded->nb_samples);
+        // A backward keyframe seek must still decode references, but its old
+        // audio must not be relabelled as the requested position. Trim in
+        // sample frames (not rounded milliseconds), retaining the packet tail.
+        // Millisecond container time bases round PCM boundaries. Ignore that
+        // sub-millisecond jitter after the first retained frame, not genuine
+        // stream offsets or the exact boundary of a new seek.
+        if (audio_timeline_established_
+            && std::abs(start - audio_end_frames_) <= audio_sample_rate_ / 1000) {
+            start = audio_end_frames_;
+        }
+        const auto skip = std::clamp<std::int64_t>(audio_end_frames_ - start,
+            0, std::max(0, converted));
         const auto sample_count = static_cast<std::size_t>(
-            std::max(0, converted) * audio_channels_);
-        const std::size_t room =
-            kMaxAudioSamples > audio_samples_.size()
-            ? kMaxAudioSamples - audio_samples_.size()
-            : 0U;
-        const std::size_t take = std::min(sample_count, room);
-        if (take > 0U) {
-            const auto* samples = reinterpret_cast<const std::int16_t*>(output[0]);
-            audio_samples_.insert(audio_samples_.end(), samples, samples + take);
+            (std::max(0, converted) - skip) * audio_channels_);
+        if (sample_count > 0U) {
+            const auto* samples = reinterpret_cast<const std::int16_t*>(output[0])
+                + skip * audio_channels_;
+            audio_blocks_.push_back({start + skip,
+                std::vector<std::int16_t>(samples, samples + sample_count)});
+            resident_audio_samples_ += sample_count;
+            audio_end_frames_ = start + converted;
+            audio_timeline_established_ = true;
         }
         av_freep(output);
     }
 
     std::unique_ptr<FormatHandle> handle_;
     int video_stream_{-1};
+    bool demux_eof_{false};
+    std::int64_t timeline_start_us_{0};
     int audio_stream_{-1};
     AVRational audio_time_base_{1, 1000};
     std::int64_t last_audio_pts_ms_{0};
+    std::int64_t audio_trim_before_{0}; // output sample frames; exact seek boundary
     AVRational video_time_base_{0, 1};
     AvCodecPtr video_codec_;
     AvCodecPtr audio_codec_;
     SwsPtr scaler_;
     SwrPtr swr_;
-    std::vector<std::int16_t> audio_samples_;
+    struct AudioBlock {
+        std::int64_t start;
+        std::vector<std::int16_t> samples;
+    };
+    std::deque<AudioBlock> audio_blocks_;
+    std::size_t resident_audio_samples_{0};
+    AvPacketPtr pending_packet_;
+    std::int64_t audio_cursor_frames_{0};
+    std::int64_t audio_end_frames_{0};
+    bool audio_timeline_established_{false};
     std::int64_t duration_ms_{0};
     int video_width_{0};
     int video_height_{0};
@@ -1122,14 +1145,16 @@ int MediaDecoder::seek_to(const std::int64_t ms) {
     impl_->seek_to(ms);
     return impl_->last_seek_status_;
 }
-bool MediaDecoder::decode_next_video_frame(DecodedFrame* frame) {
+DecodeStep MediaDecoder::decode_next_video_frame(DecodedFrame* frame) {
     return impl_->decode_next_video_frame(frame);
 }
+std::size_t MediaDecoder::resident_audio_samples() const { return impl_->resident_audio_samples(); }
+std::size_t MediaDecoder::buffered_audio_samples() const { return impl_->buffered_audio_samples(); }
 bool MediaDecoder::pump_audio(const int min_samples, std::int64_t* pts_ms) {
     return impl_->pump_audio(min_samples, pts_ms);
 }
-std::vector<std::int16_t> MediaDecoder::take_audio_samples() {
-    return impl_->take_audio_samples();
+std::vector<std::int16_t> MediaDecoder::take_audio_samples(const std::size_t max_samples) {
+    return impl_->take_audio_samples(max_samples);
 }
 
 void MediaDecoder::set_stream_cache_bytes(const std::size_t bytes) {
