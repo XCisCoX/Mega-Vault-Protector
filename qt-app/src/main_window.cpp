@@ -5,6 +5,7 @@
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 
+#include "videovault/app/caps_lock.hpp"
 #include "videovault/app/icons.hpp"
 #include "videovault/app/music_window.hpp"
 #include "videovault/app/soundcloud_page.hpp"
@@ -2406,7 +2407,9 @@ QWidget* MainWindow::buildSetupPage() {
     setupConfirmation_->setEchoMode(QLineEdit::Password);
     setupConfirmation_->setPlaceholderText(QStringLiteral("Confirm password"));
     layout->addWidget(setupPassword_);
+    addCapsLockHint(setupPassword_, layout);
     layout->addWidget(setupConfirmation_);
+    addCapsLockHint(setupConfirmation_, layout);
 
     securityProfile_ = new QComboBox(card);
     securityProfile_->addItem(QStringLiteral("Balanced — 256 MiB, 3 iterations"));
@@ -2494,6 +2497,7 @@ QWidget* MainWindow::buildLoginPage() {
     loginPassword_->setEchoMode(QLineEdit::Password);
     loginPassword_->setPlaceholderText(QStringLiteral("Password"));
     layout->addWidget(loginPassword_);
+    addCapsLockHint(loginPassword_, layout);
     // Every auth field keeps a font-derived floor. A squeezed card must scroll
     // (placeCard puts the card in a scroll area) instead of compressing a field
     // below the height its border, padding and glyphs need.
@@ -5476,6 +5480,7 @@ PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
     password->setEchoMode(QLineEdit::Password);
     password->setPlaceholderText(QStringLiteral("Package password"));
     dialog.body()->addWidget(password);
+    addCapsLockHint(password, dialog.body());
     QLineEdit* confirm = nullptr;
     QCheckBox* compress = nullptr;
     if (exporting) {
@@ -5483,6 +5488,7 @@ PackagePassword askPackagePassword(QWidget* parent, const bool exporting) {
         confirm->setEchoMode(QLineEdit::Password);
         confirm->setPlaceholderText(QStringLiteral("Confirm password"));
         dialog.body()->addWidget(confirm);
+        addCapsLockHint(confirm, dialog.body());
         compress = new QCheckBox(QStringLiteral("Compress the files"));
         compress->setChecked(true);
         dialog.body()->addWidget(compress);
@@ -8710,8 +8716,11 @@ void MainWindow::beginChangePassword() {
     profile->addItem(QStringLiteral("Balanced — 256 MiB, 3 iterations"));
     profile->addItem(QStringLiteral("High security — 512 MiB, 4 iterations"));
     dialog.body()->addWidget(current);
+    addCapsLockHint(current, dialog.body());
     dialog.body()->addWidget(next);
+    addCapsLockHint(next, dialog.body());
     dialog.body()->addWidget(confirmation);
+    addCapsLockHint(confirmation, dialog.body());
     dialog.body()->addWidget(profile);
     dialog.addButton(QStringLiteral("Cancel"), 0, false, QStringLiteral("x"));
     dialog.addButton(QStringLiteral("Change"), 1, true);
