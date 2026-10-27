@@ -1,4 +1,5 @@
 #include "videovault/app/icons.hpp"
+#include "videovault/app/caps_lock.hpp"
 #include "videovault/app/sync_page.hpp"
 
 #include "videovault/app/glass.hpp"
@@ -326,6 +327,7 @@ SyncPage::SyncPage(SyncEngine* engine, std::shared_ptr<core::Vault> vault, QWidg
     cardLayout->addWidget(url_);
     cardLayout->addWidget(email_);
     cardLayout->addWidget(password_);
+    addCapsLockHint(password_, cardLayout);
     cardLayout->addSpacing(4);
     cardLayout->addWidget(signInButton_);
     cardLayout->addWidget(signInStatus_);

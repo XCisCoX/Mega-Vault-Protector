@@ -1,3 +1,4 @@
+#include "videovault/app/caps_lock.hpp"
 #include "videovault/app/in_window_sheet.hpp"
 
 #include "videovault/app/icons.hpp"
@@ -185,6 +186,10 @@ QLineEdit* InWindowSheet::addTextEntry(
     entry_->setText(initial);
     entry_->setPlaceholderText(placeholder);
     body_->addWidget(entry_);
+    // A masked field is a password: warn about Caps Lock under it, in every sheet that asks.
+    if (entry_->echoMode() == QLineEdit::Password) {
+        addCapsLockHint(entry_, body_);
+    }
     connect(entry_, &QLineEdit::returnPressed, this, [this] { finish(1); });
     return entry_;
 }

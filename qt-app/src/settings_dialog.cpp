@@ -1,5 +1,6 @@
 #include "videovault/app/settings_dialog.hpp"
 
+#include "videovault/app/caps_lock.hpp"
 #include "videovault/app/glass.hpp"
 
 #include "videovault/app/secure_input.hpp"
@@ -564,6 +565,7 @@ SettingsDialog::SettingsDialog(const std::shared_ptr<core::Vault>& vault, QWidge
         auto* username = field("Username (optional)", "proxyUsername", entry.username);
         auto* password = field("Password (optional)", "proxyPassword", entry.password);
         password->setEchoMode(QLineEdit::Password);
+        addCapsLockHint(password);        // uses the field's own column layout
         auto* cancelButton = sheet.addButton(QStringLiteral("Cancel"), 0, false);
         cancelButton->setObjectName(QStringLiteral("cancelProxy"));
         auto* saveButton = sheet.addButton(QStringLiteral("Save"), 1, true, QStringLiteral("check"));

@@ -62,6 +62,7 @@ set(MVP_APP_SOURCES
     src/player_window.cpp
     ${MVP_APP_WINRT_SOURCES}
     ${MVP_APP_FALLBACK_SOURCES}
+    src/caps_lock.cpp
     src/in_window_sheet.cpp
     src/record_document.cpp
     src/record_window.cpp
@@ -140,6 +141,7 @@ endif()
 add_library(MegaVaultSync STATIC
     src/sync_state.cpp src/sync_client.cpp src/sync_engine.cpp src/sync_page.cpp src/icons.cpp
     src/secure_input.cpp
+    src/caps_lock.cpp
     include/videovault/app/sync_state.hpp
     include/videovault/app/sync_client.hpp
     include/videovault/app/sync_engine.hpp
@@ -483,6 +485,14 @@ if(MVP_BUILD_TESTS)
     add_test(NAME library_chrome COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(library_chrome PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MVP_LIBRARY_CHROME_TEST=1" TIMEOUT 90)
+    add_executable(VideoVaultCapsLockTests tests/caps_lock.cpp src/caps_lock.cpp)
+    target_include_directories(VideoVaultCapsLockTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(VideoVaultCapsLockTests PRIVATE Qt5::Widgets)
+    target_compile_features(VideoVaultCapsLockTests PRIVATE cxx_std_20)
+    add_test(NAME caps_lock COMMAND VideoVaultCapsLockTests)
+    set_tests_properties(caps_lock PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    mvp_copy_runtime_dlls(VideoVaultCapsLockTests)
+
     add_test(NAME gallery_performance COMMAND VideoVaultGalleryPerformanceTests)
     set_tests_properties(gallery_performance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
     add_test(NAME vault_creation_ui COMMAND VideoVaultGalleryPerformanceTests)
@@ -571,6 +581,8 @@ if(MVP_BUILD_TESTS)
     add_executable(VideoVaultSettingsTests tests/settings_page.cpp
         src/settings_dialog.cpp src/in_window_sheet.cpp src/theme.cpp src/icons.cpp
         src/sync_state.cpp src/secure_input.cpp src/proxy_settings.cpp src/record_document.cpp
+        src/caps_lock.cpp
+        src/sync_state.cpp src/proxy_settings.cpp src/record_document.cpp
         resources/icons.qrc resources/resources.qrc
         include/videovault/app/settings_dialog.hpp include/videovault/app/in_window_sheet.hpp
         include/videovault/app/record_document.hpp include/videovault/app/sync_state.hpp)
